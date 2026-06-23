@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.env
+accounts.json
+apps/*/.dev.vars
+supabase/.branches/
+supabase/.temp/
+supabase/snippets/
+*.log
+
+apps/*/dist/
+apps/*/.wrangler/

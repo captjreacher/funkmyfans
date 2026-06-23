@@ -1,0 +1,8 @@
+name = "of-pilot-creator-cockpit"
+main = "worker.ts"
+compatibility_date = "2026-06-18"
+assets = { directory = "./dist", binding = "ASSETS" }
+
+[vars]
+SUPABASE_URL = "http://127.0.0.1:54321"
+BETTERFANS_BASE_URL = "https://platform.ofmanager.com"

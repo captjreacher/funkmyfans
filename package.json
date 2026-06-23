@@ -1,0 +1,23 @@
+{
+  "name": "of-pilot",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+    "scripts": {
+        "dev:creator-cockpit": "npm --workspace @of-pilot/creator-cockpit run dev",
+        "events:betterfans": "tsx scripts/betterfans-event-stream.ts",
+        "build": "npm run build --workspaces",
+        "typecheck": "npm run typecheck --workspaces"
+    },
+  "dependencies": {
+    "@betterfans/link-sdk": "file:sdk/betterfans-link-sdk-latest.tgz",
+    "dotenv": "^17.4.2"
+  },
+  "devDependencies": {
+    "tsx": "^4.22.4",
+    "typescript": "^5.9.3"
+  }
+}
