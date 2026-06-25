@@ -1,5 +1,5 @@
-import type { OfChat, OfEvent, OfSubscriber, TaskPriority, TaskStatus } from "@of-pilot/of-types";
-import { summarizeEventType } from "@of-pilot/of-types";
+import type { OfChat, OfEvent, OfSubscriber, TaskPriority, TaskStatus } from "@funkmyfans/of-types";
+import { summarizeEventType } from "@funkmyfans/of-types";
 
 export interface TaskRuleConfig {
   unreadChatThresholdHours: number;

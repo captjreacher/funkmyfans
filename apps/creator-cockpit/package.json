@@ -1,5 +1,5 @@
 {
-  "name": "@of-pilot/creator-cockpit",
+  "name": "@funkmyfans/creator-cockpit",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -11,9 +11,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@of-pilot/betterfans-client": "*",
-    "@of-pilot/of-rules-engine": "*",
-    "@of-pilot/of-types": "*",
+    "@funkmyfans/betterfans-client": "*",
+    "@funkmyfans/of-rules-engine": "*",
+    "@funkmyfans/of-types": "*",
     "@supabase/supabase-js": "^2.86.0",
     "lucide-react": "^0.561.0",
     "react": "^19.2.3",

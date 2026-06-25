@@ -1,5 +1,5 @@
 {
-  "name": "of-pilot",
+  "name": "funkmyfans",
   "private": true,
   "type": "module",
   "workspaces": [
@@ -7,7 +7,7 @@
     "packages/*"
   ],
     "scripts": {
-        "dev:creator-cockpit": "npm --workspace @of-pilot/creator-cockpit run dev",
+        "dev:creator-cockpit": "npm --workspace @funkmyfans/creator-cockpit run dev",
         "events:betterfans": "tsx scripts/betterfans-event-stream.ts",
         "build": "npm run build --workspaces",
         "typecheck": "npm run typecheck --workspaces"

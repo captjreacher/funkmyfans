@@ -1,7 +1,7 @@
 import { Plug, Power, PowerOff, RefreshCw } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import type { OfCreator, OfEvent } from "@of-pilot/of-types";
-import { summarizeEventType } from "@of-pilot/of-types";
+import type { OfCreator, OfEvent } from "@funkmyfans/of-types";
+import { summarizeEventType } from "@funkmyfans/of-types";
 import { connectEventStream, disconnectEventStream, fetchEvents, fetchEventStreamStatus, type EventStreamStatus } from "../lib/api";
 
 export function Events({ creators, initialEvents }: { creators: OfCreator[]; initialEvents: OfEvent[] }) {

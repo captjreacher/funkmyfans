@@ -12,7 +12,7 @@ import type {
   OfSyncRun,
   OfTask,
   SyncType
-} from "@of-pilot/of-types";
+} from "@funkmyfans/of-types";
 
 export interface EventStreamStatus {
   connectionStatus: string;

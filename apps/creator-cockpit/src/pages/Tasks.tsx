@@ -1,6 +1,6 @@
 import { CheckCircle2, Clock3, ListChecks, Play, XCircle } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import type { OfCreator, OfTask, TaskStatus } from "@of-pilot/of-types";
+import type { OfCreator, OfTask, TaskStatus } from "@funkmyfans/of-types";
 import { PriorityBadge } from "../components/PriorityBadge";
 import { fetchTasks, updateTask } from "../lib/api";
 

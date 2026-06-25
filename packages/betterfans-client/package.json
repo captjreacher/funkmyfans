@@ -1,5 +1,5 @@
 {
-  "name": "@of-pilot/betterfans-client",
+  "name": "@funkmyfans/betterfans-client",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "@betterfans/link-sdk": "file:../../sdk/betterfans-link-sdk-latest.tgz",
-    "@of-pilot/of-types": "*"
+    "@funkmyfans/of-types": "*"
   },
   "devDependencies": {
     "typescript": "^5.9.3"

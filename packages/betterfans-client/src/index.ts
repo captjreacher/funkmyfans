@@ -1,5 +1,5 @@
 import { OfApiClient, OfWsClient } from "@betterfans/link-sdk";
-import type { CreatorOperationalData } from "@of-pilot/of-types";
+import type { CreatorOperationalData } from "@funkmyfans/of-types";
 
 type JsonRecord = Record<string, unknown>;
 

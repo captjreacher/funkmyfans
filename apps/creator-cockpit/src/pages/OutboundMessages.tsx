@@ -1,5 +1,5 @@
 import { AlertCircle, CheckCircle2, Clock3, Send } from "lucide-react";
-import type { OfOutboundMessage } from "@of-pilot/of-types";
+import type { OfOutboundMessage } from "@funkmyfans/of-types";
 import { useEffect, useMemo, useState } from "react";
 import { fetchOutboundMessages, updateOutboundMessage } from "../lib/api";
 

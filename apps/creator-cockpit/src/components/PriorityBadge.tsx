@@ -1,4 +1,4 @@
-import type { TaskPriority } from "@of-pilot/of-types";
+import type { TaskPriority } from "@funkmyfans/of-types";
 
 const styles: Record<TaskPriority, string> = {
   low: "bg-stone-100 text-stone-700",

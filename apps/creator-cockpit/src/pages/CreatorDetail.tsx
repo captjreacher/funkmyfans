@@ -1,7 +1,7 @@
 import { CheckCircle2, MessageSquare, Play, RefreshCw, ShieldAlert, Sparkles, UserRoundCheck, XCircle } from "lucide-react";
 import { useEffect, useState } from "react";
-import type { OfAutomationRun, OfMessageScript, SyncType } from "@of-pilot/of-types";
-import { summarizeEventType } from "@of-pilot/of-types";
+import type { OfAutomationRun, OfMessageScript, SyncType } from "@funkmyfans/of-types";
+import { summarizeEventType } from "@funkmyfans/of-types";
 import { MetricTile } from "../components/MetricTile";
 import { PriorityBadge } from "../components/PriorityBadge";
 import {

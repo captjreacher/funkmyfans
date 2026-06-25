@@ -4,10 +4,10 @@ import {
   normalizeCreatorProfile,
   normalizeCreatorSnapshot,
   normalizeSubscribers
-} from "@of-pilot/betterfans-client";
-import { generateTaskDrafts, type TaskRuleDraft } from "@of-pilot/of-rules-engine";
-import type { MessageScriptActionMode, MessageScriptTemplate, OfMessageScriptStep, ScriptStepTemplate, SyncType } from "@of-pilot/of-types";
-import { summarizeEventType } from "@of-pilot/of-types";
+} from "@funkmyfans/betterfans-client";
+import { generateTaskDrafts, type TaskRuleDraft } from "@funkmyfans/of-rules-engine";
+import type { MessageScriptActionMode, MessageScriptTemplate, OfMessageScriptStep, ScriptStepTemplate, SyncType } from "@funkmyfans/of-types";
+import { summarizeEventType } from "@funkmyfans/of-types";
 import { createClient } from "@supabase/supabase-js";
 
 interface Env {
