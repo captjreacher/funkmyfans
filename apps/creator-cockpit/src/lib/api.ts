@@ -8,7 +8,10 @@ import type {
   OfMessageScript,
   OfOutboundMessage,
   OfRecommendation,
+  OfContextEvent,
+  OfRelationshipTimelineItem,
   OfSubscriber,
+  OfSubscriberRelationship,
   OfSyncRun,
   OfTask,
   SyncType
@@ -27,6 +30,8 @@ export interface DashboardData {
   tasks: OfTask[];
   events: OfEvent[];
   syncRuns: OfSyncRun[];
+  relationships: OfSubscriberRelationship[];
+  contextEvents: OfContextEvent[];
 }
 
 export interface CreatorDetailData {
@@ -38,6 +43,9 @@ export interface CreatorDetailData {
   recommendations: OfRecommendation[];
   events: OfEvent[];
   syncRuns: OfSyncRun[];
+  relationships: OfSubscriberRelationship[];
+  relationshipTimeline: OfRelationshipTimelineItem[];
+  contextEvents: OfContextEvent[];
 }
 
 export interface AutomationRunSummary {

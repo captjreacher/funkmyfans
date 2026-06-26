@@ -1,6 +1,6 @@
-import { CheckCircle2, MessageSquare, Play, RefreshCw, ShieldAlert, Sparkles, UserRoundCheck, XCircle } from "lucide-react";
+import { CheckCircle2, HeartPulse, MessageSquare, Play, RefreshCw, ShieldAlert, Sparkles, TrendingUp, UserRoundCheck, XCircle } from "lucide-react";
 import { useEffect, useState } from "react";
-import type { OfAutomationRun, OfMessageScript, SyncType } from "@funkmyfans/of-types";
+import type { OfAutomationRun, OfMessageScript, OfSubscriberRelationship, SyncType } from "@funkmyfans/of-types";
 import { summarizeEventType } from "@funkmyfans/of-types";
 import { MetricTile } from "../components/MetricTile";
 import { PriorityBadge } from "../components/PriorityBadge";
@@ -18,7 +18,7 @@ import {
   type TaskGenerationSummary
 } from "../lib/api";
 
-const tabs = ["Profile", "Subscribers", "Chats", "Tasks", "Scripts", "Timeline"] as const;
+const tabs = ["Profile", "Relationships", "Subscribers", "Chats", "Tasks", "Scripts", "Timeline"] as const;
 type Tab = (typeof tabs)[number];
 const syncButtons: Array<{ type: SyncType; label: string }> = [
   { type: "profile", label: "Sync Creator" },
@@ -203,8 +203,8 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
       <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <MetricTile label="Subscribers" value={String(latest?.subscribers_count ?? 0)} trend={`${latest?.active_subscribers ?? 0} active`} icon={UserRoundCheck} />
         <MetricTile label="Revenue" value={`$${Number(latest?.revenue ?? 0).toLocaleString()}`} trend="latest snapshot" icon={Sparkles} />
-        <MetricTile label="Engagement" value={`${latest?.chat_count ?? 0} chats`} trend={`${latest?.priority_chat_count ?? 0} priority`} icon={MessageSquare} />
-        <MetricTile label="Risk" value={riskLabel(latest?.expired_subscribers ?? 0)} trend={`${latest?.expired_subscribers ?? 0} expired`} icon={ShieldAlert} />
+        <MetricTile label="VIPs" value={String(data.relationships.filter((item) => item.relationship_state === "vip" || item.vip_score >= 75).length)} trend={`${averageScore(data.relationships, "vip_score")} avg score`} icon={TrendingUp} />
+        <MetricTile label="Risk" value={riskLabel(data.relationships, latest?.expired_subscribers ?? 0)} trend={`${data.relationships.filter((item) => item.churn_risk >= 70).length} at risk`} icon={ShieldAlert} />
       </section>
 
       <div className="flex gap-1 overflow-x-auto border-b border-stone-200">
@@ -221,6 +221,7 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
       </div>
 
       {tab === "Profile" ? <ProfilePanel data={data} /> : null}
+      {tab === "Relationships" ? <RelationshipsPanel data={data} /> : null}
       {tab === "Subscribers" ? <SubscribersPanel data={data} /> : null}
       {tab === "Chats" ? <ChatsPanel data={data} /> : null}
       {tab === "Tasks" ? <TasksPanel data={data} onStatus={handleTaskStatus} /> : null}
@@ -236,6 +237,88 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
       ) : null}
       {tab === "Timeline" ? <TimelinePanel data={data} /> : null}
     </main>
+  );
+}
+
+function RelationshipsPanel({ data }: { data: CreatorDetailData }) {
+  const relationships = [...data.relationships].sort((a, b) => b.relationship_score - a.relationship_score);
+  const activeContextEvents = data.contextEvents.filter((event) => event.delivery_status === "pending");
+
+  return (
+    <section className="space-y-4">
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <RelationshipStat label="Average Relationship" value={`${averageScore(relationships, "relationship_score")}/100`} />
+        <RelationshipStat label="Engagement" value={`${averageScore(relationships, "engagement_score")}/100`} />
+        <RelationshipStat label="Churn Risk" value={`${averageScore(relationships, "churn_risk")}/100`} />
+        <RelationshipStat label="Context Hooks" value={String(activeContextEvents.length)} />
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-[1.3fr_0.7fr]">
+        <div className="overflow-hidden rounded-md border border-stone-200 bg-white">
+          <table className="w-full min-w-[980px] text-left text-sm">
+            <thead className="bg-stone-100 text-stone-600">
+              <tr>
+                {["Subscriber", "State", "LTV", "Scores", "Last Interaction", "Summary", "Next Action"].map((header) => (
+                  <th key={header} className="px-4 py-3 font-semibold">{header}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-stone-100">
+              {relationships.map((relationship) => {
+                const summary = relationshipSummary(relationship);
+                return (
+                  <tr key={relationship.id} className="align-top">
+                    <td className="px-4 py-3">
+                      <div className="font-semibold text-stone-950">{relationship.display_name || relationship.username || relationship.betterfans_subscriber_id}</div>
+                      <div className="text-xs text-stone-500">{relationship.country || relationship.current_subscription_status || "unknown"}</div>
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className={`inline-flex rounded-md px-2 py-1 text-xs font-semibold ${stateTone(relationship.relationship_state)}`}>
+                        {relationship.relationship_state.replaceAll("_", " ")}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 text-stone-700">
+                      <div>{money(relationship.lifetime_spend)}</div>
+                      <div className="text-xs text-stone-500">{relationship.purchase_count} purchases / {relationship.revenue_trend}</div>
+                    </td>
+                    <td className="px-4 py-3 text-stone-700">
+                      <ScoreLine label="Rel" value={relationship.relationship_score} />
+                      <ScoreLine label="VIP" value={relationship.vip_score} />
+                      <ScoreLine label="Risk" value={relationship.churn_risk} />
+                    </td>
+                    <td className="px-4 py-3 text-stone-700">
+                      <div>{date(relationship.last_subscriber_message_at ?? relationship.last_creator_response_at ?? relationship.last_seen_at)}</div>
+                      <div className="text-xs text-stone-500">{relationship.conversation_count} conversations</div>
+                    </td>
+                    <td className="max-w-sm px-4 py-3 text-stone-700">{summary}</td>
+                    <td className="px-4 py-3 text-stone-700">{relationship.recommended_next_action ?? "Monitor relationship"}</td>
+                  </tr>
+                );
+              })}
+              {!relationships.length ? <tr><td colSpan={7} className="px-4 py-6 text-stone-500">No relationship profiles have been built yet.</td></tr> : null}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="rounded-md border border-stone-200 bg-white">
+          <div className="border-b border-stone-200 px-4 py-3">
+            <h2 className="flex items-center gap-2 text-base font-semibold text-stone-950">
+              <HeartPulse className="h-4 w-4 text-teal-700" aria-hidden="true" />
+              MGRNZ Context Queue
+            </h2>
+          </div>
+          <div className="divide-y divide-stone-100">
+            {data.contextEvents.slice(0, 8).map((event) => (
+              <div key={event.id} className="px-4 py-3">
+                <div className="font-medium text-stone-950">{event.event_type.replaceAll("_", " ")}</div>
+                <div className="mt-1 text-xs text-stone-500">{event.delivery_status} / {date(event.emitted_at)}</div>
+              </div>
+            ))}
+            {!data.contextEvents.length ? <div className="p-4 text-sm text-stone-500">No context events emitted yet.</div> : null}
+          </div>
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -435,6 +518,11 @@ function TaskGroup({ title, tasks, onStatus }: { title: string; tasks: CreatorDe
 }
 
 function TimelinePanel({ data }: { data: CreatorDetailData }) {
+  const relationshipEvents = data.relationshipTimeline.map((item) => [
+    `relationship.${item.timeline_type}`,
+    `${item.title}${item.detail ? ` / ${item.detail}` : ""}${item.amount ? ` / ${money(item.amount)}` : ""}`,
+    date(item.occurred_at)
+  ]);
   const syncEvents = data.syncRuns.map((run) => [
     `sync.${run.sync_type}`,
     `${run.status} / ${run.records_processed} records${run.error_message ? ` / ${run.error_message}` : ""}`,
@@ -451,7 +539,7 @@ function TimelinePanel({ data }: { data: CreatorDetailData }) {
     date(snapshot.created_at)
   ]);
 
-  return <Table rows={[...syncEvents, ...betterFansEvents, ...systemEvents]} headers={["Event", "Detail", "Time"]} />;
+  return <Table rows={[...relationshipEvents, ...syncEvents, ...betterFansEvents, ...systemEvents]} headers={["Event", "Detail", "Time"]} />;
 }
 
 function Field({ label, value }: { label: string; value: string }) {
@@ -476,6 +564,27 @@ function SyncStat({ label, value, status }: { label: string; value: string; stat
   );
 }
 
+function RelationshipStat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-md border border-stone-200 bg-white p-4">
+      <div className="text-sm font-medium text-stone-500">{label}</div>
+      <div className="mt-1 text-2xl font-semibold text-stone-950">{value}</div>
+    </div>
+  );
+}
+
+function ScoreLine({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="flex items-center gap-2">
+      <span className="w-8 text-xs font-medium text-stone-500">{label}</span>
+      <span className="h-1.5 w-20 rounded-full bg-stone-200">
+        <span className="block h-1.5 rounded-full bg-teal-700" style={{ width: `${Math.max(0, Math.min(100, value))}%` }} />
+      </span>
+      <span className="text-xs tabular-nums text-stone-600">{value}</span>
+    </div>
+  );
+}
+
 function Table({ headers, rows }: { headers: string[]; rows: string[][] }) {
   return (
     <div className="overflow-hidden rounded-md border border-stone-200 bg-white">
@@ -491,7 +600,9 @@ function Table({ headers, rows }: { headers: string[]; rows: string[][] }) {
   );
 }
 
-function riskLabel(expired: number) {
+function riskLabel(relationships: OfSubscriberRelationship[], expired: number) {
+  if (relationships.some((item) => item.churn_risk >= 70)) return "High";
+  if (relationships.some((item) => item.churn_risk >= 45)) return "Watch";
   if (expired > 100) return "High";
   if (expired > 25) return "Watch";
   return "Stable";
@@ -499,6 +610,24 @@ function riskLabel(expired: number) {
 
 function money(value: number | null) {
   return value == null ? "unknown" : `$${value.toLocaleString()}`;
+}
+
+function averageScore(relationships: OfSubscriberRelationship[], key: "relationship_score" | "vip_score" | "engagement_score" | "churn_risk") {
+  if (!relationships.length) return 0;
+  return Math.round(relationships.reduce((sum, relationship) => sum + relationship[key], 0) / relationships.length);
+}
+
+function relationshipSummary(relationship: OfSubscriberRelationship) {
+  const summaries = relationship.of_relationship_summaries;
+  const summary = Array.isArray(summaries) ? summaries[0] : summaries;
+  return summary?.operational_summary || "No relationship summary yet.";
+}
+
+function stateTone(state: string) {
+  if (state === "vip" || state === "reactivated") return "bg-emerald-50 text-emerald-800";
+  if (state === "at_risk" || state === "expired") return "bg-rose-50 text-rose-800";
+  if (state === "cooling") return "bg-amber-50 text-amber-900";
+  return "bg-teal-50 text-teal-800";
 }
 
 function date(value: string | null | undefined) {

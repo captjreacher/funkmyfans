@@ -13,6 +13,28 @@ export type MessageScriptStepType = "message" | "follow_up" | "question" | "bran
 export type AutomationRunStatus = "running" | "completed" | "failed" | "skipped";
 export type OutboundMessageStatus = "pending_approval" | "queued" | "sending" | "sent" | "failed" | "rejected";
 export type OutboundApprovalStatus = "not_required" | "pending" | "approved" | "rejected";
+export type RelationshipState = "prospect" | "new_subscriber" | "welcomed" | "engaged" | "vip" | "cooling" | "at_risk" | "expired" | "reactivated";
+export type RevenueTrend = "unknown" | "new" | "rising" | "steady" | "cooling" | "declining";
+export type RelationshipTimelineType =
+  | "subscription"
+  | "renewal"
+  | "ppv_purchase"
+  | "tip"
+  | "custom_purchase"
+  | "message"
+  | "ai_action"
+  | "operator_action"
+  | "automation"
+  | "state_change"
+  | "sync"
+  | "context_event";
+export type ContextEventType =
+  | "vip_detected"
+  | "churn_risk_changed"
+  | "revenue_milestone"
+  | "coaching_opportunity"
+  | "subscriber_reactivated"
+  | "ai_relationship_summary_updated";
 
 export interface OfCreator {
   id: string;
@@ -62,6 +84,106 @@ export interface OfSubscriber {
   last_seen_at: string | null;
   raw_payload: Record<string, unknown>;
   last_sync_at: string;
+}
+
+export interface OfSubscriberRelationship {
+  id: string;
+  creator_id: string;
+  subscriber_id: string;
+  betterfans_subscriber_id: string;
+  username: string | null;
+  display_name: string | null;
+  avatar_url: string | null;
+  country: string | null;
+  current_subscription_status: string | null;
+  subscription_tier: string | null;
+  first_seen_at: string;
+  last_seen_at: string | null;
+  lifetime_spend: number;
+  subscription_spend: number;
+  ppv_purchases: number;
+  tips: number;
+  customs_purchased: number;
+  purchase_count: number;
+  average_order_value: number;
+  last_purchase_at: string | null;
+  revenue_trend: RevenueTrend;
+  relationship_state: RelationshipState;
+  relationship_stage: string;
+  relationship_score: number;
+  vip_score: number;
+  churn_risk: number;
+  engagement_score: number;
+  conversation_count: number;
+  last_creator_response_at: string | null;
+  last_subscriber_message_at: string | null;
+  average_reply_delay_seconds: number | null;
+  active_script_id: string | null;
+  current_workflow: string | null;
+  pending_actions: number;
+  pending_approvals: number;
+  automation_paused: boolean;
+  human_takeover: boolean;
+  auto_send_enabled: boolean;
+  recommended_next_action: string | null;
+  last_event_id: string | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+  of_relationship_summaries?: OfRelationshipSummary | OfRelationshipSummary[] | null;
+}
+
+export interface OfRelationshipSummary {
+  id: string;
+  creator_id: string;
+  subscriber_id: string;
+  relationship_id: string;
+  operational_summary: string;
+  personality: string | null;
+  interests: unknown[];
+  likes: unknown[];
+  dislikes: unknown[];
+  requests: unknown[];
+  kinks: unknown[];
+  conversation_tone: string | null;
+  current_topics: unknown[];
+  important_reminders: unknown[];
+  summary_version: number;
+  model: string | null;
+  source_event_id: string | null;
+  refreshed_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface OfRelationshipTimelineItem {
+  id: string;
+  creator_id: string;
+  subscriber_id: string | null;
+  relationship_id: string | null;
+  source_event_id: string | null;
+  timeline_type: RelationshipTimelineType;
+  title: string;
+  detail: string | null;
+  actor: "subscriber" | "creator" | "operator" | "automation" | "ai" | "system";
+  amount: number | null;
+  occurred_at: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface OfContextEvent {
+  id: string;
+  creator_id: string;
+  subscriber_id: string | null;
+  relationship_id: string | null;
+  source_event_id: string | null;
+  event_type: ContextEventType;
+  payload: Record<string, unknown>;
+  delivery_status: "pending" | "delivered" | "failed" | "skipped";
+  emitted_at: string;
+  delivered_at: string | null;
+  error_message: string | null;
 }
 
 export interface OfChat {

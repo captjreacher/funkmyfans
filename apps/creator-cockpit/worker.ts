@@ -30,6 +30,7 @@ type AutomationActionResult = "task_created" | "draft_created" | "sent" | "faile
 interface EventActionContext {
   subscriberId: string | null;
   chatId: string | null;
+  relationshipId: string | null;
 }
 
 export default {
@@ -53,7 +54,7 @@ export default {
 async function handleApi(request: Request, env: Env, url: URL): Promise<Response> {
   const supabase = createServiceClient(env);
 if (request.method === "GET" && url.pathname === "/api/dashboard") {
-  const [creators, snapshots, tasks, events, syncRuns] = await Promise.all([
+  const [creators, snapshots, tasks, events, syncRuns, relationships, contextEvents] = await Promise.all([
     supabase.from("of_creators").select("*").order("created_at", { ascending: false }),
     supabase.from("of_creator_snapshots").select("*").order("snapshot_date", { ascending: false }).limit(30),
     supabase
@@ -62,7 +63,9 @@ if (request.method === "GET" && url.pathname === "/api/dashboard") {
       .neq("status", "done")
       .order("created_at", { ascending: false }),
     supabase.from("of_events").select("*").order("created_at", { ascending: false }).limit(20),
-    supabase.from("of_sync_runs").select("*").order("started_at", { ascending: false }).limit(20)
+    supabase.from("of_sync_runs").select("*").order("started_at", { ascending: false }).limit(20),
+    supabase.from("of_subscriber_relationships").select("*, of_relationship_summaries(*)").order("updated_at", { ascending: false }).limit(50),
+    supabase.from("of_context_events").select("*").order("emitted_at", { ascending: false }).limit(50)
   ]);
 
   assertNoError(creators.error);
@@ -70,6 +73,8 @@ if (request.method === "GET" && url.pathname === "/api/dashboard") {
   assertNoError(tasks.error);
   assertNoError(events.error);
   assertNoError(syncRuns.error);
+  assertNoError(relationships.error);
+  assertNoError(contextEvents.error);
 
   return Response.json(
     {
@@ -77,7 +82,9 @@ if (request.method === "GET" && url.pathname === "/api/dashboard") {
       snapshots: snapshots.data ?? [],
       tasks: tasks.data ?? [],
       events: events.data ?? [],
-      syncRuns: syncRuns.data ?? []
+      syncRuns: syncRuns.data ?? [],
+      relationships: relationships.data ?? [],
+      contextEvents: contextEvents.data ?? []
     },
     { headers: jsonHeaders }
   );
@@ -96,7 +103,7 @@ if (request.method === "GET" && url.pathname === "/api/dashboard") {
   const creatorMatch = url.pathname.match(/^\/api\/creators\/([^/]+)$/);
   if (request.method === "GET" && creatorMatch) {
     const creatorId = creatorMatch[1];
-    const [creator, snapshots, subscribers, chats, tasks, recommendations, events, syncRuns] = await Promise.all([
+    const [creator, snapshots, subscribers, chats, tasks, recommendations, events, syncRuns, relationships, relationshipTimeline, contextEvents] = await Promise.all([
       supabase.from("of_creators").select("*").eq("id", creatorId).single(),
       supabase.from("of_creator_snapshots").select("*").eq("creator_id", creatorId).order("created_at", { ascending: false }).limit(14),
       supabase.from("of_subscribers").select("*").eq("creator_id", creatorId).order("last_sync_at", { ascending: false }).limit(100),
@@ -104,7 +111,10 @@ if (request.method === "GET" && url.pathname === "/api/dashboard") {
       supabase.from("of_tasks").select("*").eq("creator_id", creatorId).order("created_at", { ascending: false }),
       supabase.from("of_recommendations").select("*").eq("creator_id", creatorId).order("created_at", { ascending: false }),
       supabase.from("of_events").select("*").eq("creator_id", creatorId).order("created_at", { ascending: false }).limit(100),
-      supabase.from("of_sync_runs").select("*").eq("creator_id", creatorId).order("started_at", { ascending: false }).limit(100)
+      supabase.from("of_sync_runs").select("*").eq("creator_id", creatorId).order("started_at", { ascending: false }).limit(100),
+      supabase.from("of_subscriber_relationships").select("*, of_relationship_summaries(*)").eq("creator_id", creatorId).order("updated_at", { ascending: false }).limit(100),
+      supabase.from("of_relationship_timeline").select("*").eq("creator_id", creatorId).order("occurred_at", { ascending: false }).limit(200),
+      supabase.from("of_context_events").select("*").eq("creator_id", creatorId).order("emitted_at", { ascending: false }).limit(100)
     ]);
     assertNoError(creator.error);
     assertNoError(snapshots.error);
@@ -114,6 +124,9 @@ if (request.method === "GET" && url.pathname === "/api/dashboard") {
     assertNoError(recommendations.error);
     assertNoError(events.error);
     assertNoError(syncRuns.error);
+    assertNoError(relationships.error);
+    assertNoError(relationshipTimeline.error);
+    assertNoError(contextEvents.error);
     return Response.json(
       {
         creator: creator.data,
@@ -123,7 +136,10 @@ if (request.method === "GET" && url.pathname === "/api/dashboard") {
         tasks: tasks.data ?? [],
         recommendations: recommendations.data ?? [],
         events: events.data ?? [],
-        syncRuns: syncRuns.data ?? []
+        syncRuns: syncRuns.data ?? [],
+        relationships: relationships.data ?? [],
+        relationshipTimeline: relationshipTimeline.data ?? [],
+        contextEvents: contextEvents.data ?? []
       },
       { headers: jsonHeaders }
     );
@@ -600,6 +616,7 @@ async function updateScriptStep(supabase: SupabaseClient, stepId: string, body: 
 }
 
 async function runAutomationsForEvent(supabase: SupabaseClient, env: Env, eventId: string) {
+  await applyRelationshipEvent(supabase, eventId);
   const event = await supabase.from("of_events").select("*").eq("id", eventId).single();
   assertNoError(event.error);
   if (!event.data) throw new Error("Event not found");
@@ -676,6 +693,7 @@ async function runAutomationForScript(
     actionResult = await executeMessageAction(supabase, env, script, event, run.data.id as string, fanId, actionMode);
   }
 
+  await recordAutomationTimeline(supabase, script, event, run.data.id as string, fanId, actionMode, actionResult, context);
   await completeAutomationRun(supabase, run.data.id as string, actionResult === "failed" ? "failed" : "completed", actionResult === "failed" ? "BetterFans message delivery failed" : null);
   return actionResult;
 }
@@ -786,11 +804,67 @@ async function loadEventActionContext(supabase: SupabaseClient, event: Record<st
   const chat = (chats.data ?? []).find((item) =>
     item.platform_chat_id === platformChatId || item.platform_user_id === fanId || item.fan_username === fanId
   );
+  let relationshipId: string | null = null;
+  if (subscriber?.id) {
+    const relationship = await supabase
+      .from("of_subscriber_relationships")
+      .select("id")
+      .eq("creator_id", creatorId)
+      .eq("subscriber_id", subscriber.id)
+      .limit(1);
+    assertNoError(relationship.error);
+    relationshipId = typeof relationship.data?.[0]?.id === "string" ? relationship.data[0].id : null;
+  }
 
   return {
     subscriberId: typeof subscriber?.id === "string" ? subscriber.id : null,
-    chatId: typeof chat?.id === "string" ? chat.id : null
+    chatId: typeof chat?.id === "string" ? chat.id : null,
+    relationshipId
   };
+}
+
+async function applyRelationshipEvent(supabase: SupabaseClient, eventId: string) {
+  const existing = await supabase
+    .from("of_relationship_timeline")
+    .select("id")
+    .eq("source_event_id", eventId)
+    .limit(1);
+  assertNoError(existing.error);
+  if (existing.data?.length) return;
+
+  const result = await supabase.rpc("of_apply_relationship_event", { p_event_id: eventId });
+  assertNoError(result.error);
+}
+
+async function recordAutomationTimeline(
+  supabase: SupabaseClient,
+  script: Record<string, unknown>,
+  event: Record<string, unknown>,
+  runId: string,
+  fanId: string,
+  actionMode: MessageScriptActionMode,
+  actionResult: AutomationActionResult,
+  context: EventActionContext
+) {
+  if (!context.relationshipId) return;
+
+  const inserted = await supabase.from("of_relationship_timeline").insert({
+    creator_id: event.creator_id,
+    subscriber_id: context.subscriberId,
+    relationship_id: context.relationshipId,
+    source_event_id: event.id,
+    timeline_type: "automation",
+    title: script.name ? String(script.name) : "Automation action",
+    detail: `${actionMode}: ${actionResult} for fan ${fanId}`,
+    actor: "automation",
+    occurred_at: new Date().toISOString(),
+    metadata: {
+      automation_run_id: runId,
+      action_mode: actionMode,
+      action_result: actionResult
+    }
+  });
+  assertNoError(inserted.error);
 }
 
 async function automationSkipReason(supabase: SupabaseClient, script: Record<string, unknown>, fanId: string) {
