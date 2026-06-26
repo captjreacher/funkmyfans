@@ -1,4 +1,4 @@
-name = "of-pilot-creator-cockpit"
+name = "funkmyfans"
 main = "worker.ts"
 compatibility_date = "2026-06-18"
 assets = { directory = "./dist", binding = "ASSETS" }
