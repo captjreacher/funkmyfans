@@ -6,7 +6,15 @@ import {
   normalizeSubscribers
 } from "@funkmyfans/betterfans-client";
 import { generateTaskDrafts, type TaskRuleDraft } from "@funkmyfans/of-rules-engine";
-import type { MessageScriptActionMode, MessageScriptTemplate, OfMessageScriptStep, ScriptStepTemplate, SyncType } from "@funkmyfans/of-types";
+import type {
+  ConversationIntent,
+  ConversationSentiment,
+  MessageScriptActionMode,
+  MessageScriptTemplate,
+  OfMessageScriptStep,
+  ScriptStepTemplate,
+  SyncType
+} from "@funkmyfans/of-types";
 import { summarizeEventType } from "@funkmyfans/of-types";
 import { createClient } from "@supabase/supabase-js";
 
@@ -31,6 +39,72 @@ interface EventActionContext {
   subscriberId: string | null;
   chatId: string | null;
   relationshipId: string | null;
+}
+
+interface ConversationMessage {
+  eventId: string | null;
+  text: string;
+  actor: "subscriber" | "creator";
+  occurredAt: string;
+  payload: Record<string, unknown>;
+}
+
+interface MessageClassificationDraft {
+  primary_intent: ConversationIntent;
+  confidence: number;
+  evidence: Array<{ label: string; value: string }>;
+}
+
+interface ConversationIntelligenceDraft {
+  rolling_summary: string;
+  conversation_sentiment: ConversationSentiment;
+  conversation_stage: string;
+  relationship_temperature: string;
+  engagement_trend: string;
+  last_meaningful_message_at: string | null;
+  unresolved_topics: string[];
+  promises_made: string[];
+  important_facts: string[];
+  current_intent: ConversationIntent | null;
+  current_intent_confidence: number | null;
+  current_intent_evidence: Array<{ label: string; value: string }>;
+  sentiment_score: number;
+  engagement_score: number;
+  likely_ppv_buyer: number;
+  custom_buyer: number;
+  tipper: number;
+  renewal_likelihood: number;
+  churn_probability: number;
+  vip_potential: number;
+  whale_potential: number;
+  ai_briefing: string;
+  recommended_next_action: string;
+  suggested_script: string;
+  confidence: number;
+  metadata: Record<string, unknown>;
+}
+
+interface TaskPriorityInput {
+  status?: unknown;
+  due_at?: unknown;
+  task_type?: unknown;
+  rule_name?: unknown;
+  title?: unknown;
+  reason?: unknown;
+  description?: unknown;
+  recommended_action?: unknown;
+  suggested_action?: unknown;
+}
+
+interface ConversationIntelligenceProvider {
+  name: string;
+  classifyMessage(message: ConversationMessage, relationship: Record<string, unknown>): MessageClassificationDraft;
+  summarize(input: {
+    relationship: Record<string, unknown>;
+    messages: ConversationMessage[];
+    classifications: MessageClassificationDraft[];
+    previous: Record<string, unknown> | null;
+  }): ConversationIntelligenceDraft;
 }
 
 export default {
@@ -59,12 +133,13 @@ if (request.method === "GET" && url.pathname === "/api/dashboard") {
     supabase.from("of_creator_snapshots").select("*").order("snapshot_date", { ascending: false }).limit(30),
     supabase
       .from("of_tasks")
-      .select("*, of_creators(username, display_name)")
-      .neq("status", "done")
-      .order("created_at", { ascending: false }),
+      .select("*, of_creators(username, display_name), of_task_timeline(*)")
+      .not("status", "in", "(completed,cancelled,ignored,archived)")
+      .order("priority_score", { ascending: false })
+      .order("due_at", { ascending: true, nullsFirst: false }),
     supabase.from("of_events").select("*").order("created_at", { ascending: false }).limit(20),
     supabase.from("of_sync_runs").select("*").order("started_at", { ascending: false }).limit(20),
-    supabase.from("of_subscriber_relationships").select("*, of_relationship_summaries(*)").order("updated_at", { ascending: false }).limit(50),
+    supabase.from("of_subscriber_relationships").select("*, of_relationship_summaries(*), of_conversation_intelligence(*)").order("updated_at", { ascending: false }).limit(50),
     supabase.from("of_context_events").select("*").order("emitted_at", { ascending: false }).limit(50)
   ]);
 
@@ -108,11 +183,11 @@ if (request.method === "GET" && url.pathname === "/api/dashboard") {
       supabase.from("of_creator_snapshots").select("*").eq("creator_id", creatorId).order("created_at", { ascending: false }).limit(14),
       supabase.from("of_subscribers").select("*").eq("creator_id", creatorId).order("last_sync_at", { ascending: false }).limit(100),
       supabase.from("of_chats").select("*").eq("creator_id", creatorId).order("last_activity_at", { ascending: false, nullsFirst: false }).limit(100),
-      supabase.from("of_tasks").select("*").eq("creator_id", creatorId).order("created_at", { ascending: false }),
+      supabase.from("of_tasks").select("*, of_task_timeline(*)").eq("creator_id", creatorId).order("priority_score", { ascending: false }),
       supabase.from("of_recommendations").select("*").eq("creator_id", creatorId).order("created_at", { ascending: false }),
       supabase.from("of_events").select("*").eq("creator_id", creatorId).order("created_at", { ascending: false }).limit(100),
       supabase.from("of_sync_runs").select("*").eq("creator_id", creatorId).order("started_at", { ascending: false }).limit(100),
-      supabase.from("of_subscriber_relationships").select("*, of_relationship_summaries(*)").eq("creator_id", creatorId).order("updated_at", { ascending: false }).limit(100),
+      supabase.from("of_subscriber_relationships").select("*, of_relationship_summaries(*), of_conversation_intelligence(*)").eq("creator_id", creatorId).order("updated_at", { ascending: false }).limit(100),
       supabase.from("of_relationship_timeline").select("*").eq("creator_id", creatorId).order("occurred_at", { ascending: false }).limit(200),
       supabase.from("of_context_events").select("*").eq("creator_id", creatorId).order("emitted_at", { ascending: false }).limit(100)
     ]);
@@ -158,6 +233,53 @@ if (request.method === "GET" && url.pathname === "/api/dashboard") {
   if (request.method === "GET" && url.pathname === "/api/tasks") {
     const result = await listTasks(supabase, url);
     return Response.json({ tasks: result }, { headers: jsonHeaders });
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/subscribers") {
+    const result = await listSubscribers(supabase, url);
+    return Response.json(result, { headers: jsonHeaders });
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/subscribers/recalculate-all") {
+    const summary = await recalculateAllSubscriberIntelligence(supabase);
+    return Response.json(summary, { headers: jsonHeaders });
+  }
+
+  const subscriberIntelligenceMatch = url.pathname.match(/^\/api\/subscribers\/([^/]+)\/intelligence$/);
+  if (request.method === "GET" && subscriberIntelligenceMatch) {
+    const intelligence = await getSubscriberIntelligence(supabase, subscriberIntelligenceMatch[1]);
+    return Response.json({ intelligence }, { headers: jsonHeaders });
+  }
+
+  const subscriberRecalculateMatch = url.pathname.match(/^\/api\/subscribers\/([^/]+)\/recalculate$/);
+  if (request.method === "POST" && subscriberRecalculateMatch) {
+    const intelligence = await recalculateSubscriberIntelligence(supabase, subscriberRecalculateMatch[1]);
+    return Response.json({ intelligence }, { headers: jsonHeaders });
+  }
+
+  const subscriberMatch = url.pathname.match(/^\/api\/subscribers\/([^/]+)$/);
+  if (request.method === "GET" && subscriberMatch) {
+    const result = await getSubscriberDetail(supabase, subscriberMatch[1]);
+    return Response.json(result, { headers: jsonHeaders });
+  }
+
+  if (request.method === "PATCH" && subscriberMatch) {
+    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const subscriber = await updateSubscriberWorkspace(supabase, subscriberMatch[1], body);
+    return Response.json({ subscriber }, { headers: jsonHeaders });
+  }
+
+  const subscriberTimelineMatch = url.pathname.match(/^\/api\/subscribers\/([^/]+)\/timeline$/);
+  if (request.method === "GET" && subscriberTimelineMatch) {
+    const detail = await getSubscriberDetail(supabase, subscriberTimelineMatch[1]);
+    return Response.json({ timeline: detail.timeline }, { headers: jsonHeaders });
+  }
+
+  const subscriberTasksMatch = url.pathname.match(/^\/api\/subscribers\/([^/]+)\/tasks$/);
+  if (request.method === "POST" && subscriberTasksMatch) {
+    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const task = await createSubscriberManualTask(supabase, subscriberTasksMatch[1], body);
+    return Response.json({ task }, { status: 201, headers: jsonHeaders });
   }
 
   const creatorTasksMatch = url.pathname.match(/^\/api\/creators\/([^/]+)\/tasks$/);
@@ -338,7 +460,9 @@ function createServiceClient(env: Env) {
 async function listTasks(supabase: SupabaseClient, url: URL) {
   let query = supabase
     .from("of_tasks")
-    .select("*, of_creators(username, display_name)")
+    .select("*, of_creators(username, display_name), of_task_timeline(*)")
+    .order("priority_score", { ascending: false })
+    .order("due_at", { ascending: true, nullsFirst: false })
     .order("created_at", { ascending: false });
 
   const creator = url.searchParams.get("creator");
@@ -359,22 +483,778 @@ async function listTasks(supabase: SupabaseClient, url: URL) {
 async function listCreatorTasks(supabase: SupabaseClient, creatorId: string) {
   const result = await supabase
     .from("of_tasks")
-    .select("*")
+    .select("*, of_task_timeline(*)")
     .eq("creator_id", creatorId)
-    .order("created_at", { ascending: false });
+    .order("priority_score", { ascending: false });
   assertNoError(result.error);
   return result.data ?? [];
 }
 
+async function listSubscribers(supabase: SupabaseClient, url: URL) {
+  let query = supabase
+    .from("of_subscriber_relationships")
+    .select("*, of_relationship_summaries(*), of_conversation_intelligence(*), of_creators(username, display_name)")
+    .limit(500);
+
+  const creator = url.searchParams.get("creator");
+  const subscription = url.searchParams.get("subscription");
+  const stage = url.searchParams.get("stage");
+  const vip = url.searchParams.get("vip");
+  const churn = url.searchParams.get("churn");
+  const sort = url.searchParams.get("sort") ?? "relationship_score";
+
+  if (creator && creator !== "all") query = query.eq("creator_id", creator);
+  if (subscription === "active") query = query.not("current_subscription_status", "in", "(expired,cancelled,canceled,inactive)");
+  if (subscription === "expired") query = query.in("current_subscription_status", ["expired", "cancelled", "canceled", "inactive"]);
+  if (stage && stage !== "all") query = query.eq("relationship_state", stage);
+  if (vip === "true") query = query.gte("vip_score", 75);
+  if (churn === "true") query = query.gte("churn_risk", 70);
+
+  if (sort === "lifetime_spend") query = query.order("lifetime_spend", { ascending: false });
+  else if (sort === "newest") query = query.order("first_seen_at", { ascending: false });
+  else if (sort === "last_seen") query = query.order("last_seen_at", { ascending: false, nullsFirst: false });
+  else query = query.order("relationship_score", { ascending: false });
+
+  const [subscribers, creators, tasks] = await Promise.all([
+    query,
+    supabase.from("of_creators").select("*").order("created_at", { ascending: false }),
+    supabase
+      .from("of_tasks")
+      .select("*, of_creators(username, display_name), of_task_timeline(*)")
+      .in("status", ["open", "in_progress", "waiting"])
+      .limit(1000)
+  ]);
+  assertNoError(subscribers.error);
+  assertNoError(creators.error);
+  assertNoError(tasks.error);
+
+  let rows = subscribers.data ?? [];
+  if (url.searchParams.get("hasOpenTasks") === "true") {
+    const idsWithTasks = new Set((tasks.data ?? []).map((task) => String(task.source_id)).filter(Boolean));
+    const subscriberIdsWithTasks = new Set((tasks.data ?? []).map((task) => String(task.subscriber_id)).filter(Boolean));
+    rows = rows.filter((subscriber) => idsWithTasks.has(String(subscriber.id)) || subscriberIdsWithTasks.has(String(subscriber.subscriber_id)));
+  }
+  if (sort === "open_tasks") {
+    rows = [...rows].sort((a, b) => subscriberTaskCount(b, tasks.data ?? []) - subscriberTaskCount(a, tasks.data ?? []));
+  }
+
+  return {
+    creators: creators.data ?? [],
+    subscribers: rows,
+    tasks: tasks.data ?? []
+  };
+}
+
+async function getSubscriberDetail(supabase: SupabaseClient, subscriberId: string) {
+  if (!isUuid(subscriberId)) throw new Error("Subscriber id must be a database UUID");
+  const subscriber = await supabase
+    .from("of_subscriber_relationships")
+    .select("*, of_relationship_summaries(*), of_conversation_intelligence(*), of_creators(username, display_name)")
+    .eq("id", subscriberId)
+    .single();
+  assertNoError(subscriber.error);
+  if (!subscriber.data) throw new Error("Subscriber relationship not found");
+
+  const tasks = await listSubscriberTasks(supabase, subscriber.data);
+  const [creator, relationshipTimeline, events] = await Promise.all([
+    supabase.from("of_creators").select("*").eq("id", subscriber.data.creator_id).single(),
+    supabase.from("of_relationship_timeline").select("*").eq("relationship_id", subscriberId).order("occurred_at", { ascending: false }).limit(100),
+    subscriber.data.last_event_id
+      ? supabase.from("of_events").select("*").eq("id", subscriber.data.last_event_id).limit(20)
+      : Promise.resolve({ data: [], error: null })
+  ]);
+  assertNoError(creator.error);
+  assertNoError(relationshipTimeline.error);
+  assertNoError(events.error);
+
+  return {
+    subscriber: subscriber.data,
+    creator: creator.data ?? null,
+    tasks,
+    events: events.data ?? [],
+    intelligence: firstRelatedRecord(subscriber.data.of_conversation_intelligence),
+    timeline: buildSubscriberTimeline(subscriber.data, tasks, relationshipTimeline.data ?? [], events.data ?? [])
+  };
+}
+
+async function listSubscriberTasks(supabase: SupabaseClient, subscriber: Record<string, unknown>) {
+  const [sourceTasks, subscriberTasks] = await Promise.all([
+    supabase
+      .from("of_tasks")
+      .select("*, of_creators(username, display_name), of_task_timeline(*)")
+      .eq("creator_id", subscriber.creator_id)
+      .eq("source_type", "subscriber")
+      .eq("source_id", subscriber.id)
+      .limit(200),
+    supabase
+      .from("of_tasks")
+      .select("*, of_creators(username, display_name), of_task_timeline(*)")
+      .eq("creator_id", subscriber.creator_id)
+      .eq("subscriber_id", subscriber.subscriber_id)
+      .limit(200)
+  ]);
+  assertNoError(sourceTasks.error);
+  assertNoError(subscriberTasks.error);
+
+  const byId = new Map<string, Record<string, unknown>>();
+  for (const task of [...(sourceTasks.data ?? []), ...(subscriberTasks.data ?? [])]) {
+    byId.set(String(task.id), task);
+  }
+  return [...byId.values()].sort((a, b) => {
+    const score = Number(b.priority_score ?? 0) - Number(a.priority_score ?? 0);
+    if (score !== 0) return score;
+    return new Date(String(b.created_at)).getTime() - new Date(String(a.created_at)).getTime();
+  });
+}
+
+async function updateSubscriberWorkspace(supabase: SupabaseClient, subscriberId: string, body: Record<string, unknown>) {
+  if (!isUuid(subscriberId)) throw new Error("Subscriber id must be a database UUID");
+  const patch: Record<string, unknown> = {};
+  if ("automation_paused" in body) patch.automation_paused = Boolean(body.automation_paused);
+  if ("human_takeover" in body) patch.human_takeover = Boolean(body.human_takeover);
+  if ("auto_send_enabled" in body) patch.auto_send_enabled = Boolean(body.auto_send_enabled);
+  if ("current_workflow" in body) patch.current_workflow = typeof body.current_workflow === "string" && body.current_workflow.trim() ? body.current_workflow.trim() : null;
+  if (!Object.keys(patch).length) throw new Error("No subscriber workspace fields to update");
+
+  const result = await supabase
+    .from("of_subscriber_relationships")
+    .update(patch)
+    .eq("id", subscriberId)
+    .select("*, of_relationship_summaries(*), of_conversation_intelligence(*), of_creators(username, display_name)")
+    .single();
+  assertNoError(result.error);
+  return result.data;
+}
+
+async function createSubscriberManualTask(supabase: SupabaseClient, subscriberId: string, body: Record<string, unknown>) {
+  const detail = await getSubscriberDetail(supabase, subscriberId);
+  const title = typeof body.title === "string" && body.title.trim() ? body.title.trim() : "Manual subscriber follow-up";
+  const reason = typeof body.reason === "string" && body.reason.trim() ? body.reason.trim() : "Operator created a manual task from the subscriber workspace.";
+  const dueAt = emptyToNull(body.dueAt ?? body.due_at);
+  const recommendedAction = typeof body.recommendedAction === "string" && body.recommendedAction.trim() ? body.recommendedAction.trim() : "Review subscriber context and complete the task.";
+  const priority = calculateTaskPriority(
+    {
+      status: "open",
+      task_type: "manual_subscriber_task",
+      rule_name: "operator.manual_subscriber_task",
+      title,
+      reason,
+      description: reason,
+      recommended_action: recommendedAction,
+      suggested_action: "manual_follow_up",
+      due_at: dueAt
+    },
+    detail.subscriber
+  );
+
+  const inserted = await supabase
+    .from("of_tasks")
+    .insert({
+      creator_id: detail.subscriber.creator_id,
+      source_type: "subscriber",
+      source_id: null,
+      subscriber_id: detail.subscriber.subscriber_id,
+      task_type: "manual_subscriber_task",
+      rule_name: "operator.manual_subscriber_task",
+      rule_version: "OF-2.6",
+      priority: priority.priority,
+      priority_score: priority.score,
+      priority_reason: priority.reason,
+      status: "open",
+      title,
+      description: reason,
+      reason,
+      evidence: [{ label: "Created from", value: "Subscriber Workspace" }],
+      confidence: 100,
+      recommended_action: recommendedAction,
+      suggested_action: "manual_follow_up",
+      suggested_script: null,
+      ai_suggestion: {},
+      due_at: dueAt,
+      resolution_note: null,
+      execution_count: 1,
+      last_triggered_at: new Date().toISOString(),
+      next_eligible_at: new Date().toISOString(),
+      source: "operator"
+    })
+    .select("*, of_creators(username, display_name), of_task_timeline(*)")
+    .single();
+  assertNoError(inserted.error);
+  await recordTaskTimeline(supabase, inserted.data, "task_created", "Task Created", reason, "operator");
+  return inserted.data;
+}
+
+async function getSubscriberIntelligence(
+  supabase: SupabaseClient,
+  relationshipId: string
+): Promise<Record<string, unknown>> {
+  if (!isUuid(relationshipId)) {
+    throw new Error("Subscriber id must be a database UUID");
+  }
+
+  const intelligenceResult = await supabase
+    .from("of_conversation_intelligence")
+    .select("*")
+    .eq("relationship_id", relationshipId)
+    .maybeSingle();
+  assertNoError(intelligenceResult.error);
+
+  const classificationsResult = await supabase
+    .from("of_message_classifications")
+    .select("*")
+    .eq("relationship_id", relationshipId)
+    .order("created_at", { ascending: false })
+    .limit(25);
+  assertNoError(classificationsResult.error);
+
+  const summaryVersionsResult = await supabase
+    .from("of_conversation_summary_versions")
+    .select("*")
+    .eq("relationship_id", relationshipId)
+    .order("created_at", { ascending: false })
+    .limit(10);
+  assertNoError(summaryVersionsResult.error);
+
+  return {
+    intelligence: intelligenceResult.data,
+    classifications: classificationsResult.data ?? [],
+    summary_versions: summaryVersionsResult.data ?? [],
+  };
+}
+async function recalculateAllSubscriberIntelligence(supabase: SupabaseClient) {
+  const relationships = await supabase
+    .from("of_subscriber_relationships")
+    .select("id")
+    .order("updated_at", { ascending: false })
+    .limit(500);
+  assertNoError(relationships.error);
+
+  const summary = { recalculated: 0, errors: [] as string[] };
+  for (const relationship of relationships.data ?? []) {
+    try {
+      await recalculateSubscriberIntelligence(supabase, String(relationship.id));
+      summary.recalculated++;
+    } catch (error) {
+      summary.errors.push(error instanceof Error ? error.message : "Unexpected intelligence recalculation error");
+    }
+  }
+  return summary;
+}
+
+async function recalculateSubscriberIntelligence(supabase: SupabaseClient, subscriberId: string): Promise<Record<string, unknown>> {
+  if (!isUuid(subscriberId)) throw new Error("Subscriber id must be a database UUID");
+  const relationship = await supabase
+    .from("of_subscriber_relationships")
+    .select("*, of_conversation_intelligence(*)")
+    .eq("id", subscriberId)
+    .single();
+  assertNoError(relationship.error);
+  if (!relationship.data) throw new Error("Subscriber relationship not found");
+
+  const previous = firstRelatedRecord(relationship.data.of_conversation_intelligence);
+  const events = await loadConversationEvents(supabase, relationship.data);
+  const messages = events.map(eventToConversationMessage).filter((message): message is ConversationMessage => Boolean(message));
+  const provider = conversationIntelligenceProvider();
+  const classifications = messages
+    .filter((message) => message.actor === "subscriber")
+    .map((message) => provider.classifyMessage(message, relationship.data));
+  const draft = provider.summarize({ relationship: relationship.data, messages, classifications, previous });
+  const sourceEventId = messages.find((message) => message.eventId)?.eventId ?? null;
+
+  const upserted = await supabase
+    .from("of_conversation_intelligence")
+    .upsert({
+      creator_id: relationship.data.creator_id,
+      subscriber_id: relationship.data.subscriber_id,
+      relationship_id: relationship.data.id,
+      rolling_summary: draft.rolling_summary,
+      last_summary_at: new Date().toISOString(),
+      conversation_sentiment: draft.conversation_sentiment,
+      conversation_stage: draft.conversation_stage,
+      relationship_temperature: draft.relationship_temperature,
+      engagement_trend: draft.engagement_trend,
+      last_meaningful_message_at: draft.last_meaningful_message_at,
+      unresolved_topics: draft.unresolved_topics,
+      promises_made: draft.promises_made,
+      important_facts: draft.important_facts,
+      current_intent: draft.current_intent,
+      current_intent_confidence: draft.current_intent_confidence,
+      current_intent_evidence: draft.current_intent_evidence,
+      sentiment_score: draft.sentiment_score,
+      engagement_score: draft.engagement_score,
+      likely_ppv_buyer: draft.likely_ppv_buyer,
+      custom_buyer: draft.custom_buyer,
+      tipper: draft.tipper,
+      renewal_likelihood: draft.renewal_likelihood,
+      churn_probability: draft.churn_probability,
+      vip_potential: draft.vip_potential,
+      whale_potential: draft.whale_potential,
+      ai_briefing: draft.ai_briefing,
+      recommended_next_action: draft.recommended_next_action,
+      suggested_script: draft.suggested_script,
+      confidence: draft.confidence,
+      provider: provider.name,
+      metadata: draft.metadata
+    }, { onConflict: "relationship_id" })
+    .select("*")
+    .single();
+  assertNoError(upserted.error);
+
+  const previousVersion = await supabase
+    .from("of_conversation_summary_versions")
+    .select("summary_version")
+    .eq("relationship_id", relationship.data.id)
+    .order("summary_version", { ascending: false })
+    .limit(1);
+  assertNoError(previousVersion.error);
+  const version = Number(previousVersion.data?.[0]?.summary_version ?? 0) + 1;
+  const insertedVersion = await supabase.from("of_conversation_summary_versions").insert({
+    creator_id: relationship.data.creator_id,
+    subscriber_id: relationship.data.subscriber_id,
+    relationship_id: relationship.data.id,
+    rolling_summary: draft.rolling_summary,
+    summary_version: version,
+    provider: provider.name,
+    source_event_id: sourceEventId
+  });
+  assertNoError(insertedVersion.error);
+
+  for (let index = 0; index < messages.length; index++) {
+    const message = messages[index];
+    if (message.actor !== "subscriber" || !message.eventId) continue;
+    const classification = classifications.shift();
+    if (!classification) continue;
+    const insertedClassification = await supabase.from("of_message_classifications").upsert({
+      creator_id: relationship.data.creator_id,
+      subscriber_id: relationship.data.subscriber_id,
+      relationship_id: relationship.data.id,
+      source_event_id: message.eventId,
+      message_text: message.text,
+      primary_intent: classification.primary_intent,
+      confidence: classification.confidence,
+      evidence: classification.evidence,
+      classified_by: provider.name,
+      classified_at: message.occurredAt
+    }, { onConflict: "source_event_id" });
+    assertNoError(insertedClassification.error);
+  }
+
+  await recordIntelligenceTimeline(supabase, relationship.data, previous, draft, sourceEventId);
+  await updateRelationshipFromIntelligence(supabase, relationship.data, draft);
+  return getSubscriberIntelligence(supabase, subscriberId);
+}
+
+async function loadConversationEvents(supabase: SupabaseClient, relationship: Record<string, unknown>) {
+  const result = await supabase
+    .from("of_events")
+    .select("*")
+    .eq("creator_id", relationship.creator_id)
+    .in("event_type", ["chat_message", "transaction_created", "subscriber_created", "subscriber_expired"])
+    .order("received_at", { ascending: false, nullsFirst: false })
+    .limit(150);
+  assertNoError(result.error);
+  const fanIds = new Set([
+    String(relationship.betterfans_subscriber_id ?? ""),
+    String(relationship.username ?? ""),
+    String(relationship.subscriber_id ?? "")
+  ].filter(Boolean));
+  return (result.data ?? [])
+    .filter((event) => {
+      const payload = isRecord(event.payload) ? event.payload : {};
+      const fanId = extractFanId(payload);
+      return fanId ? fanIds.has(fanId) : false;
+    })
+    .reverse();
+}
+
+function eventToConversationMessage(event: Record<string, unknown>): ConversationMessage | null {
+  if (event.event_type !== "chat_message") return null;
+  const payload = isRecord(event.payload) ? event.payload : {};
+  const text = extractMessageText(payload);
+  if (!text) return null;
+  const actor = extractMessageActor(payload);
+  return {
+    eventId: typeof event.id === "string" ? event.id : null,
+    text,
+    actor,
+    occurredAt: String(event.received_at ?? event.created_at ?? new Date().toISOString()),
+    payload
+  };
+}
+
+function conversationIntelligenceProvider(): ConversationIntelligenceProvider {
+  return heuristicConversationIntelligenceProvider;
+}
+
+const heuristicConversationIntelligenceProvider: ConversationIntelligenceProvider = {
+  name: "heuristic-v1",
+  classifyMessage(message) {
+    const text = message.text.toLowerCase();
+    const checks: Array<{ intent: ConversationIntent; confidence: number; terms: string[]; evidence: string }> = [
+      { intent: "custom_request", confidence: 92, terms: ["custom", "special video", "make me", "can you do", "personalized"], evidence: "Asked for personalized or custom content." },
+      { intent: "ppv_interest", confidence: 90, terms: ["ppv", "locked", "preview", "video", "bundle", "content"], evidence: "Mentioned purchasable media or PPV-style content." },
+      { intent: "buying_signal", confidence: 88, terms: ["buy", "purchase", "send it", "how much", "price", "tip you", "pay"], evidence: "Used purchase-oriented language." },
+      { intent: "price_objection", confidence: 86, terms: ["too expensive", "cheaper", "discount", "can't afford", "costs too much"], evidence: "Objected to price or asked for a discount." },
+      { intent: "subscription_question", confidence: 84, terms: ["renew", "subscription", "rebill", "expire", "sub"], evidence: "Asked about subscription status or renewal." },
+      { intent: "complaint", confidence: 84, terms: ["angry", "annoyed", "scam", "refund", "not happy", "disappointed"], evidence: "Used complaint or dissatisfaction language." },
+      { intent: "support", confidence: 80, terms: ["help", "can't open", "problem", "issue", "not working"], evidence: "Asked for help with an issue." },
+      { intent: "sexting", confidence: 80, terms: ["naughty", "dirty", "horny", "sexy", "turn me on"], evidence: "Used explicitly intimate language." },
+      { intent: "flirting", confidence: 76, terms: ["beautiful", "gorgeous", "cute", "miss you", "babe", "kiss"], evidence: "Used flirtatious language." },
+      { intent: "goodbye", confidence: 74, terms: ["bye", "goodbye", "talk later", "see you", "leaving"], evidence: "Signaled ending the conversation." },
+      { intent: "greeting", confidence: 72, terms: ["hi", "hello", "hey", "good morning", "good night"], evidence: "Opened with a greeting." }
+    ];
+    const match = checks.find((check) => check.terms.some((term) => text.includes(term)));
+    if (match) {
+      return {
+        primary_intent: match.intent,
+        confidence: match.confidence,
+        evidence: [{ label: "Message evidence", value: match.evidence }]
+      };
+    }
+    return {
+      primary_intent: "casual_chat",
+      confidence: 58,
+      evidence: [{ label: "Message evidence", value: "No stronger commercial, support, or objection signal detected." }]
+    };
+  },
+  summarize({ relationship, messages, classifications, previous }) {
+    const subscriberMessages = messages.filter((message) => message.actor === "subscriber");
+    const latestClassification = classifications.at(-1) ?? null;
+    const meaningful = subscriberMessages.filter((message) => message.text.trim().length >= 4);
+    const text = subscriberMessages.map((message) => message.text).join(" \n ").toLowerCase();
+    const lifetimeSpend = Number(relationship.lifetime_spend ?? 0);
+    const purchaseCount = Number(relationship.purchase_count ?? 0);
+    const relationshipEngagement = Number(relationship.engagement_score ?? 0);
+    const relationshipVip = Number(relationship.vip_score ?? 0);
+    const relationshipChurn = Number(relationship.churn_risk ?? 0);
+    const sentimentScore = scoreSentiment(text, meaningful.length);
+    const engagementScore = clampScore(relationshipEngagement * 0.55 + Math.min(100, meaningful.length * 10) * 0.45);
+    const ppvIntent = classifications.some((item) => item.primary_intent === "ppv_interest" || item.primary_intent === "buying_signal");
+    const customIntent = classifications.some((item) => item.primary_intent === "custom_request");
+    const objection = classifications.some((item) => item.primary_intent === "price_objection" || item.primary_intent === "complaint");
+    const likelyPpvBuyer = clampScore((ppvIntent ? 52 : 10) + purchaseCount * 8 + lifetimeSpend / 12 + engagementScore / 4 - (objection ? 15 : 0));
+    const customBuyer = clampScore((customIntent ? 58 : 8) + Number(relationship.customs_purchased ?? 0) / 8 + engagementScore / 5);
+    const tipper = clampScore(Number(relationship.tips ?? 0) / 8 + purchaseCount * 6 + (text.includes("tip") ? 32 : 0));
+    const renewalLikelihood = clampScore(70 - relationshipChurn * 0.45 + engagementScore * 0.35 + (lifetimeSpend > 0 ? 8 : 0));
+    const churnProbability = clampScore(relationshipChurn * 0.65 + (sentimentScore < 40 ? 18 : 0) + (engagementScore < 25 ? 15 : 0) + (objection ? 12 : 0));
+    const vipPotential = clampScore(relationshipVip * 0.5 + lifetimeSpend / 10 + likelyPpvBuyer * 0.2 + customBuyer * 0.15 + tipper * 0.15);
+    const whalePotential = clampScore(lifetimeSpend / 18 + purchaseCount * 7 + likelyPpvBuyer * 0.25 + customBuyer * 0.2 + tipper * 0.15);
+    const sentiment = sentimentLabel(sentimentScore, engagementScore, text);
+    const temperature = engagementScore >= 70 || likelyPpvBuyer >= 75 ? "hot" : engagementScore >= 40 || likelyPpvBuyer >= 45 ? "warm" : "cold";
+    const stage = latestClassification?.primary_intent ? labelForIntent(latestClassification.primary_intent) : String(relationship.relationship_stage ?? "unknown");
+    const trend = engagementScore > Number(previous?.engagement_score ?? relationshipEngagement) + 8 ? "rising" : engagementScore < Number(previous?.engagement_score ?? relationshipEngagement) - 8 ? "declining" : "steady";
+    const facts = extractImportantFacts(subscriberMessages);
+    const unresolved = extractTopics(text, ["custom", "price", "renewal", "video", "bundle", "help", "refund"]);
+    const promises = extractPromises(messages);
+    const rollingSummary = buildRollingSummary(relationship, subscriberMessages, latestClassification, facts, likelyPpvBuyer, renewalLikelihood, churnProbability);
+    const recommended = recommendationFromScores(latestClassification?.primary_intent ?? null, likelyPpvBuyer, customBuyer, churnProbability, renewalLikelihood);
+    const script = suggestedScriptFromIntent(latestClassification?.primary_intent ?? null, likelyPpvBuyer, customBuyer, churnProbability, renewalLikelihood);
+
+    return {
+      rolling_summary: rollingSummary,
+      conversation_sentiment: sentiment,
+      conversation_stage: stage,
+      relationship_temperature: temperature,
+      engagement_trend: trend,
+      last_meaningful_message_at: meaningful.at(-1)?.occurredAt ?? null,
+      unresolved_topics: unresolved,
+      promises_made: promises,
+      important_facts: facts,
+      current_intent: latestClassification?.primary_intent ?? null,
+      current_intent_confidence: latestClassification?.confidence ?? null,
+      current_intent_evidence: latestClassification?.evidence ?? [],
+      sentiment_score: sentimentScore,
+      engagement_score: engagementScore,
+      likely_ppv_buyer: likelyPpvBuyer,
+      custom_buyer: customBuyer,
+      tipper,
+      renewal_likelihood: renewalLikelihood,
+      churn_probability: churnProbability,
+      vip_potential: vipPotential,
+      whale_potential: whalePotential,
+      ai_briefing: buildAiBriefing(relationship, rollingSummary, likelyPpvBuyer, renewalLikelihood, churnProbability, recommended, script),
+      recommended_next_action: recommended,
+      suggested_script: script,
+      confidence: clampScore(55 + Math.min(30, meaningful.length * 4) + (latestClassification ? 10 : 0)),
+      metadata: {
+        message_count: messages.length,
+        subscriber_message_count: subscriberMessages.length,
+        provider_notes: "Deterministic OF-3.0 heuristic provider. No autonomous replies generated."
+      }
+    };
+  }
+};
+
+async function recordIntelligenceTimeline(
+  supabase: SupabaseClient,
+  relationship: Record<string, unknown>,
+  previous: Record<string, unknown> | null,
+  draft: ConversationIntelligenceDraft,
+  sourceEventId: string | null
+) {
+  const base = {
+    creator_id: relationship.creator_id,
+    subscriber_id: relationship.subscriber_id,
+    relationship_id: relationship.id,
+    source_event_id: sourceEventId,
+    actor: "ai",
+    occurred_at: new Date().toISOString()
+  };
+  const rows: Record<string, unknown>[] = [
+    {
+      ...base,
+      timeline_type: "summary_refreshed",
+      title: "Summary refreshed",
+      detail: draft.rolling_summary,
+      metadata: { confidence: draft.confidence }
+    }
+  ];
+  if (previous?.current_intent !== draft.current_intent && draft.current_intent) {
+    rows.push({
+      ...base,
+      timeline_type: draft.current_intent === "buying_signal" || draft.current_intent === "ppv_interest" ? "buying_signal_detected" : "intent_changed",
+      title: draft.current_intent === "buying_signal" || draft.current_intent === "ppv_interest" ? "Buying signal detected" : "Intent changed",
+      detail: `${String(previous?.current_intent ?? "unknown")} -> ${draft.current_intent}`,
+      metadata: { confidence: draft.current_intent_confidence }
+    });
+  }
+  if (previous?.conversation_sentiment !== draft.conversation_sentiment) {
+    rows.push({
+      ...base,
+      timeline_type: "sentiment_changed",
+      title: "Sentiment changed",
+      detail: `${String(previous?.conversation_sentiment ?? "unknown")} -> ${draft.conversation_sentiment}`,
+      metadata: { sentiment_score: draft.sentiment_score }
+    });
+  }
+  if (Number(previous?.vip_potential ?? 0) < 75 && draft.vip_potential >= 75) {
+    rows.push({
+      ...base,
+      timeline_type: "vip_promoted",
+      title: "VIP promoted",
+      detail: `VIP potential reached ${draft.vip_potential}/100.`,
+      metadata: { vip_potential: draft.vip_potential, whale_potential: draft.whale_potential }
+    });
+  }
+  if (Number(previous?.churn_probability ?? 0) < 70 && draft.churn_probability >= 70) {
+    rows.push({
+      ...base,
+      timeline_type: "churn_warning",
+      title: "Churn warning",
+      detail: `Churn probability reached ${draft.churn_probability}/100.`,
+      metadata: { churn_probability: draft.churn_probability }
+    });
+  }
+  const inserted = await supabase.from("of_relationship_timeline").insert(rows);
+  assertNoError(inserted.error);
+}
+
+async function updateRelationshipFromIntelligence(supabase: SupabaseClient, relationship: Record<string, unknown>, draft: ConversationIntelligenceDraft) {
+  const patch: Record<string, unknown> = {
+    engagement_score: Math.max(Number(relationship.engagement_score ?? 0), draft.engagement_score),
+    vip_score: Math.max(Number(relationship.vip_score ?? 0), draft.vip_potential),
+    churn_risk: Math.max(Number(relationship.churn_risk ?? 0), draft.churn_probability),
+    recommended_next_action: draft.recommended_next_action,
+    metadata: {
+      ...(isRecord(relationship.metadata) ? relationship.metadata : {}),
+      conversation_intelligence: {
+        current_intent: draft.current_intent,
+        sentiment: draft.conversation_sentiment,
+        suggested_script: draft.suggested_script,
+        confidence: draft.confidence
+      }
+    }
+  };
+  const result = await supabase.from("of_subscriber_relationships").update(patch).eq("id", relationship.id);
+  assertNoError(result.error);
+}
+
+function buildSubscriberTimeline(
+  subscriber: Record<string, unknown>,
+  tasks: Record<string, unknown>[],
+  relationshipTimeline: Record<string, unknown>[],
+  events: Record<string, unknown>[]
+) {
+  const items = [
+    {
+      id: `${subscriber.id}:created`,
+      source: "sync",
+      type: "relationship_created",
+      title: "Relationship Created",
+      detail: "Subscriber relationship profile was created.",
+      actor: "system",
+      occurred_at: String(subscriber.created_at),
+      metadata: {}
+    },
+    {
+      id: `${subscriber.id}:updated`,
+      source: "sync",
+      type: "relationship_updated",
+      title: "Relationship Updated",
+      detail: `State is ${String(subscriber.relationship_state ?? "unknown").replaceAll("_", " ")}.`,
+      actor: "system",
+      occurred_at: String(subscriber.updated_at),
+      metadata: {}
+    },
+    ...relationshipTimeline.map((item) => ({
+      id: String(item.id),
+      source: "relationship",
+      type: String(item.timeline_type),
+      title: String(item.title),
+      detail: typeof item.detail === "string" ? item.detail : null,
+      actor: String(item.actor ?? "system"),
+      occurred_at: String(item.occurred_at ?? item.created_at),
+      metadata: isRecord(item.metadata) ? item.metadata : {}
+    })),
+    ...tasks.flatMap((task) => {
+      const timeline = Array.isArray(task.of_task_timeline) ? task.of_task_timeline as Record<string, unknown>[] : [];
+      const created = {
+        id: `${task.id}:task`,
+        source: "task",
+        type: String(task.task_type),
+        title: String(task.title),
+        detail: String(task.reason ?? task.description ?? "Task created."),
+        actor: "rules_engine",
+        occurred_at: String(task.created_at),
+        metadata: { task_id: task.id, status: task.status }
+      };
+      return [
+        created,
+        ...timeline.map((item) => ({
+          id: String(item.id),
+          source: "task",
+          type: String(item.event_type),
+          title: String(item.title),
+          detail: typeof item.detail === "string" ? item.detail : null,
+          actor: String(item.actor ?? "system"),
+          occurred_at: String(item.created_at),
+          metadata: { task_id: task.id, from_status: item.from_status, to_status: item.to_status }
+        }))
+      ];
+    }),
+    ...events.map((event) => ({
+      id: String(event.id),
+      source: "event",
+      type: String(event.event_type),
+      title: summarizeEventType(String(event.event_type)),
+      detail: String(event.processing_status ?? "processed"),
+      actor: "betterfans",
+      occurred_at: String(event.received_at ?? event.created_at),
+      metadata: isRecord(event.payload) ? event.payload : {}
+    }))
+  ];
+
+  return items
+    .filter((item) => item.occurred_at && item.occurred_at !== "null" && item.occurred_at !== "undefined")
+    .sort((a, b) => new Date(b.occurred_at).getTime() - new Date(a.occurred_at).getTime());
+}
+
+function subscriberTaskCount(subscriber: Record<string, unknown>, tasks: Record<string, unknown>[]) {
+  return tasks.filter((task) =>
+    (task.source_type === "subscriber" && task.source_id === subscriber.id) || task.subscriber_id === subscriber.subscriber_id
+  ).length;
+}
+
+function calculateTaskPriority(task: TaskPriorityInput, relationship?: Record<string, unknown> | null) {
+  let score = 0;
+  const reasons: string[] = [];
+  const now = new Date();
+  const status = String(task.status ?? "");
+  const dueAt = typeof task.due_at === "string" && task.due_at ? new Date(task.due_at) : null;
+
+  if (status === "open") add(20, "Open task");
+  if (status === "in_progress") add(30, "In progress");
+  if (status === "waiting") add(10, "Waiting on follow-up");
+  if (dueAt && dueAt.getTime() < now.getTime() && isActiveTaskStatus(status)) add(25, "Overdue");
+  else if (dueAt && isSameDay(dueAt, now)) add(15, "Due today");
+
+  const searchableTask = [
+    task.task_type,
+    task.rule_name,
+    task.title,
+    task.reason,
+    task.description,
+    task.recommended_action,
+    task.suggested_action
+  ].filter(Boolean).join(" ").toLowerCase();
+
+  if (searchableTask.includes("send_welcome_message") || searchableTask.includes("welcome")) add(25, "Welcome outstanding");
+  if (searchableTask.includes("renewal")) add(30, "Renewal opportunity");
+  if (searchableTask.includes("churn") || searchableTask.includes("at risk")) add(35, "Churn risk");
+  if (searchableTask.includes("vip")) add(40, "VIP follow-up");
+  if (searchableTask.includes("ppv") || searchableTask.includes("purchase") || searchableTask.includes("offer")) add(35, "PPV opportunity");
+  if (searchableTask.includes("manual")) add(15, "Manual task");
+
+  if (relationship) {
+    const subscription = String(relationship.current_subscription_status ?? "").toLowerCase();
+    if (relationship.relationship_state === "new_subscriber") add(20, "New subscriber");
+    if (subscription.includes("active")) add(10, "Active subscriber");
+    if (relationship.relationship_state === "expired" || subscription.includes("expired")) add(15, "Expired subscriber");
+    const lifetimeSpend = Number(relationship.lifetime_spend ?? 0);
+    if (lifetimeSpend > 100) add(20, "Lifetime spend over $100");
+    else if (lifetimeSpend > 0) add(10, "Has lifetime spend");
+    if (Number(relationship.vip_score ?? 0) > 50) add(20, "VIP score over 50");
+    if (Number(relationship.churn_risk ?? 0) > 50) add(25, "Churn risk over 50");
+    if (Number(relationship.engagement_score ?? 0) > 50) add(10, "Engagement score over 50");
+  }
+
+  const cappedScore = Math.max(0, Math.min(100, Math.round(score)));
+  const uniqueReasons = Array.from(new Set(reasons));
+  return {
+    score: cappedScore,
+    priority: priorityFromScore(cappedScore),
+    reason: uniqueReasons.length ? `${uniqueReasons.slice(0, 4).join(", ")}.` : "No high-priority signals detected."
+  };
+
+  function add(points: number, reason: string) {
+    score += points;
+    reasons.push(reason);
+  }
+}
+
+function priorityFromScore(score: number): "low" | "medium" | "high" | "urgent" {
+  if (score >= 85) return "urgent";
+  if (score >= 65) return "high";
+  if (score >= 40) return "medium";
+  return "low";
+}
+
+function isActiveTaskStatus(status: string) {
+  return status === "open" || status === "in_progress" || status === "waiting";
+}
+
+function isSameDay(left: Date, right: Date) {
+  return left.getFullYear() === right.getFullYear() && left.getMonth() === right.getMonth() && left.getDate() === right.getDate();
+}
+
 async function updateTask(supabase: SupabaseClient, taskId: string, body: Record<string, unknown>) {
-  const allowedStatuses = new Set(["open", "in_progress", "done", "dismissed"]);
+  const allowedStatuses = new Set(["open", "in_progress", "waiting", "completed", "cancelled", "ignored", "archived"]);
   const allowedPriorities = new Set(["low", "medium", "high", "urgent"]);
   const patch: Record<string, unknown> = {};
+  const current = await supabase.from("of_tasks").select("*").eq("id", taskId).single();
+  assertNoError(current.error);
+  if (!current.data) throw new Error("Task not found");
+  const previousStatus = String(current.data.status);
+  const actor = typeof body.actor === "string" && body.actor.trim() ? body.actor.trim() : "operator";
 
   if (typeof body.status === "string") {
     if (!allowedStatuses.has(body.status)) throw new Error("Invalid task status");
     patch.status = body.status;
-    patch.completed_at = body.status === "done" ? new Date().toISOString() : null;
+    if (body.status === "in_progress" && !current.data.started_at) patch.started_at = new Date().toISOString();
+    if (body.status === "completed") {
+      patch.completed_at = new Date().toISOString();
+      patch.completed_by = actor;
+    }
+    if (body.status === "cancelled") {
+      patch.cancelled_at = new Date().toISOString();
+      patch.cancelled_by = actor;
+    }
+    if (body.status === "archived") patch.archived_at = new Date().toISOString();
+    if (body.status === "open" && previousStatus !== "open") {
+      patch.completed_at = null;
+      patch.cancelled_at = null;
+      patch.archived_at = null;
+    }
   }
 
   if (typeof body.priority === "string") {
@@ -384,19 +1264,40 @@ async function updateTask(supabase: SupabaseClient, taskId: string, body: Record
 
   if ("due_at" in body) patch.due_at = emptyToNull(body.due_at);
   if ("resolution_note" in body) patch.resolution_note = typeof body.resolution_note === "string" ? body.resolution_note : null;
+  if ("ignore_reason" in body) patch.ignore_reason = typeof body.ignore_reason === "string" ? body.ignore_reason : null;
+  if ("assigned_to" in body) patch.assigned_to = typeof body.assigned_to === "string" ? body.assigned_to : null;
+  if (body.viewed === true) patch.viewed_at = new Date().toISOString();
 
-  const result = await supabase.from("of_tasks").update(patch).eq("id", taskId).select("*, of_creators(username, display_name)").single();
+  const result = await supabase.from("of_tasks").update(patch).eq("id", taskId).select("*, of_creators(username, display_name), of_task_timeline(*)").single();
   assertNoError(result.error);
+  if (body.viewed === true) {
+    await recordTaskTimeline(supabase, result.data, "viewed", "Viewed", "Operator opened the task detail panel.", actor);
+  }
+  if (typeof body.assigned_to === "string") {
+    await recordTaskTimeline(supabase, result.data, "assigned", "Assigned", `Assigned to ${body.assigned_to}.`, actor);
+  }
+  if (typeof body.status === "string" && body.status !== previousStatus) {
+    await recordTaskTimeline(
+      supabase,
+      result.data,
+      body.status === "completed" ? "completed" : body.status === "cancelled" ? "cancelled" : body.status === "ignored" ? "ignored" : previousStatus === "completed" ? "reopened" : "status_changed",
+      body.status === "completed" ? "Completed" : body.status === "cancelled" ? "Cancelled" : body.status === "ignored" ? "Ignored" : previousStatus === "completed" ? "Reopened" : "Status Changed",
+      `${previousStatus} -> ${body.status}`,
+      actor,
+      previousStatus,
+      body.status
+    );
+  }
   return result.data;
 }
 
 async function generateCreatorTasks(supabase: SupabaseClient, creatorId: string) {
-  const [creator, subscribers, chats, events] = await Promise.all([
-    supabase.from("of_creators").select("id").eq("id", creatorId).single(),
-    supabase.from("of_subscribers").select("*").eq("creator_id", creatorId).limit(500),
-    supabase.from("of_chats").select("*").eq("creator_id", creatorId).limit(500),
-    supabase.from("of_events").select("*").eq("creator_id", creatorId).in("event_type", ["transaction_created", "chat_message"]).limit(250)
-  ]);
+const [creator, subscribers, chats, events] = await Promise.all([
+  supabase.from("of_creators").select("id").eq("id", creatorId).single(),
+  supabase.from("of_subscriber_relationships").select("*").eq("creator_id", creatorId).limit(500),
+  supabase.from("of_chats").select("*").eq("creator_id", creatorId).limit(500),
+  supabase.from("of_events").select("*").eq("creator_id", creatorId).in("event_type", ["transaction_created", "chat_message"]).limit(250)
+]);
   assertNoError(creator.error);
   assertNoError(subscribers.error);
   assertNoError(chats.error);
@@ -407,6 +1308,7 @@ async function generateCreatorTasks(supabase: SupabaseClient, creatorId: string)
     chats: chats.data ?? [],
     events: events.data ?? []
   });
+  const relationshipsById = new Map((subscribers.data ?? []).map((subscriber) => [String(subscriber.id), subscriber]));
 
   const summary = { created: 0, skipped: 0, duplicates: 0, errors: [] as string[] };
   for (const draft of drafts) {
@@ -417,6 +1319,7 @@ async function generateCreatorTasks(supabase: SupabaseClient, creatorId: string)
         continue;
       }
 
+      const priority = calculateTaskPriority(draft, relationshipsById.get(String(draft.source_id)));
       const inserted = await supabase.from("of_tasks").insert({
         creator_id: creatorId,
         source_type: draft.source_type,
@@ -424,30 +1327,44 @@ async function generateCreatorTasks(supabase: SupabaseClient, creatorId: string)
         task_type: draft.task_type,
         rule_name: draft.rule_name,
         rule_version: draft.rule_version,
-        priority: draft.priority,
+        priority: priority.priority,
+        priority_score: priority.score,
+        priority_reason: priority.reason,
         status: draft.status,
         title: draft.title,
         description: draft.description,
+        reason: draft.reason,
+        evidence: draft.evidence,
+        confidence: draft.confidence,
+        recommended_action: draft.recommended_action,
+        suggested_action: draft.suggested_action,
+        suggested_script: draft.suggested_script,
+        ai_suggestion: draft.ai_suggestion,
         due_at: draft.due_at,
         resolution_note: null,
+        execution_count: 1,
+        last_triggered_at: new Date().toISOString(),
+        cooldown_until: draft.cooldown_hours > 0 ? new Date(Date.now() + draft.cooldown_hours * 60 * 60 * 1000).toISOString() : null,
+        next_eligible_at: draft.cooldown_hours > 0 ? new Date(Date.now() + draft.cooldown_hours * 60 * 60 * 1000).toISOString() : null,
         source: "rules_engine"
-      });
+      }).select("*").single();
       if (inserted.error?.code === "23505") {
         summary.duplicates++;
         continue;
       }
       assertNoError(inserted.error);
+      await recordTaskTimeline(supabase, inserted.data, "task_created", "Task Created", draft.reason, "rules_engine");
       summary.created++;
     } catch (error) {
       summary.errors.push(error instanceof Error ? error.message : "Unexpected task generation error");
     }
   }
 
-  return {
-    ...summary,
-    skipped: summary.skipped,
-    evaluated: drafts.length
-  };
+return {
+  ...summary,
+  skipped: summary.skipped,
+  evaluated: drafts.length
+};
 }
 
 async function findActiveDuplicateTask(supabase: SupabaseClient, creatorId: string, draft: TaskRuleDraft) {
@@ -459,10 +1376,34 @@ async function findActiveDuplicateTask(supabase: SupabaseClient, creatorId: stri
     .eq("source_id", draft.source_id)
     .eq("task_type", draft.task_type)
     .eq("rule_name", draft.rule_name)
-    .in("status", ["open", "in_progress"])
+    .in("status", ["open", "in_progress", "waiting"])
     .limit(1);
   assertNoError(result.error);
   return Boolean(result.data?.length);
+}
+
+async function recordTaskTimeline(
+  supabase: SupabaseClient,
+  task: Record<string, unknown>,
+  eventType: string,
+  title: string,
+  detail: string | null,
+  actor: string,
+  fromStatus?: string,
+  toStatus?: string
+) {
+  const inserted = await supabase.from("of_task_timeline").insert({
+    task_id: task.id,
+    creator_id: task.creator_id,
+    event_type: eventType,
+    actor,
+    from_status: fromStatus ?? null,
+    to_status: toStatus ?? (typeof task.status === "string" ? task.status : null),
+    title,
+    detail,
+    metadata: {}
+  });
+  assertNoError(inserted.error);
 }
 
 async function listCreatorScripts(supabase: SupabaseClient, creatorId: string) {
@@ -626,6 +1567,10 @@ async function runAutomationsForEvent(supabase: SupabaseClient, env: Env, eventI
   if (!fanId) {
     return { eventId, matched: 0, queued: 0, skipped: 0, errors: ["Event payload did not include a fan identifier"] };
   }
+  const eventContext = await loadEventActionContext(supabase, event.data, fanId);
+  if (event.data.event_type === "chat_message" && eventContext.relationshipId) {
+    await recalculateSubscriberIntelligence(supabase, eventContext.relationshipId);
+  }
 
   const scripts = await supabase
     .from("of_message_scripts")
@@ -718,16 +1663,37 @@ async function executeTaskOnlyAction(
     rule_name: title,
     rule_version: "event_actions_v1",
     priority: "medium",
+    priority_score: 62,
+    priority_reason: "Automation rule matched an event but is configured for human task handling.",
     status: "open",
     title,
     description: `Automation ${runId} created a task for fan ${fanId}.`,
+    reason: `Event action matched ${String(event.event_type ?? "event")} and requires operator review.`,
+    evidence: [
+      { label: "Fan", value: fanId },
+      { label: "Automation run", value: runId },
+      { label: "Source event", value: String(event.id ?? "unknown") }
+    ],
+    confidence: 88,
+    recommended_action: "Review the event context and complete the scripted action manually.",
+    suggested_action: "review_task",
+    suggested_script: script.name ? String(script.name) : null,
+    ai_suggestion: {
+      suggested_script: script.name ? String(script.name) : null,
+      confidence: 70,
+      expected_outcome: "Keep automation human-reviewed."
+    },
     due_at: new Date().toISOString(),
     resolution_note: null,
+    execution_count: 1,
+    last_triggered_at: new Date().toISOString(),
+    next_eligible_at: new Date().toISOString(),
     source: "event"
-  });
+  }).select("*").single();
 
   if (inserted.error?.code === "23505") return "skipped";
   assertNoError(inserted.error);
+  await recordTaskTimeline(supabase, inserted.data, "task_created", "Task Created", `Automation ${runId} created this task.`, "automation");
   return "task_created";
 }
 
@@ -1412,6 +2378,156 @@ function extractFanId(record: Record<string, unknown>) {
     findNestedString(record, ["user", "id"]) ??
     findNestedString(record, ["user", "username"])
   );
+}
+
+function extractMessageText(record: Record<string, unknown>) {
+  return (
+    findString(record, "text", "body", "messageText", "message_text", "content") ??
+    findNestedString(record, ["message", "text"]) ??
+    findNestedString(record, ["message", "body"]) ??
+    findNestedString(record, ["chat", "last_message"])
+  );
+}
+
+function extractMessageActor(record: Record<string, unknown>): "subscriber" | "creator" {
+  const actor = (findString(record, "actor", "sender_type", "senderType") ?? findNestedString(record, ["message", "sender_type"]) ?? "subscriber").toLowerCase();
+  return actor === "creator" || actor === "operator" || actor === "agency" ? "creator" : "subscriber";
+}
+
+function firstRelatedRecord(value: unknown): Record<string, unknown> | null {
+  if (Array.isArray(value)) return isRecord(value[0]) ? value[0] : null;
+  return isRecord(value) ? value : null;
+}
+
+function clampScore(value: number) {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function scoreSentiment(text: string, messageCount: number) {
+  const positive = countMatches(text, ["love", "great", "amazing", "yes", "excited", "beautiful", "perfect", "thanks", "want"]);
+  const negative = countMatches(text, ["angry", "annoyed", "refund", "scam", "bad", "hate", "expensive", "problem", "can't"]);
+  return clampScore(50 + positive * 8 - negative * 10 + Math.min(12, messageCount * 2));
+}
+
+function countMatches(text: string, terms: string[]) {
+  return terms.reduce((sum, term) => sum + (text.includes(term) ? 1 : 0), 0);
+}
+
+function sentimentLabel(score: number, engagementScore: number, text: string): ConversationSentiment {
+  if (text.includes("angry") || text.includes("refund") || text.includes("not happy")) return "frustrated";
+  if (text.includes("maybe") || text.includes("not sure") || text.includes("too expensive")) return "hesitant";
+  if (score >= 78 && engagementScore >= 70) return "high_engagement";
+  if (score >= 75) return "excited";
+  if (score >= 58) return "positive";
+  if (score <= 32) return "negative";
+  if (engagementScore <= 20) return "cold";
+  return "neutral";
+}
+
+function labelForIntent(intent: ConversationIntent) {
+  return intent.replaceAll("_", " ");
+}
+
+function extractImportantFacts(messages: ConversationMessage[]) {
+  const facts = new Set<string>();
+  for (const message of messages) {
+    const text = message.text.trim();
+    const location = text.match(/\b(?:from|live in|based in)\s+([A-Z][A-Za-z\s]{2,32})/);
+    if (location?.[1]) facts.add(`From ${location[1].trim()}`);
+    const likes = text.match(/\b(?:like|love|enjoy)\s+([^.!?]{3,48})/i);
+    if (likes?.[1]) facts.add(`Enjoys ${likes[1].trim()}`);
+  }
+  return [...facts].slice(0, 8);
+}
+
+function extractTopics(text: string, topics: string[]) {
+  return topics.filter((topic) => text.includes(topic)).slice(0, 8);
+}
+
+function extractPromises(messages: ConversationMessage[]) {
+  return messages
+    .filter((message) => message.actor === "creator" && /\b(i will|i'll|send you|set aside|promise)\b/i.test(message.text))
+    .map((message) => message.text.slice(0, 140))
+    .slice(-5);
+}
+
+function buildRollingSummary(
+  relationship: Record<string, unknown>,
+  messages: ConversationMessage[],
+  latestClassification: MessageClassificationDraft | null,
+  facts: string[],
+  likelyPpvBuyer: number,
+  renewalLikelihood: number,
+  churnProbability: number
+) {
+  const name = String(relationship.display_name ?? relationship.username ?? relationship.betterfans_subscriber_id ?? "Subscriber");
+  const joined = relationship.first_seen_at ? `Joined ${relativeDate(String(relationship.first_seen_at))}.` : "Join date unknown.";
+  const intent = latestClassification ? `Current intent appears to be ${labelForIntent(latestClassification.primary_intent)}.` : "No clear current intent yet.";
+  const recent = messages.at(-1)?.text ? `Latest meaningful note: "${messages.at(-1)?.text.slice(0, 120)}"` : "No subscriber messages available yet.";
+  const factLine = facts.length ? `Important facts: ${facts.join("; ")}.` : "No important personal facts captured yet.";
+  return `${name}. ${joined} ${intent} ${recent} ${factLine} PPV likelihood ${likelyPpvBuyer}/100, renewal ${renewalLikelihood}/100, churn ${churnProbability}/100.`;
+}
+
+function buildAiBriefing(
+  relationship: Record<string, unknown>,
+  summary: string,
+  ppv: number,
+  renewal: number,
+  churn: number,
+  recommendation: string,
+  script: string
+) {
+  const spend = Number(relationship.lifetime_spend ?? 0);
+  return [
+    "Summary",
+    "",
+    summary,
+    "",
+    "Likelihood",
+    "",
+    `${probabilityLabel(ppv)} PPV`,
+    `${probabilityLabel(renewal)} Renewal`,
+    `${probabilityLabel(churn)} Churn`,
+    spend >= 500 ? "High VIP potential" : "Monitor VIP potential",
+    "",
+    "Recommended",
+    "",
+    recommendation,
+    script
+  ].join("\n");
+}
+
+function probabilityLabel(score: number) {
+  if (score >= 70) return "High";
+  if (score >= 40) return "Medium";
+  return "Low";
+}
+
+function recommendationFromScores(intent: ConversationIntent | null, ppv: number, custom: number, churn: number, renewal: number) {
+  if (churn >= 70) return "Prioritise retention outreach before upsell.";
+  if (intent === "price_objection") return "Acknowledge price concern and offer a lower-friction option.";
+  if (custom >= 70) return "Qualify custom request and prepare a custom offer.";
+  if (ppv >= 70) return "Send a human-reviewed PPV follow-up.";
+  if (renewal >= 70) return "Keep the conversation warm for renewal.";
+  return "Continue relationship-building conversation.";
+}
+
+function suggestedScriptFromIntent(intent: ConversationIntent | null, ppv: number, custom: number, churn: number, renewal: number) {
+  if (churn >= 70) return "Returning Subscriber Re-engagement";
+  if (intent === "greeting") return "New Subscriber Welcome";
+  if (custom >= 70 || intent === "custom_request") return "Custom Request Qualifier";
+  if (ppv >= 70 || intent === "ppv_interest" || intent === "buying_signal") return "PPV Interest Follow-up";
+  if (renewal >= 70) return "Expiring Subscriber Retention Offer";
+  return "Welcome Script B";
+}
+
+function relativeDate(value: string) {
+  const diffMs = Date.now() - new Date(value).getTime();
+  const days = Math.max(0, Math.floor(diffMs / 86400000));
+  if (days === 0) return "today";
+  if (days === 1) return "yesterday";
+  return `${days} days ago`;
 }
 
 function scriptActionMode(script: Record<string, unknown>): MessageScriptActionMode {

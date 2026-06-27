@@ -3,8 +3,19 @@ export type CreatorOnboardingStatus = "connected" | "syncing" | "ready" | "needs
 export type PlatformProvider = "betterfans" | "onlyfans" | "fansly" | "other";
 
 export type TaskPriority = "low" | "medium" | "high" | "urgent";
-export type TaskStatus = "open" | "in_progress" | "done" | "dismissed";
+export type TaskStatus = "open" | "in_progress" | "waiting" | "completed" | "cancelled" | "ignored" | "archived";
 export type TaskSource = "sync" | "event" | "operator" | "rules_engine";
+export type TaskTimelineEventType =
+  | "task_created"
+  | "viewed"
+  | "assigned"
+  | "status_changed"
+  | "ai_suggestion_generated"
+  | "completed"
+  | "cancelled"
+  | "ignored"
+  | "reopened"
+  | "note_added";
 
 export type RecommendationStatus = "new" | "accepted" | "dismissed" | "archived";
 export type MessageScriptStatus = "active" | "inactive";
@@ -22,6 +33,12 @@ export type RelationshipTimelineType =
   | "tip"
   | "custom_purchase"
   | "message"
+  | "summary_refreshed"
+  | "intent_changed"
+  | "sentiment_changed"
+  | "vip_promoted"
+  | "churn_warning"
+  | "buying_signal_detected"
   | "ai_action"
   | "operator_action"
   | "automation"
@@ -35,6 +52,20 @@ export type ContextEventType =
   | "coaching_opportunity"
   | "subscriber_reactivated"
   | "ai_relationship_summary_updated";
+export type ConversationSentiment = "positive" | "neutral" | "negative" | "excited" | "hesitant" | "frustrated" | "high_engagement" | "cold";
+export type ConversationIntent =
+  | "greeting"
+  | "flirting"
+  | "buying_signal"
+  | "ppv_interest"
+  | "custom_request"
+  | "sexting"
+  | "casual_chat"
+  | "support"
+  | "complaint"
+  | "price_objection"
+  | "subscription_question"
+  | "goodbye";
 
 export interface OfCreator {
   id: string;
@@ -131,6 +162,7 @@ export interface OfSubscriberRelationship {
   created_at: string;
   updated_at: string;
   of_relationship_summaries?: OfRelationshipSummary | OfRelationshipSummary[] | null;
+  of_conversation_intelligence?: OfConversationIntelligence | OfConversationIntelligence[] | null;
 }
 
 export interface OfRelationshipSummary {
@@ -154,6 +186,72 @@ export interface OfRelationshipSummary {
   refreshed_at: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface OfMessageClassification {
+  id: string;
+  creator_id: string;
+  subscriber_id: string;
+  relationship_id: string;
+  source_event_id: string | null;
+  message_text: string | null;
+  primary_intent: ConversationIntent;
+  confidence: number;
+  evidence: Array<{ label?: string; value?: string; [key: string]: unknown }>;
+  classified_by: string;
+  classified_at: string;
+  created_at: string;
+}
+
+export interface OfConversationSummaryVersion {
+  id: string;
+  creator_id: string;
+  subscriber_id: string;
+  relationship_id: string;
+  rolling_summary: string;
+  summary_version: number;
+  provider: string;
+  source_event_id: string | null;
+  created_at: string;
+}
+
+export interface OfConversationIntelligence {
+  id: string;
+  creator_id: string;
+  subscriber_id: string;
+  relationship_id: string;
+  rolling_summary: string;
+  last_summary_at: string | null;
+  conversation_sentiment: ConversationSentiment;
+  conversation_stage: string;
+  relationship_temperature: string;
+  engagement_trend: string;
+  last_meaningful_message_at: string | null;
+  unresolved_topics: unknown[];
+  promises_made: unknown[];
+  important_facts: unknown[];
+  current_intent: ConversationIntent | null;
+  current_intent_confidence: number | null;
+  current_intent_evidence: Array<{ label?: string; value?: string; [key: string]: unknown }>;
+  sentiment_score: number;
+  engagement_score: number;
+  likely_ppv_buyer: number;
+  custom_buyer: number;
+  tipper: number;
+  renewal_likelihood: number;
+  churn_probability: number;
+  vip_potential: number;
+  whale_potential: number;
+  ai_briefing: string;
+  recommended_next_action: string | null;
+  suggested_script: string | null;
+  confidence: number;
+  provider: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+  classifications?: OfMessageClassification[];
+  summary_versions?: OfConversationSummaryVersion[];
 }
 
 export interface OfRelationshipTimelineItem {
@@ -184,6 +282,17 @@ export interface OfContextEvent {
   emitted_at: string;
   delivered_at: string | null;
   error_message: string | null;
+}
+
+export interface SubscriberWorkspaceTimelineItem {
+  id: string;
+  source: "relationship" | "task" | "event" | "sync";
+  type: string;
+  title: string;
+  detail: string | null;
+  actor: string;
+  occurred_at: string;
+  metadata?: Record<string, unknown>;
 }
 
 export interface OfChat {
@@ -243,16 +352,59 @@ export interface OfTask {
   rule_name: string;
   rule_version: string;
   priority: TaskPriority;
+  priority_score: number;
+  priority_reason: string | null;
   status: TaskStatus;
   title: string;
   description: string | null;
+  reason: string | null;
+  evidence: Array<{ label?: string; value?: string; [key: string]: unknown }>;
+  confidence: number;
+  recommended_action: string | null;
+  suggested_action: string | null;
+  suggested_script: string | null;
+  ai_suggestion: {
+    suggested_reply?: string;
+    suggested_script?: string;
+    confidence?: number;
+    expected_outcome?: string;
+    estimated_conversion?: string | number;
+    [key: string]: unknown;
+  };
   source?: TaskSource;
   due_at: string | null;
   resolution_note: string | null;
   created_at: string;
   updated_at: string;
+  started_at: string | null;
   completed_at: string | null;
+  cancelled_at: string | null;
+  completed_by: string | null;
+  cancelled_by: string | null;
+  ignore_reason: string | null;
+  assigned_to: string | null;
+  viewed_at: string | null;
+  archived_at: string | null;
+  execution_count: number;
+  last_triggered_at: string | null;
+  cooldown_until: string | null;
+  next_eligible_at: string | null;
+  of_task_timeline?: OfTaskTimelineItem[];
   of_creators?: Pick<OfCreator, "username" | "display_name"> | null;
+}
+
+export interface OfTaskTimelineItem {
+  id: string;
+  task_id: string;
+  creator_id: string;
+  event_type: TaskTimelineEventType;
+  actor: string;
+  from_status: TaskStatus | string | null;
+  to_status: TaskStatus | string | null;
+  title: string;
+  detail: string | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
 }
 
 export interface OfRecommendation {

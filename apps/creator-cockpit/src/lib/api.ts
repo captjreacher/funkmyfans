@@ -2,6 +2,7 @@ import type {
   MessageScriptTemplate,
   OfAutomationRun,
   OfChat,
+  OfConversationIntelligence,
   OfCreator,
   OfCreatorSnapshot,
   OfEvent,
@@ -14,6 +15,7 @@ import type {
   OfSubscriberRelationship,
   OfSyncRun,
   OfTask,
+  SubscriberWorkspaceTimelineItem,
   SyncType
 } from "@funkmyfans/of-types";
 
@@ -46,6 +48,21 @@ export interface CreatorDetailData {
   relationships: OfSubscriberRelationship[];
   relationshipTimeline: OfRelationshipTimelineItem[];
   contextEvents: OfContextEvent[];
+}
+
+export interface SubscribersData {
+  creators: OfCreator[];
+  subscribers: OfSubscriberRelationship[];
+  tasks: OfTask[];
+}
+
+export interface SubscriberDetailData {
+  subscriber: OfSubscriberRelationship;
+  creator: OfCreator | null;
+  tasks: OfTask[];
+  events: OfEvent[];
+  timeline: SubscriberWorkspaceTimelineItem[];
+  intelligence: OfConversationIntelligence | null;
 }
 
 export interface AutomationRunSummary {
@@ -94,13 +111,62 @@ export async function fetchTasks(filters: Record<string, string> = {}): Promise<
   return apiJson<{ tasks: OfTask[] }>(`/tasks${query ? `?${query}` : ""}`);
 }
 
+export async function fetchSubscribers(filters: Record<string, string> = {}): Promise<SubscribersData> {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(filters)) {
+    if (value && value !== "all") params.set(key, value);
+  }
+  const query = params.toString();
+  return apiJson<SubscribersData>(`/subscribers${query ? `?${query}` : ""}`);
+}
+
+export async function fetchSubscriberDetail(subscriberId: string): Promise<SubscriberDetailData> {
+  assertUuid(subscriberId, "subscriber");
+  return apiJson<SubscriberDetailData>(`/subscribers/${subscriberId}`);
+}
+
+export async function fetchSubscriberTimeline(subscriberId: string): Promise<{ timeline: SubscriberWorkspaceTimelineItem[] }> {
+  assertUuid(subscriberId, "subscriber");
+  return apiJson<{ timeline: SubscriberWorkspaceTimelineItem[] }>(`/subscribers/${subscriberId}/timeline`);
+}
+
+export async function fetchSubscriberIntelligence(subscriberId: string): Promise<{ intelligence: OfConversationIntelligence }> {
+  assertUuid(subscriberId, "subscriber");
+  return apiJson<{ intelligence: OfConversationIntelligence }>(`/subscribers/${subscriberId}/intelligence`);
+}
+
+export async function recalculateSubscriberIntelligence(subscriberId: string): Promise<{ intelligence: OfConversationIntelligence }> {
+  assertUuid(subscriberId, "subscriber");
+  return apiJson<{ intelligence: OfConversationIntelligence }>(`/subscribers/${subscriberId}/recalculate`, { method: "POST" });
+}
+
+export async function recalculateAllSubscriberIntelligence(): Promise<{ recalculated: number; errors: string[] }> {
+  return apiJson<{ recalculated: number; errors: string[] }>("/subscribers/recalculate-all", { method: "POST" });
+}
+
+export async function createSubscriberTask(
+  subscriberId: string,
+  body: { title: string; reason?: string; priorityScore?: number; dueAt?: string | null; recommendedAction?: string }
+): Promise<{ task: OfTask }> {
+  assertUuid(subscriberId, "subscriber");
+  return apiJson<{ task: OfTask }>(`/subscribers/${subscriberId}/tasks`, jsonInit("POST", body));
+}
+
+export async function updateSubscriberRelationship(
+  subscriberId: string,
+  patch: Partial<Pick<OfSubscriberRelationship, "automation_paused" | "human_takeover" | "auto_send_enabled" | "current_workflow">>
+): Promise<{ subscriber: OfSubscriberRelationship }> {
+  assertUuid(subscriberId, "subscriber");
+  return apiJson<{ subscriber: OfSubscriberRelationship }>(`/subscribers/${subscriberId}`, jsonInit("PATCH", patch));
+}
+
 export async function generateCreatorTasks(creatorId: string): Promise<TaskGenerationSummary> {
   return apiJson<TaskGenerationSummary>(`/creators/${creatorId}/tasks/generate`, { method: "POST" });
 }
 
 export async function updateTask(
   taskId: string,
-  patch: Partial<Pick<OfTask, "status" | "priority" | "due_at" | "resolution_note">>
+  patch: Partial<Pick<OfTask, "status" | "priority" | "due_at" | "resolution_note" | "ignore_reason" | "assigned_to">> & { viewed?: boolean; actor?: string }
 ): Promise<{ task: OfTask }> {
   return apiJson<{ task: OfTask }>(`/tasks/${taskId}`, jsonInit("PATCH", patch));
 }

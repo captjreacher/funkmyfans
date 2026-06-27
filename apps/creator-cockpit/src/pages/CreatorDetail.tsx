@@ -84,7 +84,7 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
     setTab("Tasks");
   }
 
-  async function handleTaskStatus(taskId: string, status: "in_progress" | "done" | "dismissed") {
+  async function handleTaskStatus(taskId: string, status: "in_progress" | "waiting" | "completed" | "ignored") {
     await updateTask(taskId, { status });
     const detail = await fetchCreatorDetail(creatorId);
     setData(detail);
@@ -361,13 +361,13 @@ function ChatsPanel({ data }: { data: CreatorDetailData }) {
   );
 }
 
-function TasksPanel({ data, onStatus }: { data: CreatorDetailData; onStatus: (taskId: string, status: "in_progress" | "done" | "dismissed") => void }) {
+function TasksPanel({ data, onStatus }: { data: CreatorDetailData; onStatus: (taskId: string, status: "in_progress" | "waiting" | "completed" | "ignored") => void }) {
   return (
     <section className="grid gap-4 xl:grid-cols-2">
       <TaskGroup title="Open Tasks" tasks={data.tasks.filter((task) => task.status === "open")} onStatus={onStatus} />
       <TaskGroup title="In Progress Tasks" tasks={data.tasks.filter((task) => task.status === "in_progress")} onStatus={onStatus} />
-      <TaskGroup title="Completed Tasks" tasks={data.tasks.filter((task) => task.status === "done")} onStatus={onStatus} />
-      <TaskGroup title="Dismissed Tasks" tasks={data.tasks.filter((task) => task.status === "dismissed")} onStatus={onStatus} />
+      <TaskGroup title="Waiting Tasks" tasks={data.tasks.filter((task) => task.status === "waiting")} onStatus={onStatus} />
+      <TaskGroup title="Completed Tasks" tasks={data.tasks.filter((task) => task.status === "completed")} onStatus={onStatus} />
     </section>
   );
 }
@@ -481,7 +481,7 @@ function ScriptsPanel({
   );
 }
 
-function TaskGroup({ title, tasks, onStatus }: { title: string; tasks: CreatorDetailData["tasks"]; onStatus: (taskId: string, status: "in_progress" | "done" | "dismissed") => void }) {
+function TaskGroup({ title, tasks, onStatus }: { title: string; tasks: CreatorDetailData["tasks"]; onStatus: (taskId: string, status: "in_progress" | "waiting" | "completed" | "ignored") => void }) {
   return (
     <div className="rounded-md border border-stone-200 bg-white">
       <div className="border-b border-stone-200 px-4 py-3">
@@ -499,14 +499,17 @@ function TaskGroup({ title, tasks, onStatus }: { title: string; tasks: CreatorDe
               <PriorityBadge priority={task.priority} />
             </div>
             <div className="mt-3 flex flex-wrap gap-2">
-              <button type="button" onClick={() => onStatus(task.id, "in_progress")} disabled={task.status === "in_progress" || task.status === "done"} className="rounded-md border border-stone-200 px-2 py-1 text-xs font-semibold text-stone-700 disabled:opacity-45">
+              <button type="button" onClick={() => onStatus(task.id, "in_progress")} disabled={task.status === "in_progress" || task.status === "completed"} className="rounded-md border border-stone-200 px-2 py-1 text-xs font-semibold text-stone-700 disabled:opacity-45">
                 Mark In Progress
               </button>
-              <button type="button" onClick={() => onStatus(task.id, "done")} disabled={task.status === "done"} className="rounded-md border border-stone-200 px-2 py-1 text-xs font-semibold text-stone-700 disabled:opacity-45">
-                Mark Done
+              <button type="button" onClick={() => onStatus(task.id, "waiting")} disabled={task.status === "waiting" || task.status === "completed"} className="rounded-md border border-stone-200 px-2 py-1 text-xs font-semibold text-stone-700 disabled:opacity-45">
+                Waiting
               </button>
-              <button type="button" onClick={() => onStatus(task.id, "dismissed")} disabled={task.status === "dismissed" || task.status === "done"} className="rounded-md border border-stone-200 px-2 py-1 text-xs font-semibold text-stone-700 disabled:opacity-45">
-                Dismiss
+              <button type="button" onClick={() => onStatus(task.id, "completed")} disabled={task.status === "completed"} className="rounded-md border border-stone-200 px-2 py-1 text-xs font-semibold text-stone-700 disabled:opacity-45">
+                Complete
+              </button>
+              <button type="button" onClick={() => onStatus(task.id, "ignored")} disabled={task.status === "ignored" || task.status === "completed"} className="rounded-md border border-stone-200 px-2 py-1 text-xs font-semibold text-stone-700 disabled:opacity-45">
+                Ignore
               </button>
             </div>
           </div>
