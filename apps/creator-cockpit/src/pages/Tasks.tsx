@@ -387,6 +387,8 @@ function TaskDetail({
             <Field label="Subscriber" value={subscriberName(task, relationships)} />
             <Field label="State" value={subscriber?.relationship_state ? labelize(subscriber.relationship_state) : "unknown"} />
             <Field label="LTV" value={money(subscriber?.lifetime_spend)} />
+            <Field label="Urgency" value={subscriber ? `${subscriber.urgency_score}/100` : "unknown"} />
+            <Field label="Revenue Opportunity" value={subscriber ? `${subscriber.revenue_opportunity_score}/100` : "unknown"} />
             <Field label="VIP Score" value={subscriber ? `${subscriber.vip_score}/100` : "unknown"} />
             <Field label="Churn Risk" value={subscriber ? `${subscriber.churn_risk}/100` : "unknown"} />
           </Panel>

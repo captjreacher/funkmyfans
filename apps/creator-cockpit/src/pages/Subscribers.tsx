@@ -6,6 +6,7 @@ import {
   fetchSubscriberDetail,
   fetchSubscribers,
   recalculateSubscriberIntelligence,
+  recalculateSubscriberScore,
   updateSubscriberRelationship,
   updateTask,
   type SubscriberDetailData,
@@ -96,8 +97,13 @@ export function Subscribers({
 
   async function handleRecalculateIntelligence() {
     if (!selectedSubscriber) return;
-    const result = await recalculateSubscriberIntelligence(selectedSubscriber.id);
-    setDetail((current) => current ? { ...current, intelligence: result.intelligence } : current);
+    const intelligenceResult = await recalculateSubscriberIntelligence(selectedSubscriber.id);
+    const scoreResult = await recalculateSubscriberScore(selectedSubscriber.id);
+    setDetail((current) => current ? { ...current, intelligence: intelligenceResult.intelligence, subscriber: scoreResult.subscriber } : current);
+    setData((current) => ({
+      ...current,
+      subscribers: current.subscribers.map((item) => (item.id === scoreResult.subscriber.id ? scoreResult.subscriber : item))
+    }));
   }
 
   return (
@@ -324,13 +330,28 @@ function SubscriberDetail({
           <Panel title="Profile Summary">
             <div className="grid gap-3 md:grid-cols-4">
               <Field label="Relationship" value={`${subscriber.relationship_score}/100`} />
+              <Field label="Revenue Opportunity" value={`${subscriber.revenue_opportunity_score}/100`} />
+              <Field label="Urgency" value={`${subscriber.urgency_score}/100`} />
               <Field label="Engagement" value={`${subscriber.engagement_score}/100`} />
               <Field label="VIP" value={`${subscriber.vip_score}/100`} />
               <Field label="Churn Risk" value={`${subscriber.churn_risk}/100`} />
+              <Field label="AI Confidence" value={`${subscriber.ai_confidence_score}/100`} />
               <Field label="First Seen" value={date(subscriber.first_seen_at)} />
               <Field label="Last Seen" value={date(subscriber.last_seen_at)} />
               <Field label="Country" value={subscriber.country ?? "unknown"} />
               <Field label="Tier" value={subscriber.subscription_tier ?? "unknown"} />
+            </div>
+          </Panel>
+
+          <Panel title="Relationship Intelligence">
+            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+              <ScoreCard label="Relationship" value={subscriber.relationship_score} reason={subscriber.relationship_score_reason} />
+              <ScoreCard label="Revenue Opportunity" value={subscriber.revenue_opportunity_score} reason={subscriber.revenue_opportunity_score_reason} />
+              <ScoreCard label="Urgency" value={subscriber.urgency_score} reason={subscriber.urgency_score_reason} />
+              <ScoreCard label="Churn Risk" value={subscriber.churn_risk} reason={subscriber.churn_risk_reason} />
+              <ScoreCard label="VIP Potential" value={subscriber.vip_score} reason={subscriber.vip_score_reason} />
+              <ScoreCard label="Engagement" value={subscriber.engagement_score} reason={subscriber.engagement_score_reason} />
+              <ScoreCard label="AI Confidence" value={subscriber.ai_confidence_score} reason={subscriber.ai_confidence_score_reason} />
             </div>
           </Panel>
 
@@ -504,6 +525,25 @@ function Signal({ label, value, icon: Icon }: { label: string; value: number | s
         <Icon className="h-4 w-4 shrink-0 text-teal-700" aria-hidden="true" />
       </div>
       {numeric ? <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-stone-100"><div className="h-full rounded-full bg-teal-700" style={{ width: `${Math.max(0, Math.min(100, value))}%` }} /></div> : null}
+    </div>
+  );
+}
+
+function ScoreCard({ label, value, reason }: { label: string; value: number; reason: string | null | undefined }) {
+  const score = Math.max(0, Math.min(100, value ?? 0));
+  const tone = score >= 75 ? "bg-emerald-600" : score >= 50 ? "bg-teal-700" : "bg-amber-600";
+  return (
+    <div className="rounded-md border border-stone-200 p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="text-xs font-medium uppercase tracking-wide text-stone-500">{label}</div>
+          <div className="mt-1 text-lg font-semibold text-stone-950">{score}/100</div>
+        </div>
+        <div className="h-2 w-16 overflow-hidden rounded-full bg-stone-100">
+          <div className={`h-full rounded-full ${tone}`} style={{ width: `${score}%` }} />
+        </div>
+      </div>
+      <p className="mt-2 text-sm leading-5 text-stone-600">{reason ?? "No score reason recorded yet."}</p>
     </div>
   );
 }

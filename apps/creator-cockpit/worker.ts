@@ -5,7 +5,7 @@ import {
   normalizeCreatorSnapshot,
   normalizeSubscribers
 } from "@funkmyfans/betterfans-client";
-import { generateTaskDrafts, type TaskRuleDraft } from "@funkmyfans/of-rules-engine";
+import { calculateRelationshipIntelligence, calculateTaskPriority, generateTaskDrafts, type TaskRuleDraft } from "@funkmyfans/of-rules-engine";
 import type {
   ConversationIntent,
   ConversationSentiment,
@@ -82,18 +82,6 @@ interface ConversationIntelligenceDraft {
   suggested_script: string;
   confidence: number;
   metadata: Record<string, unknown>;
-}
-
-interface TaskPriorityInput {
-  status?: unknown;
-  due_at?: unknown;
-  task_type?: unknown;
-  rule_name?: unknown;
-  title?: unknown;
-  reason?: unknown;
-  description?: unknown;
-  recommended_action?: unknown;
-  suggested_action?: unknown;
 }
 
 interface ConversationIntelligenceProvider {
@@ -240,6 +228,11 @@ if (request.method === "GET" && url.pathname === "/api/dashboard") {
     return Response.json(result, { headers: jsonHeaders });
   }
 
+  if (request.method === "POST" && url.pathname === "/api/subscribers/score-all") {
+    const summary = await recalculateAllRelationshipScores(supabase);
+    return Response.json(summary, { headers: jsonHeaders });
+  }
+
   if (request.method === "POST" && url.pathname === "/api/subscribers/recalculate-all") {
     const summary = await recalculateAllSubscriberIntelligence(supabase);
     return Response.json(summary, { headers: jsonHeaders });
@@ -255,6 +248,12 @@ if (request.method === "GET" && url.pathname === "/api/dashboard") {
   if (request.method === "POST" && subscriberRecalculateMatch) {
     const intelligence = await recalculateSubscriberIntelligence(supabase, subscriberRecalculateMatch[1]);
     return Response.json({ intelligence }, { headers: jsonHeaders });
+  }
+
+  const subscriberScoreMatch = url.pathname.match(/^\/api\/subscribers\/([^/]+)\/score$/);
+  if (request.method === "POST" && subscriberScoreMatch) {
+    const subscriber = await recalculateSubscriberRelationshipScore(supabase, subscriberScoreMatch[1]);
+    return Response.json({ subscriber }, { headers: jsonHeaders });
   }
 
   const subscriberMatch = url.pathname.match(/^\/api\/subscribers\/([^/]+)$/);
@@ -716,9 +715,9 @@ async function getSubscriberIntelligence(
   assertNoError(summaryVersionsResult.error);
 
   return {
-    intelligence: intelligenceResult.data,
+    ...(intelligenceResult.data ?? {}),
     classifications: classificationsResult.data ?? [],
-    summary_versions: summaryVersionsResult.data ?? [],
+    summary_versions: summaryVersionsResult.data ?? []
   };
 }
 async function recalculateAllSubscriberIntelligence(supabase: SupabaseClient) {
@@ -739,6 +738,92 @@ async function recalculateAllSubscriberIntelligence(supabase: SupabaseClient) {
     }
   }
   return summary;
+}
+
+async function recalculateAllRelationshipScores(supabase: SupabaseClient, creatorId?: string) {
+  let query = supabase
+    .from("of_subscriber_relationships")
+    .select("id")
+    .order("updated_at", { ascending: false })
+    .limit(1000);
+  if (creatorId) query = query.eq("creator_id", creatorId);
+  const relationships = await query;
+  assertNoError(relationships.error);
+
+  const summary = { recalculated: 0, tasksUpdated: 0, errors: [] as string[] };
+  for (const relationship of relationships.data ?? []) {
+    try {
+      const scored = await recalculateSubscriberRelationshipScore(supabase, String(relationship.id));
+      summary.recalculated++;
+      summary.tasksUpdated += Number(scored.tasksUpdated ?? 0);
+    } catch (error) {
+      summary.errors.push(error instanceof Error ? error.message : "Unexpected relationship score recalculation error");
+    }
+  }
+  return summary;
+}
+
+async function recalculateSubscriberRelationshipScore(supabase: SupabaseClient, subscriberId: string): Promise<Record<string, unknown>> {
+  if (!isUuid(subscriberId)) throw new Error("Subscriber id must be a database UUID");
+  const relationship = await supabase
+    .from("of_subscriber_relationships")
+    .select("*, of_relationship_summaries(*), of_conversation_intelligence(*), of_creators(username, display_name)")
+    .eq("id", subscriberId)
+    .single();
+  assertNoError(relationship.error);
+  if (!relationship.data) throw new Error("Subscriber relationship not found");
+
+  const [tasks, events] = await Promise.all([
+    listSubscriberTasks(supabase, relationship.data),
+    loadConversationEvents(supabase, relationship.data)
+  ]);
+  const intelligence = firstRelatedRecord(relationship.data.of_conversation_intelligence);
+  const scores = calculateRelationshipIntelligence({
+    relationship: relationship.data,
+    tasks,
+    events,
+    intelligence
+  });
+  const patch = {
+    ...scores,
+    metadata: {
+      ...(isRecord(relationship.data.metadata) ? relationship.data.metadata : {}),
+      relationship_intelligence: {
+        scored_at: new Date().toISOString(),
+        engine: "deterministic-of-3.1"
+      }
+    }
+  };
+
+  const updated = await supabase
+    .from("of_subscriber_relationships")
+    .update(patch)
+    .eq("id", subscriberId)
+    .select("*, of_relationship_summaries(*), of_conversation_intelligence(*), of_creators(username, display_name)")
+    .single();
+  assertNoError(updated.error);
+  const tasksUpdated = await updateRelatedTaskPriorities(supabase, updated.data, tasks);
+  return { ...updated.data, tasksUpdated };
+}
+
+async function updateRelatedTaskPriorities(supabase: SupabaseClient, relationship: Record<string, unknown>, tasks: Record<string, unknown>[]) {
+  let updated = 0;
+  for (const task of tasks) {
+    if (!isActiveTaskStatus(String(task.status ?? ""))) continue;
+    const priority = calculateTaskPriority(task, relationship);
+    if (Number(task.priority_score ?? 0) === priority.score && task.priority === priority.priority && task.priority_reason === priority.reason) continue;
+    const result = await supabase
+      .from("of_tasks")
+      .update({
+        priority: priority.priority,
+        priority_score: priority.score,
+        priority_reason: priority.reason
+      })
+      .eq("id", task.id);
+    assertNoError(result.error);
+    updated++;
+  }
+  return updated;
 }
 
 async function recalculateSubscriberIntelligence(supabase: SupabaseClient, subscriberId: string): Promise<Record<string, unknown>> {
@@ -841,6 +926,7 @@ async function recalculateSubscriberIntelligence(supabase: SupabaseClient, subsc
 
   await recordIntelligenceTimeline(supabase, relationship.data, previous, draft, sourceEventId);
   await updateRelationshipFromIntelligence(supabase, relationship.data, draft);
+  await recalculateSubscriberRelationshipScore(supabase, subscriberId);
   return getSubscriberIntelligence(supabase, subscriberId);
 }
 
@@ -1153,78 +1239,6 @@ function subscriberTaskCount(subscriber: Record<string, unknown>, tasks: Record<
   return tasks.filter((task) =>
     (task.source_type === "subscriber" && task.source_id === subscriber.id) || task.subscriber_id === subscriber.subscriber_id
   ).length;
-}
-
-function calculateTaskPriority(task: TaskPriorityInput, relationship?: Record<string, unknown> | null) {
-  let score = 0;
-  const reasons: string[] = [];
-  const now = new Date();
-  const status = String(task.status ?? "");
-  const dueAt = typeof task.due_at === "string" && task.due_at ? new Date(task.due_at) : null;
-
-  if (status === "open") add(20, "Open task");
-  if (status === "in_progress") add(30, "In progress");
-  if (status === "waiting") add(10, "Waiting on follow-up");
-  if (dueAt && dueAt.getTime() < now.getTime() && isActiveTaskStatus(status)) add(25, "Overdue");
-  else if (dueAt && isSameDay(dueAt, now)) add(15, "Due today");
-
-  const searchableTask = [
-    task.task_type,
-    task.rule_name,
-    task.title,
-    task.reason,
-    task.description,
-    task.recommended_action,
-    task.suggested_action
-  ].filter(Boolean).join(" ").toLowerCase();
-
-  if (searchableTask.includes("send_welcome_message") || searchableTask.includes("welcome")) add(25, "Welcome outstanding");
-  if (searchableTask.includes("renewal")) add(30, "Renewal opportunity");
-  if (searchableTask.includes("churn") || searchableTask.includes("at risk")) add(35, "Churn risk");
-  if (searchableTask.includes("vip")) add(40, "VIP follow-up");
-  if (searchableTask.includes("ppv") || searchableTask.includes("purchase") || searchableTask.includes("offer")) add(35, "PPV opportunity");
-  if (searchableTask.includes("manual")) add(15, "Manual task");
-
-  if (relationship) {
-    const subscription = String(relationship.current_subscription_status ?? "").toLowerCase();
-    if (relationship.relationship_state === "new_subscriber") add(20, "New subscriber");
-    if (subscription.includes("active")) add(10, "Active subscriber");
-    if (relationship.relationship_state === "expired" || subscription.includes("expired")) add(15, "Expired subscriber");
-    const lifetimeSpend = Number(relationship.lifetime_spend ?? 0);
-    if (lifetimeSpend > 100) add(20, "Lifetime spend over $100");
-    else if (lifetimeSpend > 0) add(10, "Has lifetime spend");
-    if (Number(relationship.vip_score ?? 0) > 50) add(20, "VIP score over 50");
-    if (Number(relationship.churn_risk ?? 0) > 50) add(25, "Churn risk over 50");
-    if (Number(relationship.engagement_score ?? 0) > 50) add(10, "Engagement score over 50");
-  }
-
-  const cappedScore = Math.max(0, Math.min(100, Math.round(score)));
-  const uniqueReasons = Array.from(new Set(reasons));
-  return {
-    score: cappedScore,
-    priority: priorityFromScore(cappedScore),
-    reason: uniqueReasons.length ? `${uniqueReasons.slice(0, 4).join(", ")}.` : "No high-priority signals detected."
-  };
-
-  function add(points: number, reason: string) {
-    score += points;
-    reasons.push(reason);
-  }
-}
-
-function priorityFromScore(score: number): "low" | "medium" | "high" | "urgent" {
-  if (score >= 85) return "urgent";
-  if (score >= 65) return "high";
-  if (score >= 40) return "medium";
-  return "low";
-}
-
-function isActiveTaskStatus(status: string) {
-  return status === "open" || status === "in_progress" || status === "waiting";
-}
-
-function isSameDay(left: Date, right: Date) {
-  return left.getFullYear() === right.getFullYear() && left.getMonth() === right.getMonth() && left.getDate() === right.getDate();
 }
 
 async function updateTask(supabase: SupabaseClient, taskId: string, body: Record<string, unknown>) {
@@ -1652,6 +1666,24 @@ async function executeTaskOnlyAction(
   context: EventActionContext
 ): Promise<AutomationActionResult> {
   const title = script.name ? String(script.name) : `Handle ${String(event.event_type ?? "event")}`;
+  const relationship = context.relationshipId
+    ? await supabase.from("of_subscriber_relationships").select("*").eq("id", context.relationshipId).maybeSingle()
+    : { data: null, error: null };
+  assertNoError(relationship.error);
+  const priority = calculateTaskPriority(
+    {
+      status: "open",
+      due_at: new Date().toISOString(),
+      task_type: `automation.${String(event.event_type ?? "event")}`,
+      rule_name: title,
+      title,
+      reason: `Event action matched ${String(event.event_type ?? "event")} and requires operator review.`,
+      description: `Automation ${runId} created a task for fan ${fanId}.`,
+      recommended_action: "Review the event context and complete the scripted action manually.",
+      suggested_action: "review_task"
+    },
+    relationship.data
+  );
   const inserted = await supabase.from("of_tasks").insert({
     creator_id: event.creator_id,
     source_type: "event",
@@ -1662,9 +1694,9 @@ async function executeTaskOnlyAction(
     task_type: `automation.${String(event.event_type ?? "event")}`,
     rule_name: title,
     rule_version: "event_actions_v1",
-    priority: "medium",
-    priority_score: 62,
-    priority_reason: "Automation rule matched an event but is configured for human task handling.",
+    priority: priority.priority,
+    priority_score: priority.score,
+    priority_reason: priority.reason,
     status: "open",
     title,
     description: `Automation ${runId} created a task for fan ${fanId}.`,
@@ -2074,7 +2106,9 @@ async function executeSync(
 
   if (syncType === "subscribers") {
     const subscribers = await client.getSubscribers(accountId);
-    return persistSubscribers(supabase, creatorId, subscribers);
+    const subscriberCount = await persistSubscribers(supabase, creatorId, subscribers);
+    await recalculateAllRelationshipScores(supabase, creatorId);
+    return subscriberCount;
   }
 
   if (syncType === "chats") {
@@ -2092,6 +2126,7 @@ async function executeSync(
   const snapshotCount = await persistCreatorSnapshot(supabase, creatorId, stats, profile, subscribers, chats);
   const subscriberCount = await persistSubscribers(supabase, creatorId, subscribers);
   const chatCount = await persistChats(supabase, creatorId, chats);
+  await recalculateAllRelationshipScores(supabase, creatorId);
   return 1 + snapshotCount + subscriberCount + chatCount;
 }
 
@@ -2402,6 +2437,10 @@ function firstRelatedRecord(value: unknown): Record<string, unknown> | null {
 function clampScore(value: number) {
   if (!Number.isFinite(value)) return 0;
   return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function isActiveTaskStatus(status: string) {
+  return status === "open" || status === "in_progress" || status === "waiting";
 }
 
 function scoreSentiment(text: string, messageCount: number) {

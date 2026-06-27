@@ -1,4 +1,4 @@
-import { AlertTriangle, ArrowUpRight, Bot, CheckCircle2, Clock3, ClipboardList, DollarSign, HeartPulse, Sparkles, Users, Zap } from "lucide-react";
+import { AlertTriangle, ArrowUpRight, Bot, Clock3, ClipboardList, DollarSign, HeartPulse, Sparkles, Users, Zap } from "lucide-react";
 import { MetricTile } from "../components/MetricTile";
 import { PriorityBadge } from "../components/PriorityBadge";
 import type { DashboardData } from "../lib/api";
@@ -7,19 +7,20 @@ import { getDisplayTaskPriority } from "../lib/taskPriority";
 export function Dashboard({ data, onOpenCreator }: { data: DashboardData; onOpenCreator: (id: string) => void }) {
   const latestSnapshot = data.snapshots[0];
   const now = Date.now();
-  const today = new Date().toISOString().slice(0, 10);
   const openTasks = data.tasks.filter((task) => task.status === "open").length;
   const urgentTasks = data.tasks.filter((task) => getDisplayTaskPriority(task, relationshipForTask(task, data.relationships)).score >= 85 && isActiveTask(task.status)).length;
   const overdueTasks = data.tasks.filter((task) => task.due_at && new Date(task.due_at).getTime() < now && isActiveTask(task.status)).length;
-  const completedToday = data.tasks.filter((task) => task.status === "completed" && task.completed_at?.slice(0, 10) === today).length;
   const activeTasks = data.tasks.filter((task) => isActiveTask(task.status));
+  const highUrgencySubscribers = data.relationships.filter((item) => item.urgency_score >= 70).length;
   const vipOpportunities = data.relationships.filter((item) => item.vip_score >= 75 || item.relationship_state === "vip").length;
-  const buyingSignals = activeTasks.filter((task) => task.task_type.includes("transaction") || task.reason?.toLowerCase().includes("buy") || task.recommended_action?.toLowerCase().includes("offer")).length;
+  const revenueOpportunities = data.relationships.filter((item) => item.revenue_opportunity_score >= 70).length;
   const churnRisks = data.relationships.filter((item) => item.churn_risk >= 70 || item.relationship_state === "at_risk").length;
-  const potentialRevenue = Math.round(data.relationships.reduce((sum, item) => sum + (item.average_order_value || 0), 0) + buyingSignals * 120);
-  const aiRecommendations = activeTasks.filter((task) => task.ai_suggestion || task.recommended_action || task.suggested_script).length;
+  const potentialRevenue = Math.round(data.relationships.reduce((sum, item) => sum + ((item.revenue_opportunity_score || 0) / 100) * Math.max(50, item.average_order_value || 80), 0));
+  const aiRecommendations = data.relationships.filter((item) => item.ai_confidence_score >= 65 && item.recommended_next_action).length + activeTasks.filter((task) => task.ai_suggestion || task.recommended_action || task.suggested_script).length;
   const topTasks = [...activeTasks].sort((a, b) => getDisplayTaskPriority(b, relationshipForTask(b, data.relationships)).score - getDisplayTaskPriority(a, relationshipForTask(a, data.relationships)).score).slice(0, 5);
-  const topRelationships = [...data.relationships].sort((a, b) => b.vip_score + b.relationship_score - (a.vip_score + a.relationship_score)).slice(0, 5);
+  const topRelationships = [...data.relationships]
+    .sort((a, b) => b.urgency_score + b.revenue_opportunity_score + b.vip_score + b.churn_risk - (a.urgency_score + a.revenue_opportunity_score + a.vip_score + a.churn_risk))
+    .slice(0, 5);
 
   return (
     <main className="space-y-6 animate-in-soft">
@@ -41,11 +42,12 @@ export function Dashboard({ data, onOpenCreator }: { data: DashboardData; onOpen
           </div>
           <div className="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
             <BriefMetric label="New Subscribers" value={String(latestSnapshot?.active_subscribers ?? 0)} icon={Users} tone="text-cyan-300" />
+            <BriefMetric label="High Urgency" value={String(highUrgencySubscribers)} icon={Zap} tone="text-rose-300" />
             <BriefMetric label="VIP Opportunities" value={String(vipOpportunities)} icon={Sparkles} tone="text-pink-300" />
-            <BriefMetric label="Buying Signals" value={String(buyingSignals)} icon={DollarSign} tone="text-emerald-300" />
+            <BriefMetric label="Revenue Opportunities" value={String(revenueOpportunities)} icon={DollarSign} tone="text-emerald-300" />
             <BriefMetric label="Churn Risks" value={String(churnRisks)} icon={AlertTriangle} tone="text-amber-300" />
             <BriefMetric label="AI Recommendations" value={String(aiRecommendations)} icon={Bot} tone="text-violet-300" />
-            <BriefMetric label="Completed Today" value={String(completedToday)} icon={CheckCircle2} tone="text-green-300" />
+            <BriefMetric label="Overdue Tasks" value={String(overdueTasks)} icon={Clock3} tone="text-orange-300" />
           </div>
         </div>
 

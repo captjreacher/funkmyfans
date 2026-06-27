@@ -144,6 +144,15 @@ export async function recalculateAllSubscriberIntelligence(): Promise<{ recalcul
   return apiJson<{ recalculated: number; errors: string[] }>("/subscribers/recalculate-all", { method: "POST" });
 }
 
+export async function recalculateSubscriberScore(subscriberId: string): Promise<{ subscriber: OfSubscriberRelationship }> {
+  assertUuid(subscriberId, "subscriber");
+  return apiJson<{ subscriber: OfSubscriberRelationship }>(`/subscribers/${subscriberId}/score`, { method: "POST" });
+}
+
+export async function recalculateAllSubscriberScores(): Promise<{ recalculated: number; tasksUpdated: number; errors: string[] }> {
+  return apiJson<{ recalculated: number; tasksUpdated: number; errors: string[] }>("/subscribers/score-all", { method: "POST" });
+}
+
 export async function createSubscriberTask(
   subscriberId: string,
   body: { title: string; reason?: string; priorityScore?: number; dueAt?: string | null; recommendedAction?: string }
