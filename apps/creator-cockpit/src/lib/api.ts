@@ -77,6 +77,26 @@ export interface AutomationRunSummary {
   errors: string[];
 }
 
+export type CreatorOnboardingService =
+  | "chat_management"
+  | "welcome_automation"
+  | "subscriber_crm"
+  | "content_vault"
+  | "analytics"
+  | "ai_coach";
+
+export interface CreatorCreatePayload {
+  platform_provider: string;
+  betterfans_account_id: string;
+  username: string;
+  display_name: string;
+  location: string;
+  status: string;
+  onboarding_status: string;
+  services: CreatorOnboardingService[];
+  notes: string;
+}
+
 export interface TaskGenerationSummary {
   created: number;
   skipped: number;
@@ -100,6 +120,14 @@ export async function fetchDashboard(): Promise<DashboardData> {
 
 export async function fetchCreatorDetail(creatorId: string): Promise<CreatorDetailData> {
   return apiJson<CreatorDetailData>(`/creators/${creatorId}`);
+}
+
+export async function createCreator(payload: CreatorCreatePayload): Promise<{ creator: OfCreator }> {
+  return apiJson<{ creator: OfCreator }>("/creators", jsonInit("POST", payload));
+}
+
+export async function validateCreatorConnection(betterfansAccountId: string): Promise<{ valid: boolean; duplicate: boolean; creator: Pick<OfCreator, "betterfans_account_id" | "username" | "display_name" | "location" | "status" | "onboarding_status"> }> {
+  return apiJson<{ valid: boolean; duplicate: boolean; creator: Pick<OfCreator, "betterfans_account_id" | "username" | "display_name" | "location" | "status" | "onboarding_status"> }>("/creators/validate", jsonInit("POST", { betterfans_account_id: betterfansAccountId }));
 }
 
 export async function fetchEvents(): Promise<{ events: OfEvent[] }> {

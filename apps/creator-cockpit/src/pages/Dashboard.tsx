@@ -1,15 +1,17 @@
-import { AlertTriangle, ArrowUpRight, Bot, Clock3, ClipboardList, DollarSign, HeartPulse, Sparkles } from "lucide-react";
+import { AlertTriangle, ArrowUpRight, Bot, Clock3, ClipboardList, DollarSign, HeartPulse, Plus, Sparkles } from "lucide-react";
 import { MetricTile } from "../components/MetricTile";
 import type { DashboardData } from "../lib/api";
 
 export function Dashboard({
   data,
   onOpenCreator,
-  onOpenSubscribers
+  onOpenSubscribers,
+  onConnectCreator
 }: {
   data: DashboardData;
   onOpenCreator: (id: string) => void;
   onOpenSubscribers: (filters: Record<string, string>) => void;
+  onConnectCreator: () => void;
 }) {
   const latestSnapshot = data.snapshots[0];
   const now = Date.now();
@@ -20,6 +22,17 @@ export function Dashboard({
 
   return (
     <main className="space-y-6 animate-in-soft">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <h2 className="text-2xl font-semibold text-white">Dashboard</h2>
+          <p className="mt-1 text-sm text-blue-100/58">Operational status, task pressure, and the next creator move.</p>
+        </div>
+        <button type="button" onClick={onConnectCreator} className="inline-flex items-center gap-2 rounded-xl bg-cyan-400 px-4 py-2.5 text-sm font-semibold text-slate-950 shadow-[0_0_0_1px_rgba(34,211,238,0.15)] hover:bg-cyan-300">
+          <Plus className="h-4 w-4" aria-hidden="true" />
+          + Connect Creator
+        </button>
+      </div>
+
       <section className="grid gap-4 xl:grid-cols-[1.25fr_0.75fr]">
         <div className="glass-panel overflow-hidden rounded-2xl p-5">
           <div className="flex flex-col justify-between gap-4 md:flex-row md:items-start">

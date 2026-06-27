@@ -103,6 +103,9 @@ export default {
       try {
         return await handleApi(request, env, url);
       } catch (error) {
+        if (error instanceof ApiError) {
+          return Response.json({ error: error.message }, { status: error.status, headers: jsonHeaders });
+        }
         return Response.json(
           { error: error instanceof Error ? error.message : "Unexpected Cockpit API error" },
           { status: 500, headers: jsonHeaders }
@@ -113,6 +116,14 @@ export default {
     return env.ASSETS.fetch(request);
   }
 };
+
+class ApiError extends Error {
+  constructor(public readonly status: number, message: string) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
 async function handleApi(request: Request, env: Env, url: URL): Promise<Response> {
   const supabase = createServiceClient(env);
 if (request.method === "GET" && url.pathname === "/api/dashboard") {
@@ -163,6 +174,18 @@ if (request.method === "GET" && url.pathname === "/api/dashboard") {
       .order("created_at", { ascending: false });
     assertNoError(result.error);
     return Response.json({ creators: result.data ?? [] }, { headers: jsonHeaders });
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/creators/validate") {
+    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const result = await validateCreatorConnection(supabase, env, body);
+    return Response.json({ valid: true, duplicate: result.duplicate, creator: result.creator }, { headers: jsonHeaders });
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/creators") {
+    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const creator = await createCreatorRecord(supabase, body);
+    return Response.json({ creator }, { status: 201, headers: jsonHeaders });
   }
 
   const creatorMatch = url.pathname.match(/^\/api\/creators\/([^/]+)$/);
@@ -2152,6 +2175,165 @@ async function hydrateOutboundMessage(supabase: SupabaseClient, messageId: strin
     .single();
   assertNoError(result.error);
   return result.data;
+}
+
+async function validateCreatorConnection(
+  supabase: SupabaseClient,
+  env: Env,
+  body: Record<string, unknown>
+): Promise<{ creator: Record<string, unknown>; duplicate: boolean }> {
+  const platformProvider = stringValue(body.platform_provider, "betterfans");
+  if (platformProvider !== "betterfans") {
+    throw new ApiError(400, "Connection validation currently supports BetterFans creators only");
+  }
+
+  const betterfansAccountId = stringValue(body.betterfans_account_id);
+  if (!betterfansAccountId) {
+    throw new ApiError(400, "betterfans_account_id is required");
+  }
+
+  const client = new BetterFansOperationalClient({
+    apiKey: env.BETTERFANS_API_KEY,
+    baseUrl: env.BETTERFANS_BASE_URL || undefined
+  });
+
+  try {
+    const profile = await client.getCreatorProfile(betterfansAccountId);
+    const creator = normalizeCreatorProfile(betterfansAccountId, profile);
+    const existing = await supabase.from("of_creators").select("id").eq("betterfans_account_id", betterfansAccountId).maybeSingle();
+    if (existing.error) throw existing.error;
+    return { creator, duplicate: Boolean(existing.data) };
+  } catch (error) {
+    throw new ApiError(400, error instanceof Error ? error.message : "Unable to validate creator connection");
+  }
+}
+
+async function createCreatorRecord(supabase: SupabaseClient, body: Record<string, unknown>) {
+  const payload = normalizeCreatorCreatePayload(body);
+  const duplicate = await supabase.from("of_creators").select("id").eq("betterfans_account_id", payload.betterfans_account_id).maybeSingle();
+  assertNoError(duplicate.error);
+  if (duplicate.data) {
+    throw new ApiError(409, `A creator is already connected to BetterFans account ${payload.betterfans_account_id}`);
+  }
+
+  const inserted = await supabase
+    .from("of_creators")
+    .insert({
+      platform_provider: payload.platform_provider,
+      betterfans_account_id: payload.betterfans_account_id,
+      username: payload.username,
+      display_name: payload.display_name,
+      location: payload.location,
+      status: payload.status,
+      onboarding_status: payload.onboarding_status,
+      metadata: {
+        services: payload.services,
+        notes: payload.notes
+      }
+    })
+    .select("*")
+    .single();
+
+  if (inserted.error) {
+    if (inserted.error.code === "23505") {
+      throw new ApiError(409, `A creator is already connected to BetterFans account ${payload.betterfans_account_id}`);
+    }
+    throw inserted.error;
+  }
+
+  const creator = inserted.data;
+  if (!creator) {
+    throw new Error("Creator insert did not return a row");
+  }
+
+  const now = new Date().toISOString();
+  const event = await supabase.from("of_events").insert({
+    creator_id: creator.id,
+    provider: "operator",
+    event_type: "creator_created",
+    payload: {
+      source: "operator",
+      status: payload.status,
+      onboarding_status: payload.onboarding_status,
+      services: payload.services,
+      notes_present: Boolean(payload.notes),
+      betterfans_account_id: payload.betterfans_account_id
+    },
+    received_at: now,
+    processed_at: now,
+    processing_status: "processed",
+    processing_error: null
+  });
+  if (event.error) {
+    console.warn("Failed to record creator creation event", event.error);
+  }
+
+  return creator;
+}
+
+function normalizeCreatorCreatePayload(body: Record<string, unknown>) {
+  const platform_provider = stringValue(body.platform_provider, "betterfans");
+  if (platform_provider !== "betterfans") {
+    throw new ApiError(400, "platform_provider must be betterfans for the initial onboarding flow");
+  }
+
+  const betterfans_account_id = stringValue(body.betterfans_account_id);
+  const username = stringValue(body.username);
+  const display_name = stringValue(body.display_name);
+  const location = stringValue(body.location);
+  const status = normalizeCreatorStatus(body.status);
+  const onboarding_status = normalizeCreatorOnboardingStatus(body.onboarding_status);
+  const services = normalizeCreatorServices(body.services);
+  const notes = stringValue(body.notes);
+
+  if (!betterfans_account_id) throw new ApiError(400, "betterfans_account_id is required");
+  if (!username) throw new ApiError(400, "username is required");
+  if (!display_name) throw new ApiError(400, "display_name is required");
+  if (!location) throw new ApiError(400, "location is required");
+
+  return {
+    platform_provider,
+    betterfans_account_id,
+    username,
+    display_name,
+    location,
+    status,
+    onboarding_status,
+    services,
+    notes
+  };
+}
+
+function normalizeCreatorStatus(value: unknown) {
+  const status = stringValue(value, "pending");
+  if (!["pending", "connected", "attention", "paused", "disconnected"].includes(status)) {
+    throw new ApiError(400, `Invalid creator status: ${status}`);
+  }
+  return status;
+}
+
+function normalizeCreatorOnboardingStatus(value: unknown) {
+  const onboardingStatus = stringValue(value, "draft");
+  if (!["draft", "pending", "connected", "syncing", "ready", "needs_attention"].includes(onboardingStatus)) {
+    throw new ApiError(400, `Invalid onboarding status: ${onboardingStatus}`);
+  }
+  return onboardingStatus;
+}
+
+function normalizeCreatorServices(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => (typeof item === "string" ? item.trim() : ""))
+    .filter((item) =>
+      [
+        "chat_management",
+        "welcome_automation",
+        "subscriber_crm",
+        "content_vault",
+        "analytics",
+        "ai_coach"
+      ].includes(item)
+    );
 }
 
 async function runAuditedSync(supabase: SupabaseClient, env: Env, creatorId: string, syncType: SyncType) {

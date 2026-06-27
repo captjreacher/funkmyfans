@@ -1,8 +1,16 @@
-import { ArrowDownAZ, Search } from "lucide-react";
+import { ArrowDownAZ, Plus, Search } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { DashboardData } from "../lib/api";
 
-export function Creators({ data, onOpenCreator }: { data: DashboardData; onOpenCreator: (id: string) => void }) {
+export function Creators({
+  data,
+  onOpenCreator,
+  onConnectCreator
+}: {
+  data: DashboardData;
+  onOpenCreator: (id: string) => void;
+  onConnectCreator: () => void;
+}) {
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState("all");
   const [sort, setSort] = useState("last_sync_at");
@@ -22,6 +30,17 @@ export function Creators({ data, onOpenCreator }: { data: DashboardData; onOpenC
 
   return (
     <main className="space-y-4">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <h2 className="text-2xl font-semibold text-stone-950">Creators</h2>
+          <p className="mt-1 text-sm text-stone-500">Manage connected creators, pending onboarding, and sync state.</p>
+        </div>
+        <button type="button" onClick={onConnectCreator} className="inline-flex items-center gap-2 rounded-md bg-cyan-400 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-cyan-300">
+          <Plus className="h-4 w-4" aria-hidden="true" />
+          + Connect Creator
+        </button>
+      </div>
+
       <div className="flex flex-col gap-3 rounded-md border border-stone-200 bg-white p-3 md:flex-row md:items-center">
         <label className="flex min-w-0 flex-1 items-center gap-2 rounded-md border border-stone-200 px-3 py-2">
           <Search className="h-4 w-4 text-stone-500" aria-hidden="true" />
@@ -34,9 +53,11 @@ export function Creators({ data, onOpenCreator }: { data: DashboardData; onOpenC
         </label>
         <select value={status} onChange={(event) => setStatus(event.target.value)} className="rounded-md border border-stone-200 px-3 py-2 text-sm">
           <option value="all">All statuses</option>
+          <option value="pending">Pending</option>
           <option value="connected">Connected</option>
           <option value="attention">Needs attention</option>
           <option value="paused">Paused</option>
+          <option value="disconnected">Disconnected</option>
         </select>
         <label className="flex items-center gap-2 rounded-md border border-stone-200 px-3 py-2 text-sm">
           <ArrowDownAZ className="h-4 w-4 text-stone-500" aria-hidden="true" />
@@ -60,7 +81,7 @@ export function Creators({ data, onOpenCreator }: { data: DashboardData; onOpenC
                 <div className="font-semibold text-stone-950">{creator.display_name || creator.username}</div>
                 <div className="text-sm text-stone-500">@{creator.username}</div>
               </div>
-              <span className="rounded bg-emerald-100 px-2 py-1 text-xs font-semibold text-emerald-800">{creator.status}</span>
+              <span className={`rounded px-2 py-1 text-xs font-semibold ${creatorStatusTone(creator.status)}`}>{creator.status}</span>
             </div>
             <div className="mt-4 grid grid-cols-2 gap-2 text-sm">
               <div>
@@ -77,4 +98,12 @@ export function Creators({ data, onOpenCreator }: { data: DashboardData; onOpenC
       </div>
     </main>
   );
+}
+
+function creatorStatusTone(status: string) {
+  if (status === "connected") return "bg-emerald-100 text-emerald-800";
+  if (status === "pending") return "bg-amber-100 text-amber-900";
+  if (status === "attention") return "bg-rose-100 text-rose-800";
+  if (status === "paused") return "bg-slate-200 text-slate-700";
+  return "bg-stone-100 text-stone-800";
 }

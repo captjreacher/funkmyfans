@@ -1,5 +1,5 @@
-export type CreatorStatus = "connected" | "attention" | "paused" | "disconnected";
-export type CreatorOnboardingStatus = "connected" | "syncing" | "ready" | "needs_attention";
+export type CreatorStatus = "pending" | "connected" | "attention" | "paused" | "disconnected";
+export type CreatorOnboardingStatus = "draft" | "pending" | "connected" | "syncing" | "ready" | "needs_attention";
 export type PlatformProvider = "betterfans" | "onlyfans" | "fansly" | "other";
 
 export type TaskPriority = "low" | "medium" | "high" | "urgent";
@@ -109,6 +109,7 @@ export interface OfCreator {
   location?: string | null;
   status: CreatorStatus;
   onboarding_status: CreatorOnboardingStatus;
+  metadata: Record<string, unknown>;
   connected_at: string;
   last_sync_at: string | null;
   active: boolean;

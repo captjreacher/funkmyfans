@@ -1,5 +1,6 @@
-import { BarChart3, ClipboardList, Cog, Cpu, FileText, Radio, Search, Send, Sparkles, UserRound, Users, Zap } from "lucide-react";
+import { BarChart3, ClipboardList, Cog, Cpu, FileText, Plus, Radio, Search, Send, Sparkles, UserRound, Users, Zap } from "lucide-react";
 import { useEffect, useState } from "react";
+import { ConnectCreatorModal } from "./components/ConnectCreatorModal";
 import { CreatorDetail } from "./pages/CreatorDetail";
 import { Creators } from "./pages/Creators";
 import { Dashboard } from "./pages/Dashboard";
@@ -31,10 +32,16 @@ export function App() {
   const [selectedCreatorId, setSelectedCreatorId] = useState<string | null>(null);
   const [subscriberFilters, setSubscriberFilters] = useState<Record<string, string> | null>(null);
   const [data, setData] = useState<DashboardData | null>(null);
+  const [connectCreatorOpen, setConnectCreatorOpen] = useState(false);
 
   useEffect(() => {
-    void fetchDashboard().then(setData);
+    void refreshDashboard();
   }, []);
+
+  async function refreshDashboard() {
+    const result = await fetchDashboard();
+    setData(result);
+  }
 
   function openCreator(id: string) {
     setSelectedCreatorId(id);
@@ -44,6 +51,10 @@ export function App() {
   function openSubscribers(filters: Record<string, string>) {
     setSubscriberFilters(filters);
     setView("subscribers");
+  }
+
+  function openConnectCreator() {
+    setConnectCreatorOpen(true);
   }
 
   const briefing = buildBrief(data);
@@ -79,6 +90,14 @@ export function App() {
               </button>
             );
           })}
+          <button
+            type="button"
+            onClick={openConnectCreator}
+            className="mt-3 flex w-full items-center gap-3 rounded-xl border border-cyan-300/20 bg-cyan-400/10 px-3 py-3 text-left text-sm font-semibold text-cyan-100 hover:bg-cyan-400/15 hover:text-white"
+          >
+            <Plus className="h-4 w-4" aria-hidden="true" />
+            + Connect Creator
+          </button>
           <div className="my-3 h-px bg-blue-500/20" />
           {secondaryNav.map((item) => {
             const Icon = item.icon;
@@ -146,8 +165,8 @@ export function App() {
             </main>
           ) : (
             <>
-              {view === "dashboard" ? <Dashboard data={data} onOpenCreator={openCreator} onOpenSubscribers={openSubscribers} /> : null}
-              {view === "creators" ? <Creators data={data} onOpenCreator={openCreator} /> : null}
+              {view === "dashboard" ? <Dashboard data={data} onOpenCreator={openCreator} onOpenSubscribers={openSubscribers} onConnectCreator={openConnectCreator} /> : null}
+              {view === "creators" ? <Creators data={data} onOpenCreator={openCreator} onConnectCreator={openConnectCreator} /> : null}
               {view === "creator" && selectedCreatorId ? <CreatorDetail creatorId={selectedCreatorId} /> : null}
               {view === "subscribers" ? <Subscribers initialCreators={data.creators} initialSubscribers={data.relationships} initialTasks={data.tasks} onOpenTasks={() => setView("tasks")} initialFilters={subscriberFilters} /> : null}
               {view === "tasks" ? <Tasks creators={data.creators} relationships={data.relationships} initialTasks={data.tasks} /> : null}
@@ -157,6 +176,13 @@ export function App() {
           )}
         </div>
       </div>
+
+      <ConnectCreatorModal
+        open={connectCreatorOpen}
+        onClose={() => setConnectCreatorOpen(false)}
+        onOpenCreator={openCreator}
+        onRefresh={refreshDashboard}
+      />
     </div>
   );
 }

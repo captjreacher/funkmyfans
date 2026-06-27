@@ -19,7 +19,28 @@ alter table public.of_relationship_timeline
 
 alter table public.of_relationship_timeline
   add constraint of_relationship_timeline_timeline_type_check
-  check (timeline_type in ('subscription', 'renewal', 'ppv_purchase', 'tip', 'custom_purchase', 'message', 'ai_action', 'operator_action', 'automation', 'state_change', 'persona_change', 'journey_transition', 'opportunity_change', 'briefing_generated', 'sync', 'context_event'));
+  check (
+    timeline_type in (
+      'subscription',
+      'renewal',
+      'ppv_purchase',
+      'tip',
+      'custom_purchase',
+      'message',
+      'ai_action',
+      'operator_action',
+      'automation',
+      'state_change',
+      'persona_change',
+      'journey_transition',
+      'opportunity_change',
+      'briefing_generated',
+      'sync',
+      'context_event',
+      'sentiment_changed',
+      'summary_refreshed'
+    )
+  );
 
 create index if not exists of_relationships_creator_persona_idx
   on public.of_subscriber_relationships (creator_id, persona_key, opportunity_classification, journey_stage);
