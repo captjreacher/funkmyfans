@@ -19,12 +19,14 @@ export function Subscribers({
   initialCreators,
   initialSubscribers,
   initialTasks,
-  onOpenTasks
+  onOpenTasks,
+  initialFilters
 }: {
   initialCreators: OfCreator[];
   initialSubscribers: OfSubscriberRelationship[];
   initialTasks: OfTask[];
   onOpenTasks: () => void;
+  initialFilters?: Record<string, string> | null;
 }) {
   const [data, setData] = useState<SubscribersData>({ creators: initialCreators, subscribers: initialSubscribers, tasks: initialTasks });
   const [selectedId, setSelectedId] = useState<string | null>(initialSubscribers[0]?.id ?? null);
@@ -32,6 +34,9 @@ export function Subscribers({
   const [creator, setCreator] = useState("all");
   const [subscription, setSubscription] = useState("all");
   const [stage, setStage] = useState("all");
+  const [persona, setPersona] = useState("all");
+  const [opportunity, setOpportunity] = useState("all");
+  const [journey, setJourney] = useState("all");
   const [hasOpenTasks, setHasOpenTasks] = useState(false);
   const [vipOnly, setVipOnly] = useState(false);
   const [churnOnly, setChurnOnly] = useState(false);
@@ -39,14 +44,28 @@ export function Subscribers({
   const [query, setQuery] = useState("");
 
   useEffect(() => {
+    if (!initialFilters) return;
+    setCreator(initialFilters.creator ?? "all");
+    setSubscription(initialFilters.subscription ?? "all");
+    setStage(initialFilters.stage ?? "all");
+    setPersona(initialFilters.persona ?? "all");
+    setOpportunity(initialFilters.opportunity ?? "all");
+    setJourney(initialFilters.journey ?? "all");
+    setSelectedId(null);
+  }, [initialFilters]);
+
+  useEffect(() => {
     void refreshList();
-  }, [creator, subscription, stage, hasOpenTasks, vipOnly, churnOnly, sort]);
+  }, [creator, subscription, stage, persona, opportunity, journey, hasOpenTasks, vipOnly, churnOnly, sort]);
 
   useEffect(() => {
     if (selectedId) void loadDetail(selectedId);
   }, [selectedId]);
 
   const stages = useMemo(() => Array.from(new Set(data.subscribers.map((item) => item.relationship_state))).sort(), [data.subscribers]);
+  const personas = useMemo(() => Array.from(new Set(data.subscribers.map((item) => item.persona_name || item.persona_key))).sort(), [data.subscribers]);
+  const opportunities = useMemo(() => Array.from(new Set(data.subscribers.map((item) => item.opportunity_classification))).sort(), [data.subscribers]);
+  const journeys = useMemo(() => Array.from(new Set(data.subscribers.map((item) => item.journey_stage))).sort(), [data.subscribers]);
   const visibleSubscribers = useMemo(() => {
     const needle = query.trim().toLowerCase();
     if (!needle) return data.subscribers;
@@ -62,13 +81,16 @@ export function Subscribers({
       creator,
       subscription,
       stage,
+      persona,
+      opportunity,
+      journey,
       hasOpenTasks: hasOpenTasks ? "true" : "all",
       vip: vipOnly ? "true" : "all",
       churn: churnOnly ? "true" : "all",
       sort
     });
     setData(result);
-    setSelectedId((current) => current ?? result.subscribers[0]?.id ?? null);
+    setSelectedId((current) => (current && result.subscribers.some((item) => item.id === current) ? current : result.subscribers[0]?.id ?? null));
   }
 
   async function loadDetail(id: string) {
@@ -116,7 +138,7 @@ export function Subscribers({
         <Metric label="Total LTV" value={money(data.subscribers.reduce((sum, item) => sum + item.lifetime_spend, 0))} icon={CheckCircle2} />
       </section>
 
-      <section className="grid gap-3 rounded-md border border-stone-200 bg-white p-3 xl:grid-cols-[1fr_150px_150px_160px_150px]">
+      <section className="grid gap-3 rounded-md border border-stone-200 bg-white p-3 xl:grid-cols-[1fr_150px_150px_160px_150px_160px_160px_160px]">
         <label className="flex min-h-10 items-center gap-2 rounded-md border border-stone-200 px-3">
           <Search className="h-4 w-4 text-stone-500" aria-hidden="true" />
           <input value={query} onChange={(event) => setQuery(event.target.value)} className="w-full bg-transparent text-sm outline-none" placeholder="Search fans, creators, actions" />
@@ -133,6 +155,18 @@ export function Subscribers({
         <select value={stage} onChange={(event) => setStage(event.target.value)} className="rounded-md border border-stone-200 px-3 py-2 text-sm">
           <option value="all">All stages</option>
           {stages.map((item) => <option key={item} value={item}>{labelize(item)}</option>)}
+        </select>
+        <select value={persona} onChange={(event) => setPersona(event.target.value)} className="rounded-md border border-stone-200 px-3 py-2 text-sm">
+          <option value="all">All personas</option>
+          {personas.map((item) => <option key={item} value={item}>{labelize(item)}</option>)}
+        </select>
+        <select value={opportunity} onChange={(event) => setOpportunity(event.target.value)} className="rounded-md border border-stone-200 px-3 py-2 text-sm">
+          <option value="all">All opportunities</option>
+          {opportunities.map((item) => <option key={item} value={item}>{labelize(item)}</option>)}
+        </select>
+        <select value={journey} onChange={(event) => setJourney(event.target.value)} className="rounded-md border border-stone-200 px-3 py-2 text-sm">
+          <option value="all">All journeys</option>
+          {journeys.map((item) => <option key={item} value={item}>{labelize(item)}</option>)}
         </select>
         <select value={sort} onChange={(event) => setSort(event.target.value as SortKey)} className="rounded-md border border-stone-200 px-3 py-2 text-sm">
           <option value="relationship_score">Relationship</option>
@@ -174,10 +208,12 @@ export function Subscribers({
                     </div>
                     <div className="mt-2 flex flex-wrap gap-2 text-xs">
                       <span className={stateTone(subscriber.relationship_state)}>{labelize(subscriber.relationship_state)}</span>
+                      <span className="rounded-md bg-cyan-50 px-2 py-1 font-semibold text-cyan-800">{subscriber.persona_emoji ?? "•"} {subscriber.persona_name ?? "Persona"}</span>
+                      <span className="rounded-md bg-violet-50 px-2 py-1 font-semibold text-violet-800">{labelize(String(subscriber.opportunity_classification ?? "no_action"))}</span>
                       <span className="rounded-md bg-emerald-50 px-2 py-1 font-semibold text-emerald-800">{money(subscriber.lifetime_spend)}</span>
                       <span className="rounded-md bg-amber-50 px-2 py-1 font-semibold text-amber-900">{openTaskCount(subscriber, data.tasks)} open</span>
                     </div>
-                    <div className="mt-2 line-clamp-2 text-sm text-stone-600">{subscriber.recommended_next_action ?? "Monitor relationship"}</div>
+                    <div className="mt-2 line-clamp-2 text-sm text-stone-600">{subscriber.operator_briefing ?? subscriber.recommended_next_action ?? "Monitor relationship"}</div>
                   </div>
                 </div>
               </button>
@@ -276,8 +312,17 @@ function SubscriberDetail({
               <h2 className="mt-1 text-2xl font-semibold text-stone-950">{subscriber.display_name || subscriber.username || subscriber.betterfans_subscriber_id}</h2>
               <div className="mt-2 flex flex-wrap gap-2 text-sm">
                 <span className={stateTone(subscriber.relationship_state)}>{labelize(subscriber.relationship_state)}</span>
+                <span className="rounded-md bg-cyan-50 px-2 py-1 font-semibold text-cyan-800">{subscriber.persona_emoji ?? "•"} {subscriber.persona_name ?? "Persona"}</span>
+                <span className="rounded-md bg-violet-50 px-2 py-1 font-semibold text-violet-800">{labelize(String(subscriber.opportunity_classification ?? "no_action"))}</span>
                 <span className="rounded-md bg-stone-100 px-2 py-1 font-semibold text-stone-700">{subscriber.current_subscription_status ?? "unknown"}</span>
                 <span className="rounded-md bg-emerald-50 px-2 py-1 font-semibold text-emerald-800">{money(subscriber.lifetime_spend)} LTV</span>
+              </div>
+              <div className="mt-3 rounded-2xl border border-cyan-100 bg-cyan-50 p-3">
+                <div className="text-sm font-semibold text-cyan-950">
+                  {subscriber.persona_name ?? "Persona"} · Confidence {subscriber.persona_confidence ?? 0}%
+                </div>
+                <div className="mt-1 text-sm text-cyan-900">{subscriber.persona_description ?? "Deterministic persona derived from relationship signals."}</div>
+                <div className="mt-2 text-xs text-cyan-800">{subscriber.persona_strategy ?? "Prioritise human engagement."}</div>
               </div>
             </div>
           </div>
@@ -293,7 +338,7 @@ function SubscriberDetail({
         <div className="space-y-5">
           <Panel title="Recommended Action">
             <div className="rounded-md bg-teal-50 p-3">
-              <div className="text-sm font-semibold text-teal-900">{intelligence?.recommended_next_action ?? subscriber.recommended_next_action ?? "Monitor relationship"}</div>
+              <div className="text-sm font-semibold text-teal-900">{subscriber.operator_briefing ?? intelligence?.recommended_next_action ?? subscriber.recommended_next_action ?? "Monitor relationship"}</div>
               <div className="mt-1 text-sm text-teal-800">{topTask ? `Highest priority task: ${topTask.title}` : "No active task is currently blocking this subscriber."}</div>
               {intelligence?.suggested_script || topTask?.suggested_script ? <div className="mt-1 text-sm text-teal-800">Suggested script: {intelligence?.suggested_script ?? topTask?.suggested_script}</div> : null}
             </div>
@@ -301,6 +346,15 @@ function SubscriberDetail({
               <Flag label="Automation Paused" active={subscriber.automation_paused} />
               <Flag label="Human Takeover" active={subscriber.human_takeover} />
               <Flag label="Auto-send" active={subscriber.auto_send_enabled} />
+            </div>
+            <div className="mt-3 grid gap-2 sm:grid-cols-3">
+              <span className="rounded-md bg-cyan-50 px-2 py-1 text-xs font-semibold text-cyan-800">Journey: {subscriber.journey_stage ?? "unknown"}</span>
+              <span className="rounded-md bg-violet-50 px-2 py-1 text-xs font-semibold text-violet-800">Persona: {subscriber.persona_name ?? "unknown"}</span>
+              <span className="rounded-md bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-900">Opportunity: {labelize(String(subscriber.opportunity_classification ?? "no_action"))}</span>
+            </div>
+            <div className="mt-3 rounded-md bg-stone-50 p-3 text-sm text-stone-700">
+              <div className="font-semibold text-stone-900">{subscriber.journey_stage ?? "Unknown journey"}</div>
+              <div className="mt-1">{subscriber.journey_stage_reason ?? "Journey stage is derived deterministically from current signals."}</div>
             </div>
           </Panel>
 
@@ -388,7 +442,7 @@ function SubscriberDetail({
           </Panel>
 
           <Panel title="AI Briefing">
-            <pre className="whitespace-pre-wrap text-sm leading-6 text-stone-700">{intelligence?.ai_briefing ?? "No AI briefing yet."}</pre>
+            <pre className="whitespace-pre-wrap text-sm leading-6 text-stone-700">{subscriber.operator_briefing ?? intelligence?.ai_briefing ?? "No AI briefing yet."}</pre>
           </Panel>
 
           <Panel title="Workflow">

@@ -1,5 +1,6 @@
 import type { OfChat, OfEvent, OfSubscriberRelationship, TaskPriority, TaskStatus } from "@funkmyfans/of-types";
 import { summarizeEventType } from "@funkmyfans/of-types";
+export * from "./subscriberAgencyIntelligence";
 
 export interface TaskRuleConfig {
   unreadChatThresholdHours: number;

@@ -25,6 +25,34 @@ export type AutomationRunStatus = "running" | "completed" | "failed" | "skipped"
 export type OutboundMessageStatus = "pending_approval" | "queued" | "sending" | "sent" | "failed" | "rejected";
 export type OutboundApprovalStatus = "not_required" | "pending" | "approved" | "rejected";
 export type RelationshipState = "prospect" | "new_subscriber" | "welcomed" | "engaged" | "vip" | "cooling" | "at_risk" | "expired" | "reactivated";
+export type SubscriberPersonaKey =
+  | "new_fan"
+  | "warm_buyer"
+  | "vip"
+  | "collector"
+  | "conversational"
+  | "drifting_away"
+  | "dormant";
+export type CommercialOpportunityKey =
+  | "welcome"
+  | "upsell_ppv"
+  | "offer_custom"
+  | "retention"
+  | "renewal"
+  | "vip_outreach"
+  | "human_conversation"
+  | "no_action";
+export type JourneyStage =
+  | "New"
+  | "Welcomed"
+  | "Engaged"
+  | "Purchasing"
+  | "Growing"
+  | "VIP"
+  | "At Risk"
+  | "Recovering"
+  | "Dormant";
+export type BriefingProviderId = "deterministic-v1" | "heuristic-v2" | "llm-openai" | "llm-anthropic" | "llm-local";
 export type RevenueTrend = "unknown" | "new" | "rising" | "steady" | "cooling" | "declining";
 export type RelationshipTimelineType =
   | "subscription"
@@ -43,6 +71,10 @@ export type RelationshipTimelineType =
   | "operator_action"
   | "automation"
   | "state_change"
+  | "persona_change"
+  | "journey_transition"
+  | "opportunity_change"
+  | "briefing_generated"
   | "sync"
   | "context_event";
 export type ContextEventType =
@@ -140,7 +172,8 @@ export interface OfSubscriberRelationship {
   last_purchase_at: string | null;
   revenue_trend: RevenueTrend;
   relationship_state: RelationshipState;
-  relationship_stage: string;
+  relationship_stage: JourneyStage | string;
+  journey_stage: JourneyStage | string;
   relationship_score: number;
   revenue_opportunity_score: number;
   urgency_score: number;
@@ -155,6 +188,19 @@ export interface OfSubscriberRelationship {
   vip_score_reason: string | null;
   engagement_score_reason: string | null;
   ai_confidence_score_reason: string | null;
+  persona_key: SubscriberPersonaKey | string;
+  persona_name: string;
+  persona_emoji: string;
+  persona_color: string;
+  persona_description: string;
+  persona_strategy: string;
+  persona_confidence: number;
+  persona_reason: string | null;
+  opportunity_classification: CommercialOpportunityKey | string;
+  opportunity_reason: string | null;
+  operator_briefing: string | null;
+  operator_briefing_provider: BriefingProviderId | string | null;
+  journey_stage_reason: string | null;
   conversation_count: number;
   last_creator_response_at: string | null;
   last_subscriber_message_at: string | null;
@@ -303,6 +349,60 @@ export interface SubscriberWorkspaceTimelineItem {
   actor: string;
   occurred_at: string;
   metadata?: Record<string, unknown>;
+}
+
+export interface SubscriberPersona {
+  key: SubscriberPersonaKey;
+  name: string;
+  emoji: string;
+  color: string;
+  description: string;
+  recommended_strategy: string;
+  confidence: number;
+  reason: string;
+}
+
+export interface CommercialOpportunity {
+  key: CommercialOpportunityKey;
+  name: string;
+  emoji: string;
+  color: string;
+  description: string;
+  recommended_action: string;
+  confidence: number;
+  reason: string;
+  expected_outcome: string;
+}
+
+export interface OperatorBriefing {
+  provider: BriefingProviderId;
+  headline: string;
+  summary: string;
+  recommended_next_action: string;
+  expected_outcome: string;
+  estimated_revenue_opportunity: string;
+  reason: string;
+}
+
+export interface DailyFocusQueueCard {
+  key: string;
+  title: string;
+  emoji: string;
+  color: string;
+  count: number;
+  description: string;
+  filter: Record<string, string>;
+  reason: string;
+}
+
+export interface MorningBrief {
+  headline: string;
+  summary: string;
+  highest_priority_subscriber: string;
+  highest_priority_reason: string;
+  missed_revenue: number;
+  overdue_welcome_conversations: number;
+  provider: BriefingProviderId;
 }
 
 export interface OfChat {

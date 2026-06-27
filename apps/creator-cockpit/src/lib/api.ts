@@ -13,6 +13,8 @@ import type {
   OfRelationshipTimelineItem,
   OfSubscriber,
   OfSubscriberRelationship,
+  DailyFocusQueueCard,
+  MorningBrief,
   OfSyncRun,
   OfTask,
   SubscriberWorkspaceTimelineItem,
@@ -34,6 +36,8 @@ export interface DashboardData {
   syncRuns: OfSyncRun[];
   relationships: OfSubscriberRelationship[];
   contextEvents: OfContextEvent[];
+  dailyFocusQueue: DailyFocusQueueCard[];
+  morningBrief: MorningBrief;
 }
 
 export interface CreatorDetailData {

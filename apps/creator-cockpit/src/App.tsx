@@ -29,6 +29,7 @@ const secondaryNav = [
 export function App() {
   const [view, setView] = useState<View>("dashboard");
   const [selectedCreatorId, setSelectedCreatorId] = useState<string | null>(null);
+  const [subscriberFilters, setSubscriberFilters] = useState<Record<string, string> | null>(null);
   const [data, setData] = useState<DashboardData | null>(null);
 
   useEffect(() => {
@@ -38,6 +39,11 @@ export function App() {
   function openCreator(id: string) {
     setSelectedCreatorId(id);
     setView("creator");
+  }
+
+  function openSubscribers(filters: Record<string, string>) {
+    setSubscriberFilters(filters);
+    setView("subscribers");
   }
 
   const briefing = buildBrief(data);
@@ -96,10 +102,10 @@ export function App() {
               Today's Brief
             </div>
             <div className="mt-3 grid gap-2">
-              <BriefLine label="Open Tasks" value={briefing.openTasks} tone="text-cyan-300" />
-              <BriefLine label="Revenue Opportunity" value={briefing.revenueOpportunity} tone="text-emerald-300" />
-              <BriefLine label="VIP Fans" value={briefing.vipFans} tone="text-pink-300" />
-              <BriefLine label="Churn Alerts" value={briefing.churnAlerts} tone="text-amber-300" />
+              <BriefLine label="Highest Priority" value={briefing.highestPrioritySubscriber} tone="text-cyan-300" />
+              <BriefLine label="Missed Revenue" value={briefing.missedRevenue} tone="text-emerald-300" />
+              <BriefLine label="Overdue Welcomes" value={briefing.overdueWelcomes} tone="text-pink-300" />
+              <BriefLine label="Provider" value={briefing.provider} tone="text-amber-300" />
             </div>
           </div>
         </div>
@@ -140,10 +146,10 @@ export function App() {
             </main>
           ) : (
             <>
-              {view === "dashboard" ? <Dashboard data={data} onOpenCreator={openCreator} /> : null}
+              {view === "dashboard" ? <Dashboard data={data} onOpenCreator={openCreator} onOpenSubscribers={openSubscribers} /> : null}
               {view === "creators" ? <Creators data={data} onOpenCreator={openCreator} /> : null}
               {view === "creator" && selectedCreatorId ? <CreatorDetail creatorId={selectedCreatorId} /> : null}
-              {view === "subscribers" ? <Subscribers initialCreators={data.creators} initialSubscribers={data.relationships} initialTasks={data.tasks} onOpenTasks={() => setView("tasks")} /> : null}
+              {view === "subscribers" ? <Subscribers initialCreators={data.creators} initialSubscribers={data.relationships} initialTasks={data.tasks} onOpenTasks={() => setView("tasks")} initialFilters={subscriberFilters} /> : null}
               {view === "tasks" ? <Tasks creators={data.creators} relationships={data.relationships} initialTasks={data.tasks} /> : null}
               {view === "events" ? <Events creators={data.creators} initialEvents={data.events} /> : null}
               {view === "outbound" ? <OutboundMessages /> : null}
@@ -166,16 +172,13 @@ function BriefLine({ label, value, tone }: { label: string; value: string | numb
 
 function buildBrief(data: DashboardData | null) {
   if (!data) {
-    return { openTasks: "n/a", revenueOpportunity: "n/a", vipFans: "n/a", churnAlerts: "n/a" };
+    return { highestPrioritySubscriber: "n/a", missedRevenue: "n/a", overdueWelcomes: "n/a", provider: "n/a" };
   }
 
-  const activeTasks = data.tasks.filter((task) => task.status === "open" || task.status === "in_progress" || task.status === "waiting");
-  const revenueTasks = activeTasks.filter((task) => task.task_type.includes("transaction") || task.suggested_action?.includes("offer") || task.suggested_action?.includes("upsell"));
-  const revenueOpportunity = data.relationships.reduce((sum, item) => sum + Math.max(0, item.average_order_value || 0), 0);
   return {
-    openTasks: activeTasks.length,
-    revenueOpportunity: `$${Math.round(revenueOpportunity + revenueTasks.length * 120).toLocaleString()}`,
-    vipFans: data.relationships.filter((item) => item.vip_score >= 75 || item.relationship_state === "vip").length,
-    churnAlerts: data.relationships.filter((item) => item.churn_risk >= 70 || item.relationship_state === "at_risk").length
+    highestPrioritySubscriber: data.morningBrief.highest_priority_subscriber,
+    missedRevenue: `$${data.morningBrief.missed_revenue.toLocaleString()}`,
+    overdueWelcomes: String(data.morningBrief.overdue_welcome_conversations),
+    provider: data.morningBrief.provider
   };
 }

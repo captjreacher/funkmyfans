@@ -5,7 +5,7 @@ import {
   normalizeCreatorSnapshot,
   normalizeSubscribers
 } from "@funkmyfans/betterfans-client";
-import { calculateRelationshipIntelligence, calculateTaskPriority, generateTaskDrafts, type TaskRuleDraft } from "@funkmyfans/of-rules-engine";
+import { calculateRelationshipIntelligence, calculateSubscriberAgencyIntelligence, buildDailyFocusQueue, buildMorningBrief, calculateTaskPriority, generateTaskDrafts, type TaskRuleDraft } from "@funkmyfans/of-rules-engine";
 import type {
   ConversationIntent,
   ConversationSentiment,
@@ -147,7 +147,9 @@ if (request.method === "GET" && url.pathname === "/api/dashboard") {
       events: events.data ?? [],
       syncRuns: syncRuns.data ?? [],
       relationships: relationships.data ?? [],
-      contextEvents: contextEvents.data ?? []
+      contextEvents: contextEvents.data ?? [],
+      dailyFocusQueue: buildDailyFocusQueue({ subscribers: relationships.data ?? [] }),
+      morningBrief: buildMorningBrief({ subscribers: relationships.data ?? [] })
     },
     { headers: jsonHeaders }
   );
@@ -498,6 +500,9 @@ async function listSubscribers(supabase: SupabaseClient, url: URL) {
   const creator = url.searchParams.get("creator");
   const subscription = url.searchParams.get("subscription");
   const stage = url.searchParams.get("stage");
+  const persona = url.searchParams.get("persona");
+  const opportunity = url.searchParams.get("opportunity");
+  const journey = url.searchParams.get("journey");
   const vip = url.searchParams.get("vip");
   const churn = url.searchParams.get("churn");
   const sort = url.searchParams.get("sort") ?? "relationship_score";
@@ -506,6 +511,9 @@ async function listSubscribers(supabase: SupabaseClient, url: URL) {
   if (subscription === "active") query = query.not("current_subscription_status", "in", "(expired,cancelled,canceled,inactive)");
   if (subscription === "expired") query = query.in("current_subscription_status", ["expired", "cancelled", "canceled", "inactive"]);
   if (stage && stage !== "all") query = query.eq("relationship_state", stage);
+  if (persona && persona !== "all") query = query.eq("persona_key", persona);
+  if (opportunity && opportunity !== "all") query = query.eq("opportunity_classification", opportunity);
+  if (journey && journey !== "all") query = query.eq("journey_stage", journey);
   if (vip === "true") query = query.gte("vip_score", 75);
   if (churn === "true") query = query.gte("churn_risk", 70);
 
@@ -784,13 +792,41 @@ async function recalculateSubscriberRelationshipScore(supabase: SupabaseClient, 
     events,
     intelligence
   });
+  const intelligenceBundle = calculateSubscriberAgencyIntelligence({
+    relationship: relationship.data,
+    intelligence,
+    relationshipScores: scores,
+    now: new Date(),
+    provider: "deterministic-v1"
+  });
+  const previousPersona = stringValue(relationship.data.persona_key);
+  const previousOpportunity = stringValue(relationship.data.opportunity_classification);
+  const previousJourney = stringValue(relationship.data.relationship_stage);
   const patch = {
     ...scores,
+    persona_key: intelligenceBundle.persona.key,
+    persona_name: intelligenceBundle.persona.name,
+    persona_emoji: intelligenceBundle.persona.emoji,
+    persona_color: intelligenceBundle.persona.color,
+    persona_description: intelligenceBundle.persona.description,
+    persona_strategy: intelligenceBundle.persona.recommended_strategy,
+    persona_confidence: intelligenceBundle.persona.confidence,
+    persona_reason: intelligenceBundle.persona.reason,
+    opportunity_classification: intelligenceBundle.opportunity.key,
+    opportunity_reason: intelligenceBundle.opportunity.reason,
+    operator_briefing: `${intelligenceBundle.operator_briefing.headline}\n\n${intelligenceBundle.operator_briefing.summary}\n\nRecommended next action: ${intelligenceBundle.operator_briefing.recommended_next_action}\nExpected outcome: ${intelligenceBundle.operator_briefing.expected_outcome}\nEstimated revenue opportunity: ${intelligenceBundle.operator_briefing.estimated_revenue_opportunity}`,
+    operator_briefing_provider: intelligenceBundle.provider,
+    journey_stage: intelligenceBundle.journey_stage,
+    journey_stage_reason: intelligenceBundle.journey_stage_reason,
     metadata: {
       ...(isRecord(relationship.data.metadata) ? relationship.data.metadata : {}),
       relationship_intelligence: {
         scored_at: new Date().toISOString(),
-        engine: "deterministic-of-3.1"
+        engine: "deterministic-of-3.2",
+        persona: intelligenceBundle.persona.key,
+        opportunity: intelligenceBundle.opportunity.key,
+        journey_stage: intelligenceBundle.journey_stage,
+        briefing_provider: intelligenceBundle.provider
       }
     }
   };
@@ -802,8 +838,65 @@ async function recalculateSubscriberRelationshipScore(supabase: SupabaseClient, 
     .select("*, of_relationship_summaries(*), of_conversation_intelligence(*), of_creators(username, display_name)")
     .single();
   assertNoError(updated.error);
+  const changeRows: Record<string, unknown>[] = [];
+  const changeOccurredAt = new Date().toISOString();
+  if (previousPersona !== intelligenceBundle.persona.key) {
+    changeRows.push({
+      creator_id: updated.data.creator_id,
+      subscriber_id: updated.data.subscriber_id,
+      relationship_id: updated.data.id,
+      timeline_type: "persona_change",
+      title: "Persona changed",
+      detail: `${previousPersona || "unknown"} -> ${intelligenceBundle.persona.key}`,
+      actor: "ai",
+      occurred_at: changeOccurredAt,
+      metadata: {
+        previous_persona: previousPersona || null,
+        persona: intelligenceBundle.persona.key,
+        reason: intelligenceBundle.persona.reason
+      }
+    });
+  }
+  if (previousOpportunity !== intelligenceBundle.opportunity.key) {
+    changeRows.push({
+      creator_id: updated.data.creator_id,
+      subscriber_id: updated.data.subscriber_id,
+      relationship_id: updated.data.id,
+      timeline_type: "opportunity_change",
+      title: "Opportunity changed",
+      detail: `${previousOpportunity || "unknown"} -> ${intelligenceBundle.opportunity.key}`,
+      actor: "ai",
+      occurred_at: changeOccurredAt,
+      metadata: {
+        previous_opportunity: previousOpportunity || null,
+        opportunity: intelligenceBundle.opportunity.key,
+        reason: intelligenceBundle.opportunity.reason
+      }
+    });
+  }
+  if (previousJourney !== intelligenceBundle.journey_stage) {
+    changeRows.push({
+      creator_id: updated.data.creator_id,
+      subscriber_id: updated.data.subscriber_id,
+      relationship_id: updated.data.id,
+      timeline_type: "journey_transition",
+      title: "Journey stage changed",
+      detail: `${previousJourney || "unknown"} -> ${intelligenceBundle.journey_stage}`,
+      actor: "system",
+      occurred_at: changeOccurredAt,
+      metadata: {
+        previous_stage: previousJourney || null,
+        journey_stage: intelligenceBundle.journey_stage,
+        reason: intelligenceBundle.journey_stage_reason
+      }
+    });
+  }
+  if (changeRows.length) {
+    const timelineInsert = await supabase.from("of_relationship_timeline").insert(changeRows);
+    assertNoError(timelineInsert.error);
+  }
   const tasksUpdated = await updateRelatedTaskPriorities(supabase, updated.data, tasks);
-  return { ...updated.data, tasksUpdated };
+  return { ...updated.data, tasksUpdated, intelligence_bundle: intelligenceBundle };
 }
 
 async function updateRelatedTaskPriorities(supabase: SupabaseClient, relationship: Record<string, unknown>, tasks: Record<string, unknown>[]) {
@@ -2381,6 +2474,10 @@ function isAuthorizedEventIngest(request: Request, env: Env) {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function stringValue(value: unknown, fallback = "") {
+  return typeof value === "string" && value.trim() ? value : fallback;
 }
 
 function findString(record: Record<string, unknown>, ...keys: string[]) {
