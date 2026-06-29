@@ -13,7 +13,7 @@ import { Subscribers } from "./pages/Subscribers";
 import { Tasks } from "./pages/Tasks";
 import { fetchDashboard, type DashboardData } from "./lib/api";
 
-type View = "dashboard" | "creators" | "creator" | "subscribers" | "tasks" | "events" | "outbound" | "metrics";
+type View = "dashboard" | "creators" | "creator" | "subscribers" | "tasks" | "events" | "outbound";
 
 const navItems: Array<{ view: View; label: string; icon: typeof BarChart3 }> = [
   { view: "dashboard", label: "Dashboard", icon: BarChart3 },
@@ -23,7 +23,7 @@ const navItems: Array<{ view: View; label: string; icon: typeof BarChart3 }> = [
   { view: "events", label: "Events", icon: Radio },
   { view: "outbound", label: "Outbound", icon: Send },
 
-  { view: "metrics", label: "Metrics", icon: BarChart3 },
+
 
 ];
 
@@ -163,7 +163,7 @@ export function App() {
               {view === "events" ? <Events creators={data.creators} initialEvents={data.events} /> : null}
               {view === "outbound" ? <OutboundMessages /> : null}
 
-              {view === "metrics" ? <RuntimeMetrics /> : null}
+
 
             </>
           )}
