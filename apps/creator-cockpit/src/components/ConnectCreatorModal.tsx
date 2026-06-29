@@ -164,9 +164,10 @@ export function ConnectCreatorModal({
         : null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-slate-950/72 px-4 py-6 backdrop-blur-sm">
-      <div className="flex w-full max-w-6xl flex-col overflow-hidden rounded-2xl border border-blue-500/25 bg-[#071423] shadow-[0_28px_120px_rgba(0,0,0,0.5)]">
-        <div className="flex items-center justify-between gap-3 border-b border-blue-500/20 px-5 py-4">
+    <div className="fixed inset-0 z-50 overflow-hidden bg-slate-950/72 p-4 backdrop-blur-sm">
+      <div className="flex h-full min-h-0 w-full items-center justify-center overflow-hidden">
+        <div className="flex max-h-full w-full max-w-6xl min-w-0 flex-col overflow-hidden rounded-2xl border border-blue-500/25 bg-[#071423] shadow-[0_28px_120px_rgba(0,0,0,0.5)]">
+          <div className="shrink-0 flex items-center justify-between gap-3 border-b border-blue-500/20 px-5 py-4">
           <div>
             <div className="flex items-center gap-2 text-sm font-semibold text-cyan-300">
               <Sparkles className="h-4 w-4" aria-hidden="true" />
@@ -179,8 +180,8 @@ export function ConnectCreatorModal({
           </button>
         </div>
 
-        <div className="grid flex-1 gap-0 lg:grid-cols-[260px_1fr]">
-          <aside className="border-b border-blue-500/20 bg-[#0B1A2A] p-4 lg:border-b-0 lg:border-r">
+          <div className="grid flex-1 min-h-0 min-w-0 gap-0 overflow-hidden lg:grid-cols-[260px_minmax(0,1fr)]">
+            <aside className="min-h-0 overflow-y-auto border-b border-blue-500/20 bg-[#0B1A2A] p-4 lg:border-b-0 lg:border-r">
             <div className="space-y-2">
               {stepLabels.map((label, index) => (
                 <button
@@ -210,7 +211,7 @@ export function ConnectCreatorModal({
             </div>
           </aside>
 
-          <div className="min-h-[32rem] p-5">
+            <div className="flex min-h-0 min-w-0 flex-col overflow-hidden p-5">
             {createdCreator ? (
               <SuccessPanel
                 creator={createdCreator}
@@ -246,7 +247,7 @@ export function ConnectCreatorModal({
                   ) : null}
                 </div>
 
-                <div className="mt-4">
+                <div className="mt-4 flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden pr-1">
                   {step === 0 ? (
                     <div className="grid gap-4 md:grid-cols-2">
                       <Field label="Display name">
@@ -377,7 +378,7 @@ export function ConnectCreatorModal({
                   ) : null}
                 </div>
 
-                <div className="mt-6 flex items-center justify-between gap-3 border-t border-blue-500/15 pt-4">
+                <div className="shrink-0 mt-4 flex items-center justify-between gap-3 border-t border-blue-500/15 pt-4">
                   <button type="button" onClick={() => setStep((current) => Math.max(0, current - 1))} disabled={step === 0} className="inline-flex items-center gap-2 rounded-xl border border-blue-500/20 bg-white/5 px-4 py-2.5 text-sm font-semibold text-blue-100/72 hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40">
                     <ArrowLeft className="h-4 w-4" aria-hidden="true" />
                     Back
