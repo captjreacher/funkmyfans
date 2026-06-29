@@ -1,9 +1,13 @@
 import type {
+  OfAutomationSimulation,
   MessageScriptTemplate,
   OfAutomationRun,
   OfChat,
   OfConversationIntelligence,
+  OfConversationHistoryItem,
+  OfConversationInstance,
   OfCreator,
+  OfCreatorAutomationScenario,
   OfCreatorSnapshot,
   OfEvent,
   OfMessageScript,
@@ -11,6 +15,7 @@ import type {
   OfRecommendation,
   OfContextEvent,
   OfRelationshipTimelineItem,
+  OfSimulatedSubscriber,
   OfSubscriber,
   OfSubscriberRelationship,
   DailyFocusQueueCard,
@@ -54,6 +59,18 @@ export interface CreatorDetailData {
   contextEvents: OfContextEvent[];
 }
 
+export interface ConversationDetailData {
+  conversation: OfConversationInstance;
+  history: OfConversationHistoryItem[];
+}
+
+export interface SimulationDetailData {
+  simulation: OfAutomationSimulation;
+  conversation: OfConversationInstance | null;
+  history: OfConversationHistoryItem[];
+  outboundMessages: OfOutboundMessage[];
+}
+
 export interface SubscribersData {
   creators: OfCreator[];
   subscribers: OfSubscriberRelationship[];
@@ -75,6 +92,16 @@ export interface AutomationRunSummary {
   queued: number;
   skipped: number;
   errors: string[];
+}
+
+export interface SimulationLaunchPayload {
+  scriptId?: string | null;
+  scenarioId?: string | null;
+  simulatedSubscriberId?: string | null;
+  eventType: string;
+  eventPayload?: Record<string, unknown>;
+  variables?: Record<string, unknown>;
+  subscriber?: Partial<Pick<OfSimulatedSubscriber, "name" | "username" | "subscription_status" | "renewal_state" | "spend_level" | "lifetime_value" | "message_history_summary" | "custom_variables">>;
 }
 
 export type CreatorOnboardingService =
@@ -225,6 +252,16 @@ export async function updateScript(scriptId: string, patch: Partial<OfMessageScr
   return apiJson<{ script: OfMessageScript }>(`/scripts/${scriptId}`, jsonInit("PATCH", patch));
 }
 
+export async function saveScriptBuilder(scriptId: string, template: MessageScriptTemplate): Promise<{ script: OfMessageScript }> {
+  assertUuid(scriptId, "script");
+  return apiJson<{ script: OfMessageScript }>(`/scripts/${scriptId}/builder`, jsonInit("PUT", template));
+}
+
+export async function duplicateScript(scriptId: string): Promise<{ script: OfMessageScript }> {
+  assertUuid(scriptId, "script");
+  return apiJson<{ script: OfMessageScript }>(`/scripts/${scriptId}/duplicate`, { method: "POST" });
+}
+
 export async function runEventAutomations(eventId: string): Promise<AutomationRunSummary> {
   assertUuid(eventId, "event");
   return apiJson<AutomationRunSummary>(`/events/${eventId}/run-automations`, { method: "POST" });
@@ -232,6 +269,110 @@ export async function runEventAutomations(eventId: string): Promise<AutomationRu
 
 export async function fetchCreatorAutomationRuns(creatorId: string): Promise<{ runs: OfAutomationRun[] }> {
   return apiJson<{ runs: OfAutomationRun[] }>(`/creators/${creatorId}/automation-runs`);
+}
+
+export async function fetchCreatorConversations(creatorId: string): Promise<{ conversations: OfConversationInstance[] }> {
+  return apiJson<{ conversations: OfConversationInstance[] }>(`/creators/${creatorId}/conversations`);
+}
+
+export async function fetchConversationDetail(conversationId: string): Promise<ConversationDetailData> {
+  assertUuid(conversationId, "conversation");
+  return apiJson<ConversationDetailData>(`/conversations/${conversationId}`);
+}
+
+export async function fetchSimulatedSubscribers(creatorId: string): Promise<{ subscribers: OfSimulatedSubscriber[] }> {
+  return apiJson<{ subscribers: OfSimulatedSubscriber[] }>(`/creators/${creatorId}/simulated-subscribers`);
+}
+
+export async function createSimulatedSubscriber(
+  creatorId: string,
+  payload: Partial<Pick<OfSimulatedSubscriber, "name" | "username" | "subscription_status" | "renewal_state" | "spend_level" | "lifetime_value" | "message_history_summary" | "custom_variables">>
+): Promise<{ subscriber: OfSimulatedSubscriber }> {
+  return apiJson<{ subscriber: OfSimulatedSubscriber }>(`/creators/${creatorId}/simulated-subscribers`, jsonInit("POST", payload));
+}
+
+export async function updateSimulatedSubscriber(
+  subscriberId: string,
+  payload: Partial<Pick<OfSimulatedSubscriber, "name" | "username" | "subscription_status" | "renewal_state" | "spend_level" | "lifetime_value" | "message_history_summary" | "custom_variables">>
+): Promise<{ subscriber: OfSimulatedSubscriber }> {
+  assertUuid(subscriberId, "simulated subscriber");
+  return apiJson<{ subscriber: OfSimulatedSubscriber }>(`/simulated-subscribers/${subscriberId}`, jsonInit("PATCH", payload));
+}
+
+export async function fetchCreatorSimulations(creatorId: string): Promise<{ simulations: OfAutomationSimulation[] }> {
+  return apiJson<{ simulations: OfAutomationSimulation[] }>(`/creators/${creatorId}/simulations`);
+}
+
+export async function startSimulation(creatorId: string, payload: SimulationLaunchPayload): Promise<SimulationDetailData> {
+  return apiJson<SimulationDetailData>(`/creators/${creatorId}/simulations`, jsonInit("POST", payload));
+}
+
+export async function fetchSimulationDetail(simulationId: string): Promise<SimulationDetailData> {
+  assertUuid(simulationId, "simulation");
+  return apiJson<SimulationDetailData>(`/simulations/${simulationId}`);
+}
+
+export async function simulationReply(simulationId: string, text: string): Promise<SimulationDetailData> {
+  assertUuid(simulationId, "simulation");
+  return apiJson<SimulationDetailData>(`/simulations/${simulationId}/reply`, jsonInit("POST", { text }));
+}
+
+export async function simulationFastForward(simulationId: string): Promise<SimulationDetailData> {
+  assertUuid(simulationId, "simulation");
+  return apiJson<SimulationDetailData>(`/simulations/${simulationId}/fast-forward`, { method: "POST" });
+}
+
+export async function simulationPause(simulationId: string): Promise<SimulationDetailData> {
+  assertUuid(simulationId, "simulation");
+  return apiJson<SimulationDetailData>(`/simulations/${simulationId}/pause`, { method: "POST" });
+}
+
+export async function simulationResume(simulationId: string): Promise<SimulationDetailData> {
+  assertUuid(simulationId, "simulation");
+  return apiJson<SimulationDetailData>(`/simulations/${simulationId}/resume`, { method: "POST" });
+}
+
+export async function simulationInjectFailure(simulationId: string, kind: "next_send"): Promise<SimulationDetailData> {
+  assertUuid(simulationId, "simulation");
+  return apiJson<SimulationDetailData>(`/simulations/${simulationId}/failures`, jsonInit("POST", { kind }));
+}
+
+export async function simulationRetry(simulationId: string): Promise<SimulationDetailData> {
+  assertUuid(simulationId, "simulation");
+  return apiJson<SimulationDetailData>(`/simulations/${simulationId}/retry`, { method: "POST" });
+}
+
+export async function simulationCancel(simulationId: string): Promise<SimulationDetailData> {
+  assertUuid(simulationId, "simulation");
+  return apiJson<SimulationDetailData>(`/simulations/${simulationId}/cancel`, { method: "POST" });
+}
+
+export async function simulationRestart(simulationId: string): Promise<SimulationDetailData> {
+  assertUuid(simulationId, "simulation");
+  return apiJson<SimulationDetailData>(`/simulations/${simulationId}/restart`, { method: "POST" });
+}
+
+export async function simulationReset(simulationId: string): Promise<SimulationDetailData> {
+  assertUuid(simulationId, "simulation");
+  return apiJson<SimulationDetailData>(`/simulations/${simulationId}/reset`, { method: "POST" });
+}
+
+export async function cancelConversation(conversationId: string, reason: string): Promise<{ conversation: OfConversationInstance }> {
+  assertUuid(conversationId, "conversation");
+  return apiJson<{ conversation: OfConversationInstance }>(`/conversations/${conversationId}/cancel`, jsonInit("POST", { reason }));
+}
+
+export async function processDueConversations(): Promise<{ processed: number; errors: string[] }> {
+  return apiJson<{ processed: number; errors: string[] }>("/conversations/process-due", { method: "POST" });
+}
+
+export async function fetchCreatorAutomationScenarios(creatorId: string): Promise<{ scenarios: OfCreatorAutomationScenario[] }> {
+  return apiJson<{ scenarios: OfCreatorAutomationScenario[] }>(`/creators/${creatorId}/automation-scenarios`);
+}
+
+export async function updateAutomationScenario(scenarioId: string, patch: Partial<OfCreatorAutomationScenario>): Promise<{ scenario: OfCreatorAutomationScenario }> {
+  assertUuid(scenarioId, "automation scenario");
+  return apiJson<{ scenario: OfCreatorAutomationScenario }>(`/automation-scenarios/${scenarioId}`, jsonInit("PATCH", patch));
 }
 
 export async function fetchOutboundMessages(): Promise<{ messages: OfOutboundMessage[] }> {
@@ -291,7 +432,7 @@ function apiUrl(path: string) {
   return `${API_BASE}${path.startsWith("/") ? path : `/${path}`}`;
 }
 
-function jsonInit(method: "POST" | "PATCH", body: unknown): RequestInit {
+function jsonInit(method: "POST" | "PATCH" | "PUT", body: unknown): RequestInit {
   return {
     method,
     headers: { "content-type": "application/json" },

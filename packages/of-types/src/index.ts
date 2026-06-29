@@ -20,10 +20,14 @@ export type TaskTimelineEventType =
 export type RecommendationStatus = "new" | "accepted" | "dismissed" | "archived";
 export type MessageScriptStatus = "active" | "inactive";
 export type MessageScriptActionMode = "task_only" | "draft_for_approval" | "auto_send";
-export type MessageScriptStepType = "message" | "follow_up" | "question" | "branch" | "end";
+export type MessageScriptStepType = "message" | "follow_up" | "question" | "branch" | "wait" | "set_variable" | "end";
+export type ScriptBuilderStepKind = "send_message" | "wait" | "ask_question" | "branch" | "set_variable" | "end_conversation";
 export type AutomationRunStatus = "running" | "completed" | "failed" | "skipped";
 export type OutboundMessageStatus = "pending_approval" | "queued" | "sending" | "sent" | "failed" | "rejected";
 export type OutboundApprovalStatus = "not_required" | "pending" | "approved" | "rejected";
+export type ConversationRuntimeStatus = "running" | "waiting_delay" | "waiting_reply" | "waiting_approval" | "completed" | "cancelled" | "failed";
+export type AutomationExecutionMode = "production" | "simulation";
+export type AutomationSimulationStatus = "draft" | "running" | "paused" | "completed" | "cancelled" | "failed";
 export type RelationshipState = "prospect" | "new_subscriber" | "welcomed" | "engaged" | "vip" | "cooling" | "at_risk" | "expired" | "reactivated";
 export type SubscriberPersonaKey =
   | "new_fan"
@@ -443,6 +447,9 @@ export interface OfEvent {
   provider_event_id: string | null;
   event_type: string;
   payload: Record<string, unknown>;
+  execution_mode: AutomationExecutionMode;
+  simulation_run_id?: string | null;
+  metadata?: Record<string, unknown>;
   received_at: string;
   processed_at: string | null;
   processing_status: "received" | "processed" | "failed";
@@ -535,6 +542,7 @@ export interface OfMessageScript {
   id: string;
   creator_id: string;
   name: string;
+  description?: string | null;
   trigger_event_type: string;
   status: MessageScriptStatus;
   action_mode: MessageScriptActionMode;
@@ -542,6 +550,12 @@ export interface OfMessageScript {
   requires_approval: boolean;
   cooldown_hours: number;
   max_sends_per_fan: number;
+  folder_name?: string | null;
+  category?: string | null;
+  tags?: string[];
+  version_number?: number;
+  source_script_id?: string | null;
+  builder_config?: ScriptBuilderConfig;
   created_at: string;
   updated_at: string;
   steps?: OfMessageScriptStep[];
@@ -558,8 +572,69 @@ export interface OfMessageScriptStep {
   condition_value: string | null;
   next_step_id: string | null;
   fallback_step_id: string | null;
+  metadata?: ScriptBuilderStepMetadata;
   created_at: string;
   updated_at: string;
+}
+
+export interface ScriptBuilderVariable {
+  key: string;
+  label?: string;
+  defaultValue?: string;
+  description?: string;
+}
+
+export interface ScriptBuilderCondition {
+  source: "variable" | "event" | "relationship" | "subscriber";
+  key: string;
+  operator: "equals" | "not_equals" | "contains" | "not_contains" | "exists" | "not_exists";
+  value?: string;
+}
+
+export interface ScriptBuilderBranchRule {
+  id: string;
+  label: string;
+  condition: ScriptBuilderCondition;
+  nextStepId: string | null;
+}
+
+export interface ScriptBuilderStepMetadata {
+  kind?: ScriptBuilderStepKind;
+  label?: string;
+  nodeKey?: string;
+  variableKey?: string;
+  variableValue?: string;
+  waitForReply?: boolean;
+  branchRules?: ScriptBuilderBranchRule[];
+  notes?: string;
+}
+
+export type ChatAutomationScenarioKey = "new_subscriber" | "subscription_expiring" | "inactive_subscriber" | "ppv_promotion";
+
+export interface OfCreatorAutomationScenario {
+  id: string;
+  creator_id: string;
+  scenario_key: ChatAutomationScenarioKey;
+  label: string;
+  description: string | null;
+  trigger_event_type: string;
+  linked_script_id: string | null;
+  enabled: boolean;
+  creator_enabled: boolean;
+  action_mode_override: MessageScriptActionMode | null;
+  metadata: Record<string, unknown>;
+  last_triggered_at: string | null;
+  created_at: string;
+  updated_at: string;
+  linked_script?: Pick<OfMessageScript, "id" | "name" | "status" | "action_mode" | "trigger_event_type" | "category"> | null;
+  running_count?: number;
+  failed_count?: number;
+  recent_events?: Array<Pick<OfEvent, "id" | "event_type" | "received_at">>;
+}
+
+export interface ScriptBuilderConfig {
+  schemaVersion?: number;
+  variables?: ScriptBuilderVariable[];
 }
 
 export interface OfAutomationRun {
@@ -570,11 +645,65 @@ export interface OfAutomationRun {
   source_event_id: string | null;
   action_mode: MessageScriptActionMode;
   status: AutomationRunStatus;
+  execution_mode: AutomationExecutionMode;
+  simulation_run_id?: string | null;
+  metadata?: Record<string, unknown>;
   started_at: string;
   completed_at: string | null;
   error_message: string | null;
   of_message_scripts?: Pick<OfMessageScript, "name" | "trigger_event_type"> | null;
   of_creators?: Pick<OfCreator, "username" | "display_name"> | null;
+}
+
+export interface OfConversationInstance {
+  id: string;
+  creator_id: string;
+  subscriber_id: string | null;
+  relationship_id: string | null;
+  script_id: string;
+  source_script_id: string | null;
+  script_version: number;
+  automation_run_id: string | null;
+  originating_event_id: string | null;
+  last_event_id: string | null;
+  current_step_id: string | null;
+  next_step_id: string | null;
+  status: ConversationRuntimeStatus;
+  execution_mode: AutomationExecutionMode;
+  variables: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+  retry_count: number;
+  waiting_until: string | null;
+  waiting_reason: string | null;
+  cancellation_reason: string | null;
+  completion_reason: string | null;
+  last_error: string | null;
+  processing_started_at: string | null;
+  last_resumed_at: string | null;
+  completed_at: string | null;
+  cancelled_at: string | null;
+  failed_at: string | null;
+  created_at: string;
+  updated_at: string;
+  of_message_scripts?: Pick<OfMessageScript, "name" | "trigger_event_type" | "folder_name" | "version_number"> | null;
+  current_step?: Pick<OfMessageScriptStep, "id" | "step_order" | "step_type" | "message_body"> | null;
+  next_step?: Pick<OfMessageScriptStep, "id" | "step_order" | "step_type" | "message_body"> | null;
+  source_event?: Pick<OfEvent, "id" | "event_type" | "received_at"> | null;
+}
+
+export interface OfConversationHistoryItem {
+  id: string;
+  conversation_instance_id: string;
+  creator_id: string;
+  event_id: string | null;
+  step_id: string | null;
+  transition_key: string;
+  event_type: string;
+  from_status: string | null;
+  to_status: string | null;
+  detail: string | null;
+  payload: Record<string, unknown>;
+  created_at: string;
 }
 
 export interface OfOutboundMessage {
@@ -583,7 +712,12 @@ export interface OfOutboundMessage {
   fan_id: string;
   script_id: string | null;
   automation_run_id: string | null;
+  conversation_instance_id: string | null;
+  script_step_id: string | null;
   source_event_id: string | null;
+  execution_mode: AutomationExecutionMode;
+  simulation_run_id?: string | null;
+  destination?: string | null;
   provider_message_id: string | null;
   generated_text: string | null;
   message_body: string;
@@ -596,19 +730,71 @@ export interface OfOutboundMessage {
   failed_at: string | null;
   failure_reason: string | null;
   error_message: string | null;
+  metadata?: Record<string, unknown>;
   created_at: string;
   of_message_scripts?: Pick<OfMessageScript, "name"> | null;
   of_creators?: Pick<OfCreator, "username" | "display_name"> | null;
 }
 
+export interface OfSimulatedSubscriber {
+  id: string;
+  creator_id: string;
+  name: string;
+  username: string;
+  subscription_status: string;
+  renewal_state: string;
+  spend_level: string;
+  lifetime_value: number;
+  message_history_summary: string | null;
+  custom_variables: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface OfAutomationSimulation {
+  id: string;
+  creator_id: string;
+  script_id: string | null;
+  scenario_id: string | null;
+  simulated_subscriber_id: string | null;
+  conversation_instance_id: string | null;
+  automation_run_id: string | null;
+  source_event_id: string | null;
+  status: AutomationSimulationStatus;
+  event_type: string;
+  event_payload: Record<string, unknown>;
+  initial_variables: Record<string, unknown>;
+  runtime_state: Record<string, unknown>;
+  failure_plan: Record<string, unknown>;
+  last_error: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  created_at: string;
+  updated_at: string;
+  simulated_subscriber?: OfSimulatedSubscriber | null;
+  script?: Pick<OfMessageScript, "id" | "name" | "action_mode" | "trigger_event_type"> | null;
+  scenario?: Pick<OfCreatorAutomationScenario, "id" | "scenario_key" | "label" | "trigger_event_type"> | null;
+  conversation?: OfConversationInstance | null;
+  history?: OfConversationHistoryItem[];
+  outbound_messages?: OfOutboundMessage[];
+}
+
 export interface MessageScriptTemplate {
   name: string;
+  description?: string;
   triggerEventType: string;
   autoSendEnabled: boolean;
   requiresApproval: boolean;
   actionMode?: MessageScriptActionMode;
   cooldownHours: number;
   maxSendsPerFan: number;
+  folderName?: string;
+  category?: string;
+  tags?: string[];
+  versionNumber?: number;
+  sourceScriptId?: string | null;
+  builderConfig?: ScriptBuilderConfig;
   steps: ScriptStepTemplate[];
 }
 
@@ -624,6 +810,7 @@ export interface ScriptStepTemplate {
   };
   nextStepId?: string;
   fallbackStepId?: string;
+  metadata?: ScriptBuilderStepMetadata;
 }
 
 export interface CreatorOperationalData {

@@ -7,11 +7,25 @@ import {
 } from "@funkmyfans/betterfans-client";
 import { calculateRelationshipIntelligence, calculateSubscriberAgencyIntelligence, buildDailyFocusQueue, buildMorningBrief, calculateTaskPriority, generateTaskDrafts, type TaskRuleDraft } from "@funkmyfans/of-rules-engine";
 import type {
+  AutomationExecutionMode,
+  AutomationSimulationStatus,
+  ConversationRuntimeStatus,
   ConversationIntent,
   ConversationSentiment,
+  OfAutomationSimulation,
+  OfCreatorAutomationScenario,
   MessageScriptActionMode,
   MessageScriptTemplate,
+  OfConversationInstance,
+  OfConversationHistoryItem,
   OfMessageScriptStep,
+  OfOutboundMessage,
+  OfSimulatedSubscriber,
+  ScriptBuilderBranchRule,
+  ScriptBuilderConfig,
+  ScriptBuilderCondition,
+  ScriptBuilderStepMetadata,
+  ScriptBuilderVariable,
   ScriptStepTemplate,
   SyncType
 } from "@funkmyfans/of-types";
@@ -39,6 +53,15 @@ interface EventActionContext {
   subscriberId: string | null;
   chatId: string | null;
   relationshipId: string | null;
+  simulationSubscriber: Record<string, unknown> | null;
+  simulationRunId: string | null;
+}
+
+interface SimulationDetailData {
+  simulation: OfAutomationSimulation;
+  conversation: OfConversationInstance | null;
+  history: OfConversationHistoryItem[];
+  outboundMessages: OfOutboundMessage[];
 }
 
 interface ConversationMessage {
@@ -126,6 +149,9 @@ class ApiError extends Error {
 
 async function handleApi(request: Request, env: Env, url: URL): Promise<Response> {
   const supabase = createServiceClient(env);
+  if (request.method === "GET" || request.method === "POST" || request.method === "PATCH") {
+    await processDueConversations(supabase, env, { limit: 10 });
+  }
 if (request.method === "GET" && url.pathname === "/api/dashboard") {
   const [creators, snapshots, tasks, events, syncRuns, relationships, contextEvents] = await Promise.all([
     supabase.from("of_creators").select("*").order("created_at", { ascending: false }),
@@ -352,6 +378,25 @@ if (request.method === "GET" && url.pathname === "/api/dashboard") {
     return Response.json({ script }, { headers: jsonHeaders });
   }
 
+  const scriptBuilderMatch = url.pathname.match(/^\/api\/scripts\/([^/]+)\/builder$/);
+  if (request.method === "PUT" && scriptBuilderMatch) {
+    if (!isUuid(scriptBuilderMatch[1])) {
+      return Response.json({ error: "Script id must be a database UUID" }, { status: 400, headers: jsonHeaders });
+    }
+    const body = (await request.json().catch(() => ({}))) as Partial<MessageScriptTemplate>;
+    const script = await saveScriptBuilder(supabase, scriptBuilderMatch[1], body);
+    return Response.json({ script }, { headers: jsonHeaders });
+  }
+
+  const scriptDuplicateMatch = url.pathname.match(/^\/api\/scripts\/([^/]+)\/duplicate$/);
+  if (request.method === "POST" && scriptDuplicateMatch) {
+    if (!isUuid(scriptDuplicateMatch[1])) {
+      return Response.json({ error: "Script id must be a database UUID" }, { status: 400, headers: jsonHeaders });
+    }
+    const script = await duplicateScriptDefinition(supabase, scriptDuplicateMatch[1]);
+    return Response.json({ script }, { status: 201, headers: jsonHeaders });
+  }
+
   const scriptStepsMatch = url.pathname.match(/^\/api\/scripts\/([^/]+)\/steps$/);
   if (request.method === "POST" && scriptStepsMatch) {
     if (!isUuid(scriptStepsMatch[1])) {
@@ -388,6 +433,136 @@ if (request.method === "GET" && url.pathname === "/api/dashboard") {
   if (request.method === "GET" && creatorAutomationRunsMatch) {
     const runs = await listCreatorAutomationRuns(supabase, creatorAutomationRunsMatch[1]);
     return Response.json({ runs }, { headers: jsonHeaders });
+  }
+
+  const creatorConversationsMatch = url.pathname.match(/^\/api\/creators\/([^/]+)\/conversations$/);
+  if (request.method === "GET" && creatorConversationsMatch) {
+    const conversations = await listCreatorConversations(supabase, creatorConversationsMatch[1]);
+    return Response.json({ conversations }, { headers: jsonHeaders });
+  }
+
+  const creatorAutomationScenariosMatch = url.pathname.match(/^\/api\/creators\/([^/]+)\/automation-scenarios$/);
+  if (request.method === "GET" && creatorAutomationScenariosMatch) {
+    const scenarios = await listCreatorAutomationScenarios(supabase, creatorAutomationScenariosMatch[1]);
+    return Response.json({ scenarios }, { headers: jsonHeaders });
+  }
+
+  const creatorSimulatedSubscribersMatch = url.pathname.match(/^\/api\/creators\/([^/]+)\/simulated-subscribers$/);
+  if (request.method === "GET" && creatorSimulatedSubscribersMatch) {
+    const subscribers = await listSimulatedSubscribers(supabase, creatorSimulatedSubscribersMatch[1]);
+    return Response.json({ subscribers }, { headers: jsonHeaders });
+  }
+
+  if (request.method === "POST" && creatorSimulatedSubscribersMatch) {
+    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const subscriber = await createSimulatedSubscriber(supabase, creatorSimulatedSubscribersMatch[1], body);
+    return Response.json({ subscriber }, { status: 201, headers: jsonHeaders });
+  }
+
+  const simulatedSubscriberMatch = url.pathname.match(/^\/api\/simulated-subscribers\/([^/]+)$/);
+  if (request.method === "PATCH" && simulatedSubscriberMatch) {
+    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const subscriber = await updateSimulatedSubscriber(supabase, simulatedSubscriberMatch[1], body);
+    return Response.json({ subscriber }, { headers: jsonHeaders });
+  }
+
+  const creatorSimulationsMatch = url.pathname.match(/^\/api\/creators\/([^/]+)\/simulations$/);
+  if (request.method === "GET" && creatorSimulationsMatch) {
+    const simulations = await listCreatorSimulations(supabase, creatorSimulationsMatch[1]);
+    return Response.json({ simulations }, { headers: jsonHeaders });
+  }
+
+  if (request.method === "POST" && creatorSimulationsMatch) {
+    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const detail = await startAutomationSimulation(supabase, env, creatorSimulationsMatch[1], body);
+    return Response.json(detail, { status: 201, headers: jsonHeaders });
+  }
+
+  const automationScenarioMatch = url.pathname.match(/^\/api\/automation-scenarios\/([^/]+)$/);
+  if (request.method === "PATCH" && automationScenarioMatch) {
+    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const scenario = await updateAutomationScenario(supabase, automationScenarioMatch[1], body);
+    return Response.json({ scenario }, { headers: jsonHeaders });
+  }
+
+  const conversationMatch = url.pathname.match(/^\/api\/conversations\/([^/]+)$/);
+  if (request.method === "GET" && conversationMatch) {
+    const conversation = await getConversationDetail(supabase, conversationMatch[1]);
+    return Response.json(conversation, { headers: jsonHeaders });
+  }
+
+  const conversationCancelMatch = url.pathname.match(/^\/api\/conversations\/([^/]+)\/cancel$/);
+  if (request.method === "POST" && conversationCancelMatch) {
+    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const conversation = await cancelConversation(supabase, conversationCancelMatch[1], typeof body.reason === "string" ? body.reason : "Cancelled by operator");
+    return Response.json({ conversation }, { headers: jsonHeaders });
+  }
+
+  const simulationMatch = url.pathname.match(/^\/api\/simulations\/([^/]+)$/);
+  if (request.method === "GET" && simulationMatch) {
+    const detail = await getSimulationDetail(supabase, simulationMatch[1]);
+    return Response.json(detail, { headers: jsonHeaders });
+  }
+
+  const simulationReplyMatch = url.pathname.match(/^\/api\/simulations\/([^/]+)\/reply$/);
+  if (request.method === "POST" && simulationReplyMatch) {
+    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const detail = await replyToSimulation(supabase, env, simulationReplyMatch[1], typeof body.text === "string" ? body.text : "");
+    return Response.json(detail, { headers: jsonHeaders });
+  }
+
+  const simulationFastForwardMatch = url.pathname.match(/^\/api\/simulations\/([^/]+)\/fast-forward$/);
+  if (request.method === "POST" && simulationFastForwardMatch) {
+    const detail = await fastForwardSimulation(supabase, env, simulationFastForwardMatch[1]);
+    return Response.json(detail, { headers: jsonHeaders });
+  }
+
+  const simulationPauseMatch = url.pathname.match(/^\/api\/simulations\/([^/]+)\/pause$/);
+  if (request.method === "POST" && simulationPauseMatch) {
+    const detail = await pauseSimulation(supabase, simulationPauseMatch[1]);
+    return Response.json(detail, { headers: jsonHeaders });
+  }
+
+  const simulationResumeMatch = url.pathname.match(/^\/api\/simulations\/([^/]+)\/resume$/);
+  if (request.method === "POST" && simulationResumeMatch) {
+    const detail = await resumeSimulation(supabase, env, simulationResumeMatch[1]);
+    return Response.json(detail, { headers: jsonHeaders });
+  }
+
+  const simulationFailureMatch = url.pathname.match(/^\/api\/simulations\/([^/]+)\/failures$/);
+  if (request.method === "POST" && simulationFailureMatch) {
+    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const detail = await injectSimulationFailure(supabase, simulationFailureMatch[1], typeof body.kind === "string" ? body.kind : "next_send");
+    return Response.json(detail, { headers: jsonHeaders });
+  }
+
+  const simulationRetryMatch = url.pathname.match(/^\/api\/simulations\/([^/]+)\/retry$/);
+  if (request.method === "POST" && simulationRetryMatch) {
+    const detail = await retrySimulation(supabase, env, simulationRetryMatch[1]);
+    return Response.json(detail, { headers: jsonHeaders });
+  }
+
+  const simulationCancelMatch = url.pathname.match(/^\/api\/simulations\/([^/]+)\/cancel$/);
+  if (request.method === "POST" && simulationCancelMatch) {
+    const detail = await cancelSimulation(supabase, simulationCancelMatch[1]);
+    return Response.json(detail, { headers: jsonHeaders });
+  }
+
+  const simulationRestartMatch = url.pathname.match(/^\/api\/simulations\/([^/]+)\/restart$/);
+  if (request.method === "POST" && simulationRestartMatch) {
+    const detail = await restartSimulation(supabase, env, simulationRestartMatch[1]);
+    return Response.json(detail, { headers: jsonHeaders });
+  }
+
+  const simulationResetMatch = url.pathname.match(/^\/api\/simulations\/([^/]+)\/reset$/);
+  if (request.method === "POST" && simulationResetMatch) {
+    const detail = await resetSimulation(supabase, simulationResetMatch[1]);
+    return Response.json(detail, { headers: jsonHeaders });
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/conversations/process-due") {
+    const processed = await processDueConversations(supabase, env, { limit: 50 });
+    return Response.json(processed, { headers: jsonHeaders });
   }
 
   if (request.method === "GET" && url.pathname === "/api/outbound-messages") {
@@ -1563,19 +1738,29 @@ async function createMessageScript(supabase: SupabaseClient, creatorId: string, 
   if (!body.triggerEventType?.trim()) throw new Error("Script triggerEventType is required");
   const legacyBody = body as Partial<MessageScriptTemplate> & { action_mode?: unknown };
   const actionMode = parseActionMode(body.actionMode ?? legacyBody.action_mode, "draft_for_approval");
+  const normalizedTags = normalizeStringArray(body.tags);
+  const versionNumber = body.versionNumber == null ? 1 : nonNegativeInteger(body.versionNumber, 1);
+  if (versionNumber < 1) throw new Error("Version number must be at least 1");
 
   const inserted = await supabase
     .from("of_message_scripts")
     .insert({
       creator_id: creatorId,
       name: body.name.trim(),
+      description: typeof body.description === "string" ? body.description.trim() || null : null,
       trigger_event_type: body.triggerEventType.trim(),
       status: "inactive",
       action_mode: actionMode,
       auto_send_enabled: Boolean(body.autoSendEnabled),
       requires_approval: body.requiresApproval ?? actionMode !== "auto_send",
       cooldown_hours: nonNegativeInteger(body.cooldownHours, 24),
-      max_sends_per_fan: nonNegativeInteger(body.maxSendsPerFan, 1)
+      max_sends_per_fan: nonNegativeInteger(body.maxSendsPerFan, 1),
+      folder_name: typeof body.folderName === "string" ? body.folderName.trim() || null : null,
+      category: typeof body.category === "string" ? body.category.trim() || null : null,
+      tags: normalizedTags,
+      version_number: versionNumber,
+      source_script_id: body.sourceScriptId && isUuid(body.sourceScriptId) ? body.sourceScriptId : null,
+      builder_config: normalizeBuilderConfig(body.builderConfig)
     })
     .select("*")
     .single();
@@ -1592,6 +1777,7 @@ async function createMessageScript(supabase: SupabaseClient, creatorId: string, 
 async function updateMessageScript(supabase: SupabaseClient, scriptId: string, body: Record<string, unknown>) {
   const patch: Record<string, unknown> = {};
   if (typeof body.name === "string") patch.name = body.name.trim();
+  if ("description" in body) patch.description = typeof body.description === "string" ? body.description.trim() || null : null;
   if (typeof body.trigger_event_type === "string") patch.trigger_event_type = body.trigger_event_type.trim();
   if (typeof body.triggerEventType === "string") patch.trigger_event_type = body.triggerEventType.trim();
   if (typeof body.status === "string") {
@@ -1608,10 +1794,114 @@ async function updateMessageScript(supabase: SupabaseClient, scriptId: string, b
   if ("cooldownHours" in body) patch.cooldown_hours = nonNegativeInteger(body.cooldownHours, 24);
   if ("max_sends_per_fan" in body) patch.max_sends_per_fan = nonNegativeInteger(body.max_sends_per_fan, 1);
   if ("maxSendsPerFan" in body) patch.max_sends_per_fan = nonNegativeInteger(body.maxSendsPerFan, 1);
+  if ("folder_name" in body) patch.folder_name = typeof body.folder_name === "string" ? body.folder_name.trim() || null : null;
+  if ("folderName" in body) patch.folder_name = typeof body.folderName === "string" ? body.folderName.trim() || null : null;
+  if ("category" in body) patch.category = typeof body.category === "string" ? body.category.trim() || null : null;
+  if ("tags" in body) patch.tags = normalizeStringArray(body.tags);
+  if ("version_number" in body || "versionNumber" in body) {
+    const value = "version_number" in body ? body.version_number : body.versionNumber;
+    const versionNumber = nonNegativeInteger(value, 1);
+    if (versionNumber < 1) throw new Error("Version number must be at least 1");
+    patch.version_number = versionNumber;
+  }
+  if ("source_script_id" in body) patch.source_script_id = typeof body.source_script_id === "string" && isUuid(body.source_script_id) ? body.source_script_id : null;
+  if ("sourceScriptId" in body) patch.source_script_id = typeof body.sourceScriptId === "string" && isUuid(body.sourceScriptId) ? body.sourceScriptId : null;
+  if ("builder_config" in body) patch.builder_config = normalizeBuilderConfig(body.builder_config);
+  if ("builderConfig" in body) patch.builder_config = normalizeBuilderConfig(body.builderConfig);
 
   const result = await supabase.from("of_message_scripts").update(patch).eq("id", scriptId).select("*").single();
   assertNoError(result.error);
   return result.data;
+}
+
+async function saveScriptBuilder(supabase: SupabaseClient, scriptId: string, body: Partial<MessageScriptTemplate>) {
+  const existing = await supabase.from("of_message_scripts").select("id, creator_id").eq("id", scriptId).single();
+  assertNoError(existing.error);
+  if (!existing.data) throw new Error("Script not found");
+  if (!body.name?.trim()) throw new Error("Script name is required");
+  if (!body.triggerEventType?.trim()) throw new Error("Script triggerEventType is required");
+  if (!Array.isArray(body.steps) || !body.steps.length) throw new Error("At least one script step is required");
+
+  await updateMessageScript(supabase, scriptId, {
+    name: body.name,
+    description: body.description ?? null,
+    triggerEventType: body.triggerEventType,
+    actionMode: body.actionMode ?? "draft_for_approval",
+    autoSendEnabled: body.autoSendEnabled ?? false,
+    requiresApproval: body.requiresApproval ?? true,
+    cooldownHours: body.cooldownHours ?? 24,
+    maxSendsPerFan: body.maxSendsPerFan ?? 1,
+    folderName: body.folderName ?? null,
+    category: body.category ?? null,
+    tags: body.tags ?? [],
+    versionNumber: body.versionNumber ?? 1,
+    sourceScriptId: body.sourceScriptId ?? null,
+    builderConfig: body.builderConfig ?? {}
+  });
+
+  const deleted = await supabase.from("of_message_script_steps").delete().eq("script_id", scriptId);
+  assertNoError(deleted.error);
+  await insertScriptTemplateSteps(supabase, scriptId, body.steps);
+  const saved = (await listCreatorScripts(supabase, existing.data.creator_id as string)).find((item) => item.id === scriptId);
+  if (!saved) throw new Error("Saved script could not be reloaded");
+  return saved;
+}
+
+async function duplicateScriptDefinition(supabase: SupabaseClient, scriptId: string) {
+  const scriptResult = await supabase.from("of_message_scripts").select("*").eq("id", scriptId).single();
+  assertNoError(scriptResult.error);
+  if (!scriptResult.data) throw new Error("Script not found");
+
+  const stepsResult = await supabase.from("of_message_script_steps").select("*").eq("script_id", scriptId).order("step_order", { ascending: true });
+  assertNoError(stepsResult.error);
+
+  const script = scriptResult.data as Record<string, unknown>;
+  const rootScriptId =
+    typeof script.source_script_id === "string" && isUuid(script.source_script_id)
+      ? script.source_script_id
+      : String(script.id);
+
+  const siblings = await supabase
+    .from("of_message_scripts")
+    .select("version_number")
+    .or(`id.eq.${rootScriptId},source_script_id.eq.${rootScriptId}`);
+  assertNoError(siblings.error);
+  const nextVersion =
+    Math.max(
+      0,
+      ...(siblings.data ?? []).map((item) => (typeof item.version_number === "number" ? item.version_number : Number(item.version_number ?? 0)))
+    ) + 1;
+
+  const duplicateName = buildDuplicateScriptName(String(script.name ?? "Untitled Script"), nextVersion);
+  const created = await createMessageScript(supabase, String(script.creator_id), {
+    name: duplicateName,
+    description: typeof script.description === "string" ? script.description : "",
+    triggerEventType: String(script.trigger_event_type ?? "chat_message"),
+    autoSendEnabled: Boolean(script.auto_send_enabled),
+    requiresApproval: Boolean(script.requires_approval),
+    actionMode: parseActionMode(script.action_mode, "draft_for_approval"),
+    cooldownHours: Number(script.cooldown_hours ?? 24),
+    maxSendsPerFan: Number(script.max_sends_per_fan ?? 1),
+    folderName: typeof script.folder_name === "string" ? script.folder_name : "",
+    category: typeof script.category === "string" ? script.category : "",
+    tags: normalizeStringArray(script.tags),
+    versionNumber: nextVersion,
+    sourceScriptId: rootScriptId,
+    builderConfig: normalizeBuilderConfig(script.builder_config),
+    steps: ((stepsResult.data ?? []) as OfMessageScriptStep[]).map((step) => ({
+      id: `copy-${step.id}`,
+      order: step.step_order,
+      type: step.step_type,
+      body: step.message_body ?? undefined,
+      delayMinutes: step.delay_minutes ?? undefined,
+      condition: step.condition_key ? { key: step.condition_key, value: step.condition_value ?? "" } : undefined,
+      nextStepId: step.next_step_id ? `copy-${step.next_step_id}` : undefined,
+      fallbackStepId: step.fallback_step_id ? `copy-${step.fallback_step_id}` : undefined,
+      metadata: normalizeStepMetadata(step.metadata)
+    }))
+  });
+
+  return created;
 }
 
 async function insertScriptTemplateSteps(supabase: SupabaseClient, scriptId: string, steps: ScriptStepTemplate[]) {
@@ -1622,6 +1912,11 @@ async function insertScriptTemplateSteps(supabase: SupabaseClient, scriptId: str
 
   const rows = steps.map((step) => {
     const id = step.id ? idMap.get(step.id) : undefined;
+    const metadata = normalizeStepMetadata(step.metadata);
+    const branchRules = metadata.branchRules?.map((rule) => ({
+      ...rule,
+      nextStepId: rule.nextStepId ? idMap.get(rule.nextStepId) ?? rule.nextStepId : null
+    }));
     return {
       ...(id ? { id } : {}),
       script_id: scriptId,
@@ -1632,7 +1927,11 @@ async function insertScriptTemplateSteps(supabase: SupabaseClient, scriptId: str
       condition_key: step.condition?.key ?? null,
       condition_value: step.condition?.value ?? null,
       next_step_id: step.nextStepId ? idMap.get(step.nextStepId) ?? (isUuid(step.nextStepId) ? step.nextStepId : null) : null,
-      fallback_step_id: step.fallbackStepId ? idMap.get(step.fallbackStepId) ?? (isUuid(step.fallbackStepId) ? step.fallbackStepId : null) : null
+      fallback_step_id: step.fallbackStepId ? idMap.get(step.fallbackStepId) ?? (isUuid(step.fallbackStepId) ? step.fallbackStepId : null) : null,
+      metadata: {
+        ...metadata,
+        branchRules
+      }
     };
   });
 
@@ -1652,7 +1951,8 @@ async function createScriptStep(supabase: SupabaseClient, scriptId: string, body
       condition_key: body.condition?.key ?? null,
       condition_value: body.condition?.value ?? null,
       next_step_id: body.nextStepId && isUuid(body.nextStepId) ? body.nextStepId : null,
-      fallback_step_id: body.fallbackStepId && isUuid(body.fallbackStepId) ? body.fallbackStepId : null
+      fallback_step_id: body.fallbackStepId && isUuid(body.fallbackStepId) ? body.fallbackStepId : null,
+      metadata: normalizeStepMetadata(body.metadata)
     })
     .select("*")
     .single();
@@ -1680,17 +1980,454 @@ async function updateScriptStep(supabase: SupabaseClient, stepId: string, body: 
   if ("next_step_id" in body) patch.next_step_id = typeof body.next_step_id === "string" && isUuid(body.next_step_id) ? body.next_step_id : null;
   if ("fallbackStepId" in body) patch.fallback_step_id = typeof body.fallbackStepId === "string" && isUuid(body.fallbackStepId) ? body.fallbackStepId : null;
   if ("fallback_step_id" in body) patch.fallback_step_id = typeof body.fallback_step_id === "string" && isUuid(body.fallback_step_id) ? body.fallback_step_id : null;
+  if ("metadata" in body) patch.metadata = normalizeStepMetadata(body.metadata);
 
   const result = await supabase.from("of_message_script_steps").update(patch).eq("id", stepId).select("*").single();
   assertNoError(result.error);
   return result.data;
 }
 
+function normalizeStringArray(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.map((item) => String(item ?? "").trim()).filter(Boolean))];
+}
+
+function normalizeBuilderConfig(value: unknown): ScriptBuilderConfig {
+  if (!isRecord(value)) {
+    return { schemaVersion: 1, variables: [] };
+  }
+  return {
+    schemaVersion: typeof value.schemaVersion === "number" && value.schemaVersion > 0 ? Math.floor(value.schemaVersion) : 1,
+    variables: Array.isArray(value.variables) ? value.variables.map(normalizeVariable).filter((item): item is ScriptBuilderVariable => item !== null) : []
+  };
+}
+
+function normalizeVariable(value: unknown): ScriptBuilderVariable | null {
+  if (!isRecord(value) || typeof value.key !== "string" || !value.key.trim()) return null;
+  return {
+    key: value.key.trim(),
+    label: typeof value.label === "string" && value.label.trim() ? value.label.trim() : undefined,
+    defaultValue: typeof value.defaultValue === "string" ? value.defaultValue : undefined,
+    description: typeof value.description === "string" && value.description.trim() ? value.description.trim() : undefined
+  };
+}
+
+function normalizeStepMetadata(value: unknown): ScriptBuilderStepMetadata {
+  if (!isRecord(value)) return {};
+  return {
+    kind: isBuilderStepKind(value.kind) ? value.kind : undefined,
+    label: typeof value.label === "string" && value.label.trim() ? value.label.trim() : undefined,
+    nodeKey: typeof value.nodeKey === "string" && value.nodeKey.trim() ? value.nodeKey.trim() : undefined,
+    variableKey: typeof value.variableKey === "string" && value.variableKey.trim() ? value.variableKey.trim() : undefined,
+    variableValue: typeof value.variableValue === "string" ? value.variableValue : undefined,
+    waitForReply: typeof value.waitForReply === "boolean" ? value.waitForReply : undefined,
+    branchRules: Array.isArray(value.branchRules) ? value.branchRules.map(normalizeBranchRule).filter((item): item is ScriptBuilderBranchRule => item !== null) : undefined,
+    notes: typeof value.notes === "string" && value.notes.trim() ? value.notes.trim() : undefined
+  };
+}
+
+function normalizeBranchRule(value: unknown): ScriptBuilderBranchRule | null {
+  if (!isRecord(value)) return null;
+  const condition = normalizeCondition(value.condition);
+  if (!condition) return null;
+  return {
+    id: typeof value.id === "string" && value.id.trim() ? value.id.trim() : crypto.randomUUID(),
+    label: typeof value.label === "string" && value.label.trim() ? value.label.trim() : "Branch",
+    condition,
+    nextStepId: typeof value.nextStepId === "string" && value.nextStepId.trim() ? value.nextStepId.trim() : null
+  };
+}
+
+function normalizeCondition(value: unknown): ScriptBuilderCondition | null {
+  if (!isRecord(value)) return null;
+  if (!isConditionSource(value.source) || typeof value.key !== "string" || !value.key.trim() || !isConditionOperator(value.operator)) {
+    return null;
+  }
+  return {
+    source: value.source,
+    key: value.key.trim(),
+    operator: value.operator,
+    value: typeof value.value === "string" ? value.value : undefined
+  };
+}
+
+function isBuilderStepKind(value: unknown): value is NonNullable<ScriptBuilderStepMetadata["kind"]> {
+  return value === "send_message" || value === "wait" || value === "ask_question" || value === "branch" || value === "set_variable" || value === "end_conversation";
+}
+
+function isConditionSource(value: unknown): value is ScriptBuilderCondition["source"] {
+  return value === "variable" || value === "event" || value === "relationship" || value === "subscriber";
+}
+
+function isConditionOperator(value: unknown): value is ScriptBuilderCondition["operator"] {
+  return value === "equals" || value === "not_equals" || value === "contains" || value === "not_contains" || value === "exists" || value === "not_exists";
+}
+
+function buildDuplicateScriptName(name: string, versionNumber: number) {
+  const base = name.replace(/\s+\(v\d+\)\s*$/i, "").trim();
+  return `${base} (v${versionNumber})`;
+}
+
+async function listSimulatedSubscribers(supabase: SupabaseClient, creatorId: string) {
+  const result = await supabase.from("of_simulated_subscribers").select("*").eq("creator_id", creatorId).order("updated_at", { ascending: false });
+  assertNoError(result.error);
+  return (result.data ?? []) as OfSimulatedSubscriber[];
+}
+
+async function createSimulatedSubscriber(supabase: SupabaseClient, creatorId: string, body: Record<string, unknown>) {
+  const payload = normalizeSimulatedSubscriberInput(body);
+  const result = await supabase.from("of_simulated_subscribers").insert({ creator_id: creatorId, ...payload }).select("*").single();
+  assertNoError(result.error);
+  return result.data as OfSimulatedSubscriber;
+}
+
+async function updateSimulatedSubscriber(supabase: SupabaseClient, subscriberId: string, body: Record<string, unknown>) {
+  const payload = normalizeSimulatedSubscriberInput(body);
+  const result = await supabase.from("of_simulated_subscribers").update(payload).eq("id", subscriberId).select("*").single();
+  assertNoError(result.error);
+  return result.data as OfSimulatedSubscriber;
+}
+
+function normalizeSimulatedSubscriberInput(body: Record<string, unknown>) {
+  return {
+    name: stringValue(body.name, "Test Subscriber"),
+    username: stringValue(body.username, `test_${Math.random().toString(36).slice(2, 8)}`),
+    subscription_status: stringValue(body.subscription_status, stringValue(body.subscriptionStatus, "active")),
+    renewal_state: stringValue(body.renewal_state, stringValue(body.renewalState, "current")),
+    spend_level: stringValue(body.spend_level, stringValue(body.spendLevel, "medium")),
+    lifetime_value: Number(body.lifetime_value ?? body.lifetimeValue ?? 0) || 0,
+    message_history_summary: stringValue(body.message_history_summary, stringValue(body.messageHistorySummary, "")) || null,
+    custom_variables: isRecord(body.custom_variables) ? body.custom_variables : isRecord(body.customVariables) ? body.customVariables : {}
+  };
+}
+
+async function listCreatorSimulations(supabase: SupabaseClient, creatorId: string) {
+  const result = await supabase
+    .from("of_automation_simulations")
+    .select("*, simulated_subscriber:of_simulated_subscribers(*), script:of_message_scripts(id, name, action_mode, trigger_event_type), scenario:of_creator_automation_scenarios(id, scenario_key, label, trigger_event_type)")
+    .eq("creator_id", creatorId)
+    .order("updated_at", { ascending: false })
+    .limit(100);
+  assertNoError(result.error);
+  return (result.data ?? []) as OfAutomationSimulation[];
+}
+
+async function startAutomationSimulation(supabase: SupabaseClient, env: Env, creatorId: string, body: Record<string, unknown>): Promise<SimulationDetailData> {
+  const prepared = await prepareSimulationLaunch(supabase, creatorId, body);
+  const simulationInsert = await supabase
+    .from("of_automation_simulations")
+    .insert({
+      creator_id: creatorId,
+      script_id: prepared.script.id,
+      scenario_id: prepared.scenario?.id ?? null,
+      simulated_subscriber_id: prepared.subscriber.id,
+      status: "running",
+      event_type: prepared.eventType,
+      event_payload: prepared.eventPayload,
+      initial_variables: prepared.initialVariables,
+      runtime_state: { started_by: "operator" },
+      failure_plan: {},
+      started_at: new Date().toISOString()
+    })
+    .select("*")
+    .single();
+  assertNoError(simulationInsert.error);
+  const simulation = simulationInsert.data as OfAutomationSimulation;
+
+  const eventInsert = await supabase
+    .from("of_events")
+    .insert({
+      creator_id: creatorId,
+      provider: "simulation",
+      provider_event_id: `simulation:${simulation.id}`,
+      event_type: prepared.eventType,
+      payload: prepared.eventPayload,
+      execution_mode: "simulation",
+      simulation_run_id: simulation.id,
+      metadata: { simulation: true, script_id: prepared.script.id },
+      received_at: new Date().toISOString(),
+      processed_at: new Date().toISOString(),
+      processing_status: "processed",
+      processing_error: null
+    })
+    .select("*")
+    .single();
+  assertNoError(eventInsert.error);
+
+  await supabase
+    .from("of_automation_simulations")
+    .update({ source_event_id: eventInsert.data.id })
+    .eq("id", simulation.id);
+
+  const actionResult = await runAutomationForScript(
+    supabase,
+    env,
+    prepared.script,
+    eventInsert.data as Record<string, unknown>,
+    `simulation:${prepared.subscriber.id}`,
+    prepared.scenario
+  );
+  if (actionResult === "failed") {
+    await supabase.from("of_automation_simulations").update({ status: "failed", last_error: "Simulation execution failed." }).eq("id", simulation.id);
+  }
+  return getSimulationDetail(supabase, simulation.id);
+}
+
+async function prepareSimulationLaunch(supabase: SupabaseClient, creatorId: string, body: Record<string, unknown>) {
+  let subscriber: OfSimulatedSubscriber | null = null;
+  if (typeof body.simulatedSubscriberId === "string" && isUuid(body.simulatedSubscriberId)) {
+    const existing = await supabase.from("of_simulated_subscribers").select("*").eq("id", body.simulatedSubscriberId).single();
+    assertNoError(existing.error);
+    subscriber = existing.data as OfSimulatedSubscriber;
+  }
+  if (!subscriber) {
+    subscriber = await createSimulatedSubscriber(supabase, creatorId, isRecord(body.subscriber) ? body.subscriber : {});
+  }
+
+  let scenario: OfCreatorAutomationScenario | null = null;
+  if (typeof body.scenarioId === "string" && isUuid(body.scenarioId)) {
+    const scenarioResult = await supabase.from("of_creator_automation_scenarios").select("*").eq("id", body.scenarioId).single();
+    assertNoError(scenarioResult.error);
+    scenario = scenarioResult.data as OfCreatorAutomationScenario;
+  }
+
+  let script: Record<string, unknown> | null = null;
+  const requestedScriptId = typeof body.scriptId === "string" && isUuid(body.scriptId) ? body.scriptId : scenario?.linked_script_id ?? null;
+  if (requestedScriptId) {
+    const scriptResult = await supabase.from("of_message_scripts").select("*, of_message_script_steps(*)").eq("id", requestedScriptId).single();
+    assertNoError(scriptResult.error);
+    script = scriptResult.data as Record<string, unknown>;
+  }
+  if (!script) throw new Error("Simulation requires a script or scenario linked to a script");
+
+  const eventType = stringValue(body.eventType, scenario?.trigger_event_type ?? String(script.trigger_event_type ?? "custom_event"));
+  const eventPayloadInput = isRecord(body.eventPayload) ? body.eventPayload : {};
+  const initialVariables = isRecord(body.variables) ? body.variables : {};
+  const eventPayload = buildSimulationEventPayload(subscriber, eventType, eventPayloadInput, initialVariables, creatorId);
+  return { subscriber, scenario, script, eventType, eventPayload, initialVariables };
+}
+
+function buildSimulationEventPayload(
+  subscriber: OfSimulatedSubscriber,
+  eventType: string,
+  payload: Record<string, unknown>,
+  variables: Record<string, unknown>,
+  creatorId: string
+) {
+  return {
+    ...payload,
+    simulation: true,
+    simulationSubscriberId: subscriber.id,
+    simulationCreatorId: creatorId,
+    fanId: `simulation:${subscriber.id}`,
+    subscriber: {
+      id: subscriber.id,
+      name: subscriber.name,
+      username: subscriber.username,
+      subscription_status: subscriber.subscription_status,
+      renewal_state: subscriber.renewal_state,
+      spend_level: subscriber.spend_level,
+      lifetime_value: subscriber.lifetime_value,
+      message_history_summary: subscriber.message_history_summary,
+      custom_variables: subscriber.custom_variables
+    },
+    variables,
+    purchase_status:
+      payload.purchase_status ??
+      payload.purchaseStatus ??
+      (eventType === "ppv_purchased" ? "purchased" : eventType === "ppv_not_purchased" ? "not_purchased" : null)
+  };
+}
+
+async function getSimulationDetail(supabase: SupabaseClient, simulationId: string): Promise<SimulationDetailData> {
+  const simulation = await supabase
+    .from("of_automation_simulations")
+    .select("*, simulated_subscriber:of_simulated_subscribers(*), script:of_message_scripts(id, name, action_mode, trigger_event_type), scenario:of_creator_automation_scenarios(id, scenario_key, label, trigger_event_type)")
+    .eq("id", simulationId)
+    .single();
+  assertNoError(simulation.error);
+  const simulationRow = simulation.data as OfAutomationSimulation;
+  const conversation = simulationRow.conversation_instance_id ? await getConversationDetail(supabase, simulationRow.conversation_instance_id) : { conversation: null, history: [] };
+  const outboundMessages = simulationRow.conversation_instance_id
+    ? await listSimulationOutboundMessages(supabase, simulationRow.conversation_instance_id)
+    : [];
+  return {
+    simulation: simulationRow,
+    conversation: conversation.conversation,
+    history: conversation.history,
+    outboundMessages
+  };
+}
+
+async function listSimulationOutboundMessages(supabase: SupabaseClient, conversationId: string) {
+  const result = await supabase
+    .from("of_outbound_messages")
+    .select("*, of_creators(username, display_name), of_message_scripts(name)")
+    .eq("conversation_instance_id", conversationId)
+    .order("created_at", { ascending: true });
+  assertNoError(result.error);
+  return (result.data ?? []) as OfOutboundMessage[];
+}
+
+async function pauseSimulation(supabase: SupabaseClient, simulationId: string) {
+  const result = await supabase.from("of_automation_simulations").update({ status: "paused" }).eq("id", simulationId).select("*").single();
+  assertNoError(result.error);
+  return getSimulationDetail(supabase, simulationId);
+}
+
+async function resumeSimulation(supabase: SupabaseClient, env: Env, simulationId: string) {
+  const result = await supabase.from("of_automation_simulations").update({ status: "running" }).eq("id", simulationId).select("*").single();
+  assertNoError(result.error);
+  if (result.data?.conversation_instance_id) {
+    await processConversationInstance(supabase, env, result.data.conversation_instance_id as string, { reason: "recovery_resume" });
+  }
+  return getSimulationDetail(supabase, simulationId);
+}
+
+async function fastForwardSimulation(supabase: SupabaseClient, env: Env, simulationId: string) {
+  const simulation = await loadSimulationRecord(supabase, simulationId);
+  if (!simulation.conversation_instance_id) return getSimulationDetail(supabase, simulationId);
+  await updateConversationState(supabase, simulation.conversation_instance_id, { waiting_until: new Date(Date.now() - 1000).toISOString() });
+  await recordConversationHistory(supabase, {
+    conversationId: simulation.conversation_instance_id,
+    creatorId: simulation.creator_id,
+    eventId: simulation.source_event_id,
+    stepId: null,
+    transitionKey: `fastforward:${new Date().toISOString()}`,
+    eventType: "wait_fast_forwarded",
+    fromStatus: "waiting_delay",
+    toStatus: "running",
+    detail: "Simulation operator fast-forwarded the current delay.",
+    payload: { simulation_run_id: simulationId }
+  });
+  await processConversationInstance(supabase, env, simulation.conversation_instance_id, { reason: "delay_due" });
+  return getSimulationDetail(supabase, simulationId);
+}
+
+async function replyToSimulation(supabase: SupabaseClient, env: Env, simulationId: string, text: string) {
+  const simulation = await loadSimulationRecord(supabase, simulationId);
+  if (!simulation.conversation_instance_id || !simulation.source_event_id) return getSimulationDetail(supabase, simulationId);
+  const eventInsert = await supabase
+    .from("of_events")
+    .insert({
+      creator_id: simulation.creator_id,
+      provider: "simulation",
+      provider_event_id: `simulation-reply:${simulation.id}:${Date.now()}`,
+      event_type: "chat_message",
+      payload: {
+        simulation: true,
+        fanId: `simulation:${simulation.simulated_subscriber_id}`,
+        text,
+        actor: "subscriber",
+        simulationSubscriberId: simulation.simulated_subscriber_id
+      },
+      execution_mode: "simulation",
+      simulation_run_id: simulation.id,
+      metadata: { simulation: true, reply: true },
+      received_at: new Date().toISOString(),
+      processed_at: new Date().toISOString(),
+      processing_status: "processed",
+      processing_error: null
+    })
+    .select("*")
+    .single();
+  assertNoError(eventInsert.error);
+  await processConversationInstance(supabase, env, simulation.conversation_instance_id, {
+    resumeEvent: eventInsert.data as Record<string, unknown>,
+    reason: "reply_received"
+  });
+  return getSimulationDetail(supabase, simulationId);
+}
+
+async function injectSimulationFailure(supabase: SupabaseClient, simulationId: string, kind: string) {
+  const simulation = await loadSimulationRecord(supabase, simulationId);
+  const failurePlan = isRecord(simulation.failure_plan) ? { ...simulation.failure_plan } : {};
+  if (kind === "next_send") failurePlan.next_send_failure = Number(failurePlan.next_send_failure ?? 0) + 1;
+  const result = await supabase.from("of_automation_simulations").update({ failure_plan: failurePlan }).eq("id", simulationId);
+  assertNoError(result.error);
+  return getSimulationDetail(supabase, simulationId);
+}
+
+async function retrySimulation(supabase: SupabaseClient, env: Env, simulationId: string) {
+  const simulation = await loadSimulationRecord(supabase, simulationId);
+  if (!simulation.conversation_instance_id) return getSimulationDetail(supabase, simulationId);
+  await updateConversationState(supabase, simulation.conversation_instance_id, {
+    status: "running",
+    waiting_until: null,
+    waiting_reason: null,
+    processing_started_at: new Date().toISOString()
+  });
+  await processConversationInstance(supabase, env, simulation.conversation_instance_id, { reason: "retry_send" });
+  return getSimulationDetail(supabase, simulationId);
+}
+
+async function cancelSimulation(supabase: SupabaseClient, simulationId: string) {
+  const simulation = await loadSimulationRecord(supabase, simulationId);
+  if (simulation.conversation_instance_id) {
+    await cancelConversation(supabase, simulation.conversation_instance_id, "Cancelled from simulation cockpit.");
+  }
+  const result = await supabase
+    .from("of_automation_simulations")
+    .update({ status: "cancelled", completed_at: new Date().toISOString() })
+    .eq("id", simulationId);
+  assertNoError(result.error);
+  return getSimulationDetail(supabase, simulationId);
+}
+
+async function restartSimulation(supabase: SupabaseClient, env: Env, simulationId: string) {
+  const simulation = await loadSimulationRecord(supabase, simulationId);
+  const body = {
+    scriptId: simulation.script_id,
+    scenarioId: simulation.scenario_id,
+    simulatedSubscriberId: simulation.simulated_subscriber_id,
+    eventType: simulation.event_type,
+    eventPayload: simulation.event_payload,
+    variables: simulation.initial_variables
+  };
+  if (simulation.conversation_instance_id) {
+    await cancelConversation(supabase, simulation.conversation_instance_id, "Restarted from simulation cockpit.");
+  }
+  await supabase.from("of_automation_simulations").update({ status: "cancelled", completed_at: new Date().toISOString() }).eq("id", simulationId);
+  return startAutomationSimulation(supabase, env, simulation.creator_id, body);
+}
+
+async function resetSimulation(supabase: SupabaseClient, simulationId: string) {
+  const simulation = await loadSimulationRecord(supabase, simulationId);
+  if (simulation.conversation_instance_id) {
+    await cancelConversation(supabase, simulation.conversation_instance_id, "Reset from simulation cockpit.");
+  }
+  const result = await supabase
+    .from("of_automation_simulations")
+    .update({
+      status: "draft",
+      conversation_instance_id: null,
+      automation_run_id: null,
+      source_event_id: null,
+      started_at: null,
+      completed_at: null,
+      failure_plan: {},
+      last_error: null
+    })
+    .eq("id", simulationId);
+  assertNoError(result.error);
+  return getSimulationDetail(supabase, simulationId);
+}
+
+async function loadSimulationRecord(supabase: SupabaseClient, simulationId: string) {
+  const result = await supabase.from("of_automation_simulations").select("*").eq("id", simulationId).single();
+  assertNoError(result.error);
+  return result.data as OfAutomationSimulation;
+}
+
 async function runAutomationsForEvent(supabase: SupabaseClient, env: Env, eventId: string) {
-  await applyRelationshipEvent(supabase, eventId);
-  const event = await supabase.from("of_events").select("*").eq("id", eventId).single();
-  assertNoError(event.error);
-  if (!event.data) throw new Error("Event not found");
+  const existingEvent = await supabase.from("of_events").select("*").eq("id", eventId).single();
+  assertNoError(existingEvent.error);
+  if (!existingEvent.data) throw new Error("Event not found");
+  const executionMode = existingEvent.data.execution_mode === "simulation" ? "simulation" : "production";
+  if (executionMode === "production") {
+    await applyRelationshipEvent(supabase, eventId);
+  }
+  const event = existingEvent;
 
   const payload = event.data.payload;
   const fanId = isRecord(payload) ? extractFanId(payload) : null;
@@ -1700,20 +2437,14 @@ async function runAutomationsForEvent(supabase: SupabaseClient, env: Env, eventI
   const eventContext = await loadEventActionContext(supabase, event.data, fanId);
   if (event.data.event_type === "chat_message" && eventContext.relationshipId) {
     await recalculateSubscriberIntelligence(supabase, eventContext.relationshipId);
+    await resumeReplyConversationsForEvent(supabase, env, event.data, eventContext);
   }
 
-  const scripts = await supabase
-    .from("of_message_scripts")
-    .select("*, of_message_script_steps(*)")
-    .eq("creator_id", event.data.creator_id)
-    .eq("trigger_event_type", event.data.event_type)
-    .eq("status", "active");
-  assertNoError(scripts.error);
-
-  const summary = { eventId, matched: scripts.data?.length ?? 0, queued: 0, skipped: 0, errors: [] as string[] };
-  for (const script of scripts.data ?? []) {
+  const eligibleScripts = await resolveEligibleAutomationScripts(supabase, String(event.data.creator_id), event.data.event_type);
+  const summary = { eventId, matched: eligibleScripts.length, queued: 0, skipped: 0, errors: [] as string[] };
+  for (const item of eligibleScripts) {
     try {
-      const result = await runAutomationForScript(supabase, env, script, event.data, fanId);
+      const result = await runAutomationForScript(supabase, env, item.script, event.data, fanId, item.scenario);
       if (result === "skipped") summary.skipped++;
       else summary.queued++;
     } catch (error) {
@@ -1728,7 +2459,8 @@ async function runAutomationForScript(
   env: Env,
   script: Record<string, unknown>,
   event: Record<string, unknown>,
-  fanId: string
+  fanId: string,
+  scenario: OfCreatorAutomationScenario | null
 ): Promise<AutomationActionResult> {
   const duplicate = await supabase
     .from("of_automation_runs")
@@ -1739,8 +2471,10 @@ async function runAutomationForScript(
   assertNoError(duplicate.error);
   if (duplicate.data?.length) return "skipped";
 
-  const actionMode = scriptActionMode(script);
+  const actionMode = scenario?.action_mode_override ?? scriptActionMode(script);
   const skipReason = await automationSkipReason(supabase, script, fanId);
+  const executionMode = event.execution_mode === "simulation" ? "simulation" : "production";
+  const simulationRunId = typeof event.simulation_run_id === "string" ? event.simulation_run_id : null;
   const run = await supabase
     .from("of_automation_runs")
     .insert({
@@ -1749,6 +2483,9 @@ async function runAutomationForScript(
       fan_id: fanId,
       source_event_id: event.id,
       action_mode: actionMode,
+      execution_mode: executionMode,
+      simulation_run_id: simulationRunId,
+      metadata: executionMode === "simulation" ? { simulation: true } : {},
       status: skipReason ? "skipped" : "running",
       completed_at: skipReason ? new Date().toISOString() : null,
       error_message: skipReason
@@ -1764,12 +2501,54 @@ async function runAutomationForScript(
   let actionResult: AutomationActionResult;
   if (actionMode === "task_only") {
     actionResult = await executeTaskOnlyAction(supabase, script, event, run.data.id as string, fanId, context);
+    await completeAutomationRun(supabase, run.data.id as string, actionResult === "failed" ? "failed" : "completed", actionResult === "failed" ? "Task-only automation failed" : null);
   } else {
-    actionResult = await executeMessageAction(supabase, env, script, event, run.data.id as string, fanId, actionMode);
+    const conversation = await createConversationInstance(supabase, {
+      creatorId: String(event.creator_id),
+      subscriberId: context.subscriberId,
+      relationshipId: context.relationshipId,
+      script,
+      automationRunId: String(run.data.id),
+      eventId: typeof event.id === "string" ? event.id : null,
+      fanId,
+      eventType: String(event.event_type ?? ""),
+      eventPayload: isRecord(event.payload) ? event.payload : null,
+      executionMode,
+      simulationRunId,
+      simulationSubscriber: context.simulationSubscriber
+    });
+    if (!conversation) return "skipped";
+    if (executionMode === "simulation" && simulationRunId) {
+      await supabase.from("of_automation_simulations").update({
+        automation_run_id: run.data.id,
+        conversation_instance_id: conversation.id
+      }).eq("id", simulationRunId);
+    }
+    if (scenario?.id) {
+      await touchAutomationScenario(supabase, scenario.id);
+    }
+    await recordConversationHistory(supabase, {
+      conversationId: conversation.id,
+      creatorId: String(event.creator_id),
+      eventId: typeof event.id === "string" ? event.id : null,
+      stepId: conversation.current_step_id,
+      transitionKey: `launch:${String(event.id ?? "none")}`,
+      eventType: "conversation_started",
+      fromStatus: null,
+      toStatus: conversation.status,
+      detail: `Conversation started for ${String(script.name ?? "script")}.`,
+      payload: {
+        source_event_id: event.id ?? null,
+        action_mode: actionMode,
+        fan_id: fanId
+      }
+    });
+    const processed = await processConversationInstance(supabase, env, conversation.id, { resumeEvent: event, resumeContext: context, reason: "launch" });
+    actionResult = actionResultFromConversation(processed);
+    await syncAutomationRunToConversation(supabase, String(run.data.id), processed);
   }
 
   await recordAutomationTimeline(supabase, script, event, run.data.id as string, fanId, actionMode, actionResult, context);
-  await completeAutomationRun(supabase, run.data.id as string, actionResult === "failed" ? "failed" : "completed", actionResult === "failed" ? "BetterFans message delivery failed" : null);
   return actionResult;
 }
 
@@ -1845,6 +2624,1044 @@ async function executeTaskOnlyAction(
   return "task_created";
 }
 
+async function createConversationInstance(
+  supabase: SupabaseClient,
+  input: {
+    creatorId: string;
+    subscriberId: string | null;
+    relationshipId: string | null;
+    script: Record<string, unknown>;
+    automationRunId: string;
+    eventId: string | null;
+    fanId: string;
+    eventType: string;
+    eventPayload: Record<string, unknown> | null;
+    executionMode: AutomationExecutionMode;
+    simulationRunId: string | null;
+    simulationSubscriber: Record<string, unknown> | null;
+  }
+) {
+  const steps = ((input.script.of_message_script_steps as OfMessageScriptStep[] | undefined) ?? []).sort((a, b) => a.step_order - b.step_order);
+  const firstStep = steps[0] ?? null;
+  const inserted = await supabase
+    .from("of_conversation_instances")
+    .insert({
+      creator_id: input.creatorId,
+      subscriber_id: input.subscriberId,
+      relationship_id: input.relationshipId,
+      script_id: input.script.id,
+      source_script_id: typeof input.script.source_script_id === "string" && isUuid(input.script.source_script_id) ? input.script.source_script_id : input.script.id,
+      script_version: typeof input.script.version_number === "number" ? input.script.version_number : Number(input.script.version_number ?? 1),
+      automation_run_id: input.automationRunId,
+      originating_event_id: input.eventId,
+      last_event_id: input.eventId,
+      current_step_id: firstStep?.id ?? null,
+      next_step_id: null,
+      status: "running",
+      execution_mode: input.executionMode,
+      variables: conversationInitialVariables(input.script, input.relationshipId, input.subscriberId, input.eventId, input.fanId, input.eventType, input.eventPayload),
+      metadata: input.executionMode === "simulation"
+        ? {
+            simulation: true,
+            simulation_run_id: input.simulationRunId,
+            subscriber_snapshot: input.simulationSubscriber,
+            event_payload: input.eventPayload
+          }
+        : {}
+    })
+    .select("*")
+    .single();
+  if (inserted.error?.code === "23505") {
+    const existing = await supabase
+      .from("of_conversation_instances")
+      .select("*")
+      .eq("script_id", input.script.id)
+      .eq("originating_event_id", input.eventId)
+      .single();
+    assertNoError(existing.error);
+    return null;
+  }
+  assertNoError(inserted.error);
+  return inserted.data as OfConversationInstance;
+}
+
+function conversationInitialVariables(
+  script: Record<string, unknown>,
+  relationshipId: string | null,
+  subscriberId: string | null,
+  eventId: string | null,
+  fanId: string,
+  eventType: string,
+  eventPayload: Record<string, unknown> | null
+) {
+  const baseVariables: Record<string, unknown> = {
+    relationship_id: relationshipId,
+    subscriber_id: subscriberId,
+    fan_id: fanId,
+    originating_event_id: eventId,
+    originating_event_type: eventType,
+    originating_event_payload: eventPayload,
+    script_version: typeof script.version_number === "number" ? script.version_number : Number(script.version_number ?? 1)
+  };
+  const builderConfig = normalizeBuilderConfig(script.builder_config);
+  for (const variable of builderConfig.variables ?? []) {
+    if (variable.key.trim()) baseVariables[variable.key] = variable.defaultValue ?? "";
+  }
+  return baseVariables;
+}
+
+async function processDueConversations(supabase: SupabaseClient, env: Env, options: { limit: number }) {
+  const now = new Date().toISOString();
+  const dueWaiting = await supabase
+    .from("of_conversation_instances")
+    .select("*")
+    .eq("status", "waiting_delay")
+    .lte("waiting_until", now)
+    .order("updated_at", { ascending: true })
+    .limit(options.limit);
+  assertNoError(dueWaiting.error);
+  const staleRunning = await supabase
+    .from("of_conversation_instances")
+    .select("*")
+    .eq("status", "running")
+    .order("updated_at", { ascending: true })
+    .limit(options.limit);
+  assertNoError(staleRunning.error);
+  const dueItems = [...((dueWaiting.data ?? []) as OfConversationInstance[]), ...((staleRunning.data ?? []) as OfConversationInstance[])];
+  const unique = [...new Map(dueItems.map((item) => [item.id, item])).values()].slice(0, options.limit);
+
+  let processed = 0;
+  const errors: string[] = [];
+  for (const item of unique) {
+    try {
+      if (await isConversationPausedForSimulation(supabase, item)) continue;
+      const reason = item.status === "waiting_delay" ? "delay_due" : "recovery_resume";
+      const conversation = await processConversationInstance(supabase, env, item.id, { reason });
+      if (item.automation_run_id) await syncAutomationRunToConversation(supabase, item.automation_run_id, conversation);
+      processed += 1;
+    } catch (error) {
+      errors.push(error instanceof Error ? error.message : "Unexpected conversation runtime error");
+    }
+  }
+
+  return { processed, errors };
+}
+
+async function isConversationPausedForSimulation(supabase: SupabaseClient, conversation: OfConversationInstance) {
+  if (conversation.execution_mode !== "simulation") return false;
+  const simulationRunId = isRecord(conversation.metadata) && typeof conversation.metadata.simulation_run_id === "string"
+    ? conversation.metadata.simulation_run_id
+    : null;
+  if (!simulationRunId) return false;
+  const result = await supabase.from("of_automation_simulations").select("status").eq("id", simulationRunId).maybeSingle();
+  assertNoError(result.error);
+  return result.data?.status === "paused";
+}
+
+async function resolveEligibleAutomationScripts(supabase: SupabaseClient, creatorId: string, eventType: string) {
+  const [scriptsResult, scenariosResult] = await Promise.all([
+    supabase
+      .from("of_message_scripts")
+      .select("*, of_message_script_steps(*)")
+      .eq("creator_id", creatorId)
+      .eq("trigger_event_type", eventType)
+      .eq("status", "active"),
+    supabase
+      .from("of_creator_automation_scenarios")
+      .select("*")
+      .eq("creator_id", creatorId)
+      .eq("trigger_event_type", eventType)
+  ]);
+  assertNoError(scriptsResult.error);
+  assertNoError(scenariosResult.error);
+
+  const scenarios = (scenariosResult.data ?? []) as OfCreatorAutomationScenario[];
+  const scenarioByScriptId = new Map<string, OfCreatorAutomationScenario>();
+  const scenarioByCategory = new Map<string, OfCreatorAutomationScenario>();
+  for (const scenario of scenarios) {
+    if (scenario.linked_script_id) scenarioByScriptId.set(scenario.linked_script_id, scenario);
+    scenarioByCategory.set(scenario.scenario_key, scenario);
+  }
+
+  const eligible: Array<{ script: Record<string, unknown>; scenario: OfCreatorAutomationScenario | null }> = [];
+  for (const script of (scriptsResult.data ?? []) as Record<string, unknown>[]) {
+    const direct = typeof script.id === "string" ? scenarioByScriptId.get(script.id) ?? null : null;
+    const categoryKey = typeof script.category === "string" ? script.category : null;
+    const tagScenario = normalizeStringArray(script.tags).find((tag) => tag.startsWith("scenario:"))?.slice("scenario:".length) ?? null;
+    const scenario = direct ?? (categoryKey ? scenarioByCategory.get(categoryKey) ?? null : null) ?? (tagScenario ? scenarioByCategory.get(tagScenario) ?? null : null);
+    if (scenario && (!scenario.enabled || !scenario.creator_enabled)) continue;
+    eligible.push({ script, scenario });
+  }
+  return eligible;
+}
+
+async function touchAutomationScenario(supabase: SupabaseClient, scenarioId: string) {
+  const result = await supabase.from("of_creator_automation_scenarios").update({ last_triggered_at: new Date().toISOString() }).eq("id", scenarioId);
+  assertNoError(result.error);
+}
+
+async function resumeReplyConversationsForEvent(
+  supabase: SupabaseClient,
+  env: Env,
+  event: Record<string, unknown>,
+  context: EventActionContext
+) {
+  if (!context.subscriberId) return;
+  const waiting = await supabase
+    .from("of_conversation_instances")
+    .select("*")
+    .eq("creator_id", event.creator_id)
+    .eq("subscriber_id", context.subscriberId)
+    .eq("status", "waiting_reply")
+    .order("updated_at", { ascending: true })
+    .limit(20);
+  assertNoError(waiting.error);
+
+  for (const conversation of (waiting.data ?? []) as OfConversationInstance[]) {
+    if (conversation.last_event_id === event.id) continue;
+    const processed = await processConversationInstance(supabase, env, conversation.id, {
+      resumeEvent: event,
+      resumeContext: context,
+      reason: "reply_received"
+    });
+    if (conversation.automation_run_id) await syncAutomationRunToConversation(supabase, conversation.automation_run_id, processed);
+  }
+}
+
+async function processConversationInstance(
+  supabase: SupabaseClient,
+  env: Env,
+  conversationId: string,
+  options: {
+    resumeEvent?: Record<string, unknown> | null;
+    resumeContext?: EventActionContext | null;
+    reason: "launch" | "delay_due" | "reply_received" | "approval_sent" | "recovery_resume" | "retry_send";
+  }
+) {
+  const loaded = await loadConversationRuntimeState(supabase, conversationId);
+  let conversation = loaded.conversation;
+  if (["completed", "cancelled"].includes(conversation.status)) return conversation;
+
+  const steps = loaded.steps;
+  const stepMap = new Map(steps.map((step) => [step.id, step]));
+  const nextByOrder = new Map<string, OfMessageScriptStep | undefined>();
+  for (let index = 0; index < steps.length; index += 1) nextByOrder.set(steps[index].id, steps[index + 1]);
+  const relationship = loaded.relationship;
+  const subscriber = loaded.subscriber;
+  const baseEvent = options.resumeEvent ?? loaded.originatingEvent;
+  let variables = normalizeConversationVariables(conversation.variables);
+  if (options.reason === "reply_received" && options.resumeEvent) {
+    variables = applyReplyVariables(variables, options.resumeEvent);
+    conversation = await updateConversationState(supabase, conversation.id, {
+      variables,
+      last_event_id: options.resumeEvent.id ?? null,
+      last_resumed_at: new Date().toISOString(),
+      waiting_reason: null,
+      waiting_until: null,
+      status: "running",
+      processing_started_at: new Date().toISOString()
+    });
+    await recordConversationHistory(supabase, {
+      conversationId: conversation.id,
+      creatorId: conversation.creator_id,
+      eventId: typeof options.resumeEvent.id === "string" ? options.resumeEvent.id : null,
+      stepId: conversation.current_step_id,
+      transitionKey: `reply:${String(options.resumeEvent.id ?? "none")}`,
+      eventType: "reply_received",
+      fromStatus: "waiting_reply",
+      toStatus: "running",
+      detail: "Subscriber reply resumed the conversation.",
+      payload: {
+        message_text: extractMessageText(isRecord(options.resumeEvent.payload) ? options.resumeEvent.payload : {}) ?? null
+      }
+    });
+  }
+
+  let currentStep = resolveConversationCurrentStep(conversation, steps, stepMap);
+  const guard = new Set<string>();
+  for (let iteration = 0; iteration < 100 && currentStep; iteration += 1) {
+    const loopKey = `${currentStep.id}:${conversation.status}:${variables.__last_reply_event_id ?? "none"}`;
+    if (guard.has(loopKey)) break;
+    guard.add(loopKey);
+    const nextStep = resolveLinkedStep(currentStep.next_step_id, nextByOrder.get(currentStep.id), stepMap);
+    const statusBefore = conversation.status;
+    const metadata = normalizeStepMetadata(currentStep.metadata);
+    await recordConversationHistory(supabase, {
+      conversationId: conversation.id,
+      creatorId: conversation.creator_id,
+      eventId: conversation.last_event_id,
+      stepId: currentStep.id,
+      transitionKey: `enter:${currentStep.id}:${iteration}:${conversation.updated_at}`,
+      eventType: "step_entered",
+      fromStatus: conversation.status,
+      toStatus: conversation.status,
+      detail: `Entered step ${currentStep.step_order} (${currentStep.step_type}).`,
+      payload: { step_order: currentStep.step_order, step_type: currentStep.step_type, label: metadata.label ?? null }
+    });
+
+    if (currentStep.step_type === "set_variable") {
+      if (metadata.variableKey) variables[metadata.variableKey] = interpolateTemplate(metadata.variableValue ?? "", toVariableMap(variables));
+      conversation = await updateConversationState(supabase, conversation.id, {
+        variables,
+        current_step_id: nextStep?.id ?? null,
+        next_step_id: nextStep ? resolveLinkedStep(nextStep.next_step_id, nextByOrder.get(nextStep.id), stepMap)?.id ?? null : null,
+        status: "running",
+        last_resumed_at: new Date().toISOString(),
+        processing_started_at: new Date().toISOString()
+      });
+      await recordConversationHistory(supabase, {
+        conversationId: conversation.id,
+        creatorId: conversation.creator_id,
+        eventId: conversation.last_event_id,
+        stepId: currentStep.id,
+        transitionKey: `setvar:${currentStep.id}:${conversation.updated_at}`,
+        eventType: "variable_set",
+        fromStatus: statusBefore,
+        toStatus: conversation.status,
+        detail: metadata.variableKey ? `Set variable ${metadata.variableKey}.` : "Set variable step processed.",
+        payload: { variable_key: metadata.variableKey ?? null, variable_value: metadata.variableValue ?? null }
+      });
+      currentStep = nextStep;
+      continue;
+    }
+
+    if (currentStep.step_type === "branch") {
+      const branchEvaluation = evaluateBranchRules(metadata.branchRules ?? [], { variables, event: baseEvent, relationship, subscriber }, stepMap, currentStep, nextByOrder);
+      const chosen = branchEvaluation.chosen;
+      await recordConversationHistory(supabase, {
+        conversationId: conversation.id,
+        creatorId: conversation.creator_id,
+        eventId: conversation.last_event_id,
+        stepId: currentStep.id,
+        transitionKey: `condition:${currentStep.id}:${conversation.updated_at}`,
+        eventType: "condition_evaluated",
+        fromStatus: statusBefore,
+        toStatus: statusBefore,
+        detail: branchEvaluation.detail,
+        payload: { evaluations: branchEvaluation.evaluations }
+      });
+      conversation = await updateConversationState(supabase, conversation.id, {
+        variables,
+        current_step_id: chosen?.id ?? null,
+        next_step_id: chosen ? resolveLinkedStep(chosen.next_step_id, nextByOrder.get(chosen.id), stepMap)?.id ?? null : null,
+        status: chosen ? "running" : "completed",
+        completion_reason: chosen ? null : "Branch ended without a matching next step.",
+        completed_at: chosen ? null : new Date().toISOString(),
+        last_resumed_at: new Date().toISOString()
+      });
+      await recordConversationHistory(supabase, {
+        conversationId: conversation.id,
+        creatorId: conversation.creator_id,
+        eventId: conversation.last_event_id,
+        stepId: currentStep.id,
+        transitionKey: `branch:${currentStep.id}:${conversation.updated_at}`,
+        eventType: "branch_selected",
+        fromStatus: statusBefore,
+        toStatus: conversation.status,
+        detail: chosen ? `Branch routed to step ${chosen.step_order}.` : "Branch completed the conversation.",
+        payload: { current_step_id: currentStep.id, next_step_id: chosen?.id ?? null }
+      });
+      currentStep = chosen;
+      continue;
+    }
+
+    if (currentStep.step_type === "wait") {
+      const resumedWait = conversation.waiting_reason === `delay:${currentStep.id}` && statusBefore === "waiting_delay";
+      if (!resumedWait) {
+        const waitMinutes = currentStep.delay_minutes ?? 0;
+        const waitingUntil = new Date(Date.now() + waitMinutes * 60000).toISOString();
+        conversation = await updateConversationState(supabase, conversation.id, {
+          current_step_id: nextStep?.id ?? null,
+          next_step_id: nextStep ? resolveLinkedStep(nextStep.next_step_id, nextByOrder.get(nextStep.id), stepMap)?.id ?? null : null,
+          status: "waiting_delay",
+          waiting_until: waitingUntil,
+          waiting_reason: `delay:${currentStep.id}`,
+          processing_started_at: null,
+          last_resumed_at: new Date().toISOString()
+        });
+        await recordConversationHistory(supabase, {
+          conversationId: conversation.id,
+          creatorId: conversation.creator_id,
+          eventId: conversation.last_event_id,
+          stepId: currentStep.id,
+          transitionKey: `delay:${currentStep.id}:${waitingUntil}`,
+          eventType: "waiting_scheduled",
+          fromStatus: statusBefore,
+          toStatus: conversation.status,
+          detail: `Waiting ${waitMinutes} minute(s) before continuing.`,
+          payload: { waiting_until: waitingUntil, delay_minutes: waitMinutes }
+        });
+        return conversation;
+      }
+      conversation = await updateConversationState(supabase, conversation.id, {
+        status: "running",
+        waiting_until: null,
+        waiting_reason: null,
+        current_step_id: nextStep?.id ?? null,
+        next_step_id: nextStep ? resolveLinkedStep(nextStep.next_step_id, nextByOrder.get(nextStep.id), stepMap)?.id ?? null : null,
+        last_resumed_at: new Date().toISOString(),
+        processing_started_at: new Date().toISOString()
+      });
+      await recordConversationHistory(supabase, {
+        conversationId: conversation.id,
+        creatorId: conversation.creator_id,
+        eventId: conversation.last_event_id,
+        stepId: currentStep.id,
+        transitionKey: `waitresume:${currentStep.id}:${conversation.updated_at}`,
+        eventType: "wait_resumed",
+        fromStatus: statusBefore,
+        toStatus: conversation.status,
+        detail: "Delay finished and conversation resumed.",
+        payload: { resumed_step_id: nextStep?.id ?? null }
+      });
+      currentStep = nextStep;
+      continue;
+    }
+
+    if ((currentStep.step_type === "message" || currentStep.step_type === "follow_up" || currentStep.step_type === "question") && (currentStep.delay_minutes ?? 0) > 0 && conversation.waiting_reason !== `delay:${currentStep.id}` && statusBefore !== "waiting_delay") {
+      const waitMinutes = currentStep.delay_minutes ?? 0;
+      const waitingUntil = new Date(Date.now() + waitMinutes * 60000).toISOString();
+      conversation = await updateConversationState(supabase, conversation.id, {
+        current_step_id: currentStep.id,
+        next_step_id: nextStep?.id ?? null,
+        status: "waiting_delay",
+        waiting_until: waitingUntil,
+        waiting_reason: `delay:${currentStep.id}`,
+        processing_started_at: null,
+        last_resumed_at: new Date().toISOString()
+      });
+      await recordConversationHistory(supabase, {
+        conversationId: conversation.id,
+        creatorId: conversation.creator_id,
+        eventId: conversation.last_event_id,
+        stepId: currentStep.id,
+        transitionKey: `delay:${currentStep.id}:${waitingUntil}`,
+        eventType: "waiting_scheduled",
+        fromStatus: statusBefore,
+        toStatus: conversation.status,
+          detail: `Waiting ${waitMinutes} minute(s) before continuing.`,
+          payload: { waiting_until: waitingUntil, delay_minutes: waitMinutes }
+        });
+      return conversation;
+    }
+
+    if (currentStep.step_type === "message" || currentStep.step_type === "follow_up" || currentStep.step_type === "question") {
+      const dispatch = await queueConversationMessageStep(supabase, env, {
+        conversation,
+        script: loaded.script,
+        step: currentStep,
+        nextStep,
+        event: baseEvent,
+        context: options.resumeContext ?? {
+          subscriberId: conversation.subscriber_id,
+          chatId: null,
+          relationshipId: conversation.relationship_id,
+          simulationSubscriber: conversation.execution_mode === "simulation" && isRecord(conversation.metadata) && isRecord(conversation.metadata.subscriber_snapshot)
+            ? conversation.metadata.subscriber_snapshot
+            : null,
+          simulationRunId: readSimulationRunId(conversation)
+        },
+        variables
+      });
+      conversation = dispatch.conversation;
+      variables = dispatch.variables;
+      if (dispatch.outcome === "failed" || dispatch.outcome === "approval") return conversation;
+      currentStep = dispatch.nextStep;
+      continue;
+    }
+
+    if (currentStep.step_type === "end") {
+      conversation = await markConversationCompleted(supabase, conversation.id, "End conversation step reached.");
+      await recordConversationHistory(supabase, {
+        conversationId: conversation.id,
+        creatorId: conversation.creator_id,
+        eventId: conversation.last_event_id,
+        stepId: currentStep.id,
+        transitionKey: `end:${currentStep.id}`,
+        eventType: "conversation_completed",
+        fromStatus: statusBefore,
+        toStatus: "completed",
+        detail: "Conversation completed at end step.",
+        payload: {}
+      });
+      return conversation;
+    }
+
+    currentStep = nextStep;
+  }
+
+  if (!currentStep && conversation.status === "running") {
+    conversation = await markConversationCompleted(supabase, conversation.id, "No further steps remained.");
+  }
+  return conversation;
+}
+
+async function loadConversationRuntimeState(supabase: SupabaseClient, conversationId: string) {
+  const conversationResult = await supabase.from("of_conversation_instances").select("*").eq("id", conversationId).single();
+  assertNoError(conversationResult.error);
+  if (!conversationResult.data) throw new Error("Conversation instance not found");
+  const conversation = conversationResult.data as OfConversationInstance;
+
+  const [scriptResult, stepsResult, eventResult, relationshipResult, subscriberResult] = await Promise.all([
+    supabase.from("of_message_scripts").select("*, of_message_script_steps(*)").eq("id", conversation.script_id).single(),
+    supabase.from("of_message_script_steps").select("*").eq("script_id", conversation.script_id).order("step_order", { ascending: true }),
+    conversation.originating_event_id ? supabase.from("of_events").select("*").eq("id", conversation.originating_event_id).maybeSingle() : Promise.resolve({ data: null, error: null }),
+    conversation.relationship_id ? supabase.from("of_subscriber_relationships").select("*").eq("id", conversation.relationship_id).maybeSingle() : Promise.resolve({ data: null, error: null }),
+    conversation.subscriber_id ? supabase.from("of_subscribers").select("*").eq("id", conversation.subscriber_id).maybeSingle() : Promise.resolve({ data: null, error: null })
+  ]);
+  assertNoError(scriptResult.error);
+  assertNoError(stepsResult.error);
+  assertNoError(eventResult.error);
+  assertNoError(relationshipResult.error);
+  assertNoError(subscriberResult.error);
+  const simulationMetadata = isRecord(conversation.metadata) ? conversation.metadata : {};
+  const simulatedSubscriber = isRecord(simulationMetadata.subscriber_snapshot) ? simulationMetadata.subscriber_snapshot : null;
+
+  return {
+    conversation,
+    script: scriptResult.data as Record<string, unknown>,
+    steps: (stepsResult.data ?? []) as OfMessageScriptStep[],
+    originatingEvent: (eventResult.data ?? null) as Record<string, unknown> | null,
+    relationship: (relationshipResult.data ?? null) as Record<string, unknown> | null,
+    subscriber: conversation.execution_mode === "simulation" ? simulatedSubscriber : ((subscriberResult.data ?? null) as Record<string, unknown> | null)
+  };
+}
+
+function resolveConversationCurrentStep(
+  conversation: OfConversationInstance,
+  steps: OfMessageScriptStep[],
+  stepMap: Map<string, OfMessageScriptStep>
+) {
+  if (conversation.current_step_id && stepMap.has(conversation.current_step_id)) return stepMap.get(conversation.current_step_id) ?? null;
+  return steps[0] ?? null;
+}
+
+function normalizeConversationVariables(value: unknown) {
+  return isRecord(value) ? { ...value } : {};
+}
+
+function applyReplyVariables(variables: Record<string, unknown>, event: Record<string, unknown>) {
+  const payload = isRecord(event.payload) ? event.payload : {};
+  return {
+    ...variables,
+    last_reply_event_id: event.id ?? null,
+    last_reply_text: extractMessageText(payload) ?? null,
+    last_reply_received_at: event.received_at ?? new Date().toISOString(),
+    last_reply_actor: extractMessageActor(payload)
+  };
+}
+
+function toVariableMap(variables: Record<string, unknown>) {
+  const mapped = new Map<string, string>();
+  for (const [key, value] of Object.entries(variables)) mapped.set(key, value == null ? "" : String(value));
+  return mapped;
+}
+
+function chooseBranchStep(
+  rules: ScriptBuilderBranchRule[],
+  sources: {
+    variables: Record<string, unknown>;
+    event: Record<string, unknown> | null;
+    relationship: Record<string, unknown> | null;
+    subscriber: Record<string, unknown> | null;
+  },
+  stepMap: Map<string, OfMessageScriptStep>,
+  currentStep: OfMessageScriptStep,
+  nextByOrder: Map<string, OfMessageScriptStep | undefined>
+) {
+  const evaluation = evaluateBranchRules(rules, sources, stepMap, currentStep, nextByOrder);
+  return evaluation.chosen;
+}
+
+function evaluateBranchRules(
+  rules: ScriptBuilderBranchRule[],
+  sources: {
+    variables: Record<string, unknown>;
+    event: Record<string, unknown> | null;
+    relationship: Record<string, unknown> | null;
+    subscriber: Record<string, unknown> | null;
+  },
+  stepMap: Map<string, OfMessageScriptStep>,
+  currentStep: OfMessageScriptStep,
+  nextByOrder: Map<string, OfMessageScriptStep | undefined>
+) {
+  const variableMap = toVariableMap(sources.variables);
+  const evaluations = rules.map((rule) => ({
+    rule_id: rule.id,
+    label: rule.label,
+    condition: rule.condition,
+    matched: evaluateCondition(rule.condition, { variables: variableMap, event: sources.event ?? {}, relationship: sources.relationship, subscriber: sources.subscriber })
+  }));
+  const matched = rules.find((rule) => evaluations.find((item) => item.rule_id === rule.id)?.matched);
+  const chosen = matched?.nextStepId
+    ? resolveBranchTarget(matched.nextStepId, stepMap)
+    : currentStep.fallback_step_id && stepMap.has(currentStep.fallback_step_id)
+      ? stepMap.get(currentStep.fallback_step_id) ?? null
+      : resolveLinkedStep(currentStep.next_step_id, nextByOrder.get(currentStep.id), stepMap);
+  return {
+    chosen,
+    evaluations,
+    detail: matched ? `Matched branch "${matched.label}".` : "No explicit branch rule matched; using fallback path."
+  };
+}
+
+function resolveBranchTarget(target: string, stepMap: Map<string, OfMessageScriptStep>) {
+  if (stepMap.has(target)) return stepMap.get(target) ?? null;
+  for (const step of stepMap.values()) {
+    const metadata = normalizeStepMetadata(step.metadata);
+    if (metadata.nodeKey === target) return step;
+  }
+  return null;
+}
+
+async function queueConversationMessageStep(
+  supabase: SupabaseClient,
+  env: Env,
+  input: {
+    conversation: OfConversationInstance;
+    script: Record<string, unknown>;
+    step: OfMessageScriptStep;
+    nextStep: OfMessageScriptStep | null;
+    event: Record<string, unknown> | null;
+    context: EventActionContext;
+    variables: Record<string, unknown>;
+  }
+) {
+  const actionMode = scriptActionMode(input.script);
+  const template = interpolateTemplate(input.step.message_body ?? "", toVariableMap(input.variables));
+  const renderedVariables = pickTemplateVariables(input.step.message_body ?? "", input.variables);
+  const existingOutbound = await findConversationOutboundMessage(supabase, input.conversation.id, input.step.id);
+  let outbound = existingOutbound;
+
+  if (outbound && String(outbound.status) === "sent") {
+    const nextStatus: ConversationRuntimeStatus = input.step.step_type === "question" ? "waiting_reply" : "running";
+    const conversation = await updateConversationState(supabase, input.conversation.id, {
+      status: nextStatus,
+      current_step_id: input.step.step_type === "question" ? input.nextStep?.id ?? null : input.nextStep?.id ?? null,
+      next_step_id: input.nextStep?.id ?? null,
+      waiting_reason: input.step.step_type === "question" ? `reply:${input.step.id}` : null,
+      waiting_until: null,
+      variables: input.variables,
+      processing_started_at: input.step.step_type === "question" ? null : new Date().toISOString(),
+      last_resumed_at: new Date().toISOString(),
+      last_error: null
+    });
+    return { conversation, variables: input.variables, nextStep: input.step.step_type === "question" ? null : input.nextStep, outcome: "sent" as const };
+  }
+
+  if (!outbound) {
+    const inserted = await supabase
+      .from("of_outbound_messages")
+      .insert({
+        creator_id: input.conversation.creator_id,
+        fan_id: subscriberFanId(input.context, input.conversation, input.event),
+        script_id: input.conversation.script_id,
+        automation_run_id: input.conversation.automation_run_id,
+        conversation_instance_id: input.conversation.id,
+        script_step_id: input.step.id,
+        source_event_id: input.event?.id ?? input.conversation.originating_event_id,
+        execution_mode: input.conversation.execution_mode,
+        simulation_run_id: readSimulationRunId(input.conversation),
+        destination: subscriberFanId(input.context, input.conversation, input.event),
+        generated_text: template,
+        message_body: template,
+        draft_text: template,
+        final_text: actionMode === "auto_send" ? template : null,
+        status: actionMode === "auto_send" ? "queued" : "pending_approval",
+        approval_status: actionMode === "auto_send" ? "not_required" : "pending",
+        sent_at: null,
+        failed_at: null,
+        failure_reason: null,
+        error_message: null,
+        metadata: {
+          source_template: input.step.message_body ?? "",
+          rendered_variables: renderedVariables,
+          action_mode: actionMode,
+          execution_mode: input.conversation.execution_mode
+        }
+      })
+      .select("*")
+      .single();
+    assertNoError(inserted.error);
+    outbound = inserted.data as Record<string, unknown>;
+    await recordConversationHistory(supabase, {
+      conversationId: input.conversation.id,
+      creatorId: input.conversation.creator_id,
+      eventId: recordId(input.event?.id) ?? input.conversation.originating_event_id,
+      stepId: input.step.id,
+      transitionKey: `outbound:${String(outbound.id)}:${input.step.id}`,
+      eventType: "outbound_message_generated",
+      fromStatus: input.conversation.status,
+      toStatus: input.conversation.status,
+      detail: "Rendered outbound message preview generated.",
+      payload: { outbound_message_id: outbound.id, rendered_text: template, rendered_variables: renderedVariables }
+    });
+  }
+
+  if (actionMode !== "auto_send") {
+    if (outbound && (String(outbound.status) === "pending_approval" || String(outbound.status) === "queued" || String(outbound.status) === "sending")) {
+      const waitingStatus: ConversationRuntimeStatus = "waiting_approval";
+      const conversation = await updateConversationState(supabase, input.conversation.id, {
+        status: waitingStatus,
+        current_step_id: input.step.id,
+        next_step_id: input.nextStep?.id ?? null,
+        waiting_reason: `approval:${String(outbound.id)}`,
+        waiting_until: null,
+        variables: input.variables,
+        processing_started_at: null,
+        last_resumed_at: new Date().toISOString(),
+        last_error: null
+      });
+      return { conversation, variables: input.variables, nextStep: null, outcome: "approval" as const };
+    }
+    const waitingStatus: ConversationRuntimeStatus = "waiting_approval";
+    const waitingReason = `approval:${String(outbound.id)}`;
+    const conversation = await updateConversationState(supabase, input.conversation.id, {
+      status: waitingStatus,
+      current_step_id: input.step.id,
+      next_step_id: input.nextStep?.id ?? null,
+      waiting_reason: waitingReason,
+      waiting_until: null,
+      variables: input.variables,
+      processing_started_at: null,
+      last_resumed_at: new Date().toISOString(),
+      last_error: null
+    });
+    await recordConversationHistory(supabase, {
+      conversationId: input.conversation.id,
+      creatorId: input.conversation.creator_id,
+      eventId: recordId(input.event?.id) ?? input.conversation.originating_event_id,
+      stepId: input.step.id,
+      transitionKey: `draft:${String(outbound.id)}:${input.step.id}`,
+      eventType: "draft_created",
+      fromStatus: input.conversation.status,
+      toStatus: conversation.status,
+      detail: "Draft created and waiting for approval.",
+      payload: { outbound_message_id: outbound.id, next_step_id: input.nextStep?.id ?? null }
+    });
+    return { conversation, variables: input.variables, nextStep: null, outcome: "approval" as const };
+  }
+
+  if (String(outbound.status) !== "sent") {
+    const sent = await sendOutboundMessage(supabase, env, String(outbound.id), template);
+    outbound = sent as Record<string, unknown>;
+  }
+
+  if (String(outbound.status) !== "sent") {
+    const retryCount = (input.conversation.retry_count ?? 0) + 1;
+    const canRetry = retryCount <= 3;
+    const waitingUntil = new Date(Date.now() + retryCount * 5 * 60000).toISOString();
+    const conversation = await updateConversationState(supabase, input.conversation.id, {
+      status: canRetry ? "waiting_delay" : "failed",
+      waiting_until: canRetry ? waitingUntil : null,
+      waiting_reason: canRetry ? `retry_send:${String(outbound.id)}` : null,
+      retry_count: retryCount,
+      last_error: String(outbound.failure_reason ?? outbound.error_message ?? "Outbound delivery failed"),
+      failed_at: canRetry ? null : new Date().toISOString(),
+      processing_started_at: null
+    });
+    await recordConversationHistory(supabase, {
+      conversationId: input.conversation.id,
+      creatorId: input.conversation.creator_id,
+      eventId: recordId(input.event?.id) ?? input.conversation.originating_event_id,
+      stepId: input.step.id,
+      transitionKey: `sendfail:${String(outbound.id)}:${retryCount}`,
+      eventType: canRetry ? "send_retry_scheduled" : "conversation_failed",
+      fromStatus: input.conversation.status,
+      toStatus: conversation.status,
+      detail: canRetry ? "Outbound delivery failed; retry scheduled." : "Outbound delivery failed and retries were exhausted.",
+      payload: { outbound_message_id: outbound.id, retry_count: retryCount }
+    });
+    return { conversation, variables: input.variables, nextStep: null, outcome: "failed" as const };
+  }
+
+  const nextStatus: ConversationRuntimeStatus = input.step.step_type === "question" ? "waiting_reply" : "running";
+  const conversation = await updateConversationState(supabase, input.conversation.id, {
+    status: nextStatus,
+    current_step_id: input.step.step_type === "question" ? input.nextStep?.id ?? null : input.nextStep?.id ?? null,
+    next_step_id: input.nextStep?.id ?? null,
+    waiting_reason: input.step.step_type === "question" ? `reply:${input.step.id}` : null,
+    waiting_until: null,
+    variables: input.variables,
+    retry_count: 0,
+    last_error: null,
+    processing_started_at: input.step.step_type === "question" ? null : new Date().toISOString(),
+    last_resumed_at: new Date().toISOString()
+  });
+  await recordConversationHistory(supabase, {
+    conversationId: input.conversation.id,
+    creatorId: input.conversation.creator_id,
+    eventId: recordId(input.event?.id) ?? input.conversation.originating_event_id,
+    stepId: input.step.id,
+    transitionKey: `sent:${String(outbound.id)}:${input.step.id}`,
+    eventType: input.step.step_type === "question" ? "question_sent" : "message_sent",
+    fromStatus: input.conversation.status,
+    toStatus: conversation.status,
+    detail: input.step.step_type === "question" ? "Question sent and waiting for reply." : "Message sent successfully.",
+    payload: { outbound_message_id: outbound.id, next_step_id: input.nextStep?.id ?? null }
+  });
+  return { conversation, variables: input.variables, nextStep: input.step.step_type === "question" ? null : input.nextStep, outcome: "sent" as const };
+}
+
+async function findConversationOutboundMessage(supabase: SupabaseClient, conversationId: string, stepId: string) {
+  const result = await supabase
+    .from("of_outbound_messages")
+    .select("*")
+    .eq("conversation_instance_id", conversationId)
+    .eq("script_step_id", stepId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  assertNoError(result.error);
+  return (result.data ?? null) as Record<string, unknown> | null;
+}
+
+function subscriberFanId(context: EventActionContext, conversation: OfConversationInstance, event: Record<string, unknown> | null) {
+  if (event?.payload && isRecord(event.payload)) {
+    const fanId = extractFanId(event.payload);
+    if (fanId) return fanId;
+  }
+  if (typeof conversation.variables?.fan_id === "string" && conversation.variables.fan_id) return conversation.variables.fan_id;
+  return String(context.subscriberId ?? conversation.subscriber_id ?? "");
+}
+
+async function updateConversationState(supabase: SupabaseClient, conversationId: string, patch: Record<string, unknown>) {
+  const result = await supabase.from("of_conversation_instances").update(patch).eq("id", conversationId).select("*").single();
+  assertNoError(result.error);
+  return result.data as OfConversationInstance;
+}
+
+async function markConversationCompleted(supabase: SupabaseClient, conversationId: string, reason: string) {
+  return updateConversationState(supabase, conversationId, {
+    status: "completed",
+    completion_reason: reason,
+    completed_at: new Date().toISOString(),
+    waiting_until: null,
+    waiting_reason: null,
+    processing_started_at: null
+  });
+}
+
+async function recordConversationHistory(
+  supabase: SupabaseClient,
+  input: {
+    conversationId: string;
+    creatorId: string;
+    eventId: string | null;
+    stepId: string | null;
+    transitionKey: string;
+    eventType: string;
+    fromStatus: string | null;
+    toStatus: string | null;
+    detail: string;
+    payload: Record<string, unknown>;
+  }
+) {
+  const inserted = await supabase.from("of_conversation_history").insert({
+    conversation_instance_id: input.conversationId,
+    creator_id: input.creatorId,
+    event_id: input.eventId,
+    step_id: input.stepId,
+    transition_key: input.transitionKey,
+    event_type: input.eventType,
+    from_status: input.fromStatus,
+    to_status: input.toStatus,
+    detail: input.detail,
+    payload: input.payload
+  });
+  if (inserted.error?.code === "23505") return;
+  assertNoError(inserted.error);
+}
+
+function actionResultFromConversation(conversation: OfConversationInstance): AutomationActionResult {
+  if (conversation.status === "failed") return "failed";
+  if (conversation.status === "cancelled") return "skipped";
+  if (conversation.status === "completed" || conversation.status.startsWith("waiting")) return "sent";
+  return "draft_created";
+}
+
+async function syncAutomationRunToConversation(supabase: SupabaseClient, automationRunId: string, conversation: OfConversationInstance) {
+  const status = conversation.status === "failed" ? "failed" : conversation.status === "cancelled" ? "skipped" : ["completed"].includes(conversation.status) ? "completed" : "running";
+  const result = await supabase
+    .from("of_automation_runs")
+    .update({
+      status,
+      completed_at: status === "running" ? null : new Date().toISOString(),
+      error_message: conversation.last_error ?? conversation.cancellation_reason ?? null
+    })
+    .eq("id", automationRunId);
+  assertNoError(result.error);
+  if (conversation.execution_mode === "simulation") {
+    const simulationRunId = readSimulationRunId(conversation);
+    if (simulationRunId) {
+      const simulationStatus: AutomationSimulationStatus =
+        conversation.status === "failed"
+          ? "failed"
+          : conversation.status === "cancelled"
+            ? "cancelled"
+            : conversation.status === "completed"
+              ? "completed"
+              : "running";
+      const simulationUpdate = await supabase
+        .from("of_automation_simulations")
+        .update({
+          status: simulationStatus,
+          last_error: conversation.last_error ?? conversation.cancellation_reason ?? null,
+          completed_at: ["failed", "cancelled", "completed"].includes(simulationStatus) ? new Date().toISOString() : null
+        })
+        .eq("id", simulationRunId);
+      assertNoError(simulationUpdate.error);
+    }
+  }
+}
+
+async function resolveFirstOutboundStep(
+  supabase: SupabaseClient,
+  script: Record<string, unknown>,
+  event: Record<string, unknown>,
+  steps: OfMessageScriptStep[],
+  context: EventActionContext
+) {
+  const stepMap = new Map(steps.map((step) => [step.id, step]));
+  const nextByOrder = new Map<string, OfMessageScriptStep | undefined>();
+  for (let index = 0; index < steps.length; index += 1) {
+    nextByOrder.set(steps[index].id, steps[index + 1]);
+  }
+
+  const variables = new Map<string, string>();
+  const builderConfig = normalizeBuilderConfig(script.builder_config);
+  for (const variable of builderConfig.variables ?? []) {
+    variables.set(variable.key, variable.defaultValue ?? "");
+  }
+
+  const relationship = context.relationshipId
+    ? await supabase.from("of_subscriber_relationships").select("*").eq("id", context.relationshipId).maybeSingle()
+    : { data: null, error: null };
+  assertNoError(relationship.error);
+
+  const subscriber = context.subscriberId
+    ? await supabase.from("of_subscribers").select("*").eq("id", context.subscriberId).maybeSingle()
+    : { data: null, error: null };
+  assertNoError(subscriber.error);
+
+  let current: OfMessageScriptStep | null = steps[0] ?? null;
+  const visited = new Set<string>();
+  while (current && !visited.has(current.id)) {
+    visited.add(current.id);
+    const metadata = normalizeStepMetadata(current.metadata);
+    if ((current.step_type === "message" || current.step_type === "follow_up" || current.step_type === "question") && current.message_body?.trim()) {
+      return current;
+    }
+
+    if (current.step_type === "set_variable") {
+      if (metadata.variableKey) {
+        variables.set(metadata.variableKey, interpolateTemplate(metadata.variableValue ?? "", variables));
+      }
+      current = resolveLinkedStep(current.next_step_id, nextByOrder.get(current.id), stepMap);
+      continue;
+    }
+
+    if (current.step_type === "branch") {
+      const branchRules = metadata.branchRules ?? [];
+      const matched = branchRules.find((rule) => evaluateCondition(rule.condition, { variables, event, relationship: relationship.data, subscriber: subscriber.data }));
+      current = resolveLinkedStep(matched?.nextStepId ?? current.next_step_id, current.fallback_step_id ? stepMap.get(current.fallback_step_id) : nextByOrder.get(current.id), stepMap);
+      continue;
+    }
+
+    if (current.step_type === "wait") {
+      current = resolveLinkedStep(current.next_step_id, nextByOrder.get(current.id), stepMap);
+      continue;
+    }
+
+    if (current.step_type === "end") return null;
+    current = resolveLinkedStep(current.next_step_id, nextByOrder.get(current.id), stepMap);
+  }
+
+  return steps.find((step) => ["message", "follow_up", "question"].includes(step.step_type) && step.message_body?.trim()) ?? null;
+}
+
+function resolveLinkedStep(stepId: string | null | undefined, fallback: OfMessageScriptStep | undefined, stepMap: Map<string, OfMessageScriptStep>) {
+  if (stepId && stepMap.has(stepId)) return stepMap.get(stepId) ?? null;
+  return fallback ?? null;
+}
+
+function interpolateTemplate(template: string, variables: Map<string, string>) {
+  return template.replace(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g, (_, key: string) => variables.get(key) ?? "");
+}
+
+function pickTemplateVariables(template: string, variables: Record<string, unknown>) {
+  const keys = [...new Set([...template.matchAll(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g)].map((match) => match[1]))];
+  return Object.fromEntries(keys.map((key) => [key, variables[key] ?? ""]));
+}
+
+function readSimulationRunId(conversation: OfConversationInstance) {
+  return isRecord(conversation.metadata) && typeof conversation.metadata.simulation_run_id === "string"
+    ? conversation.metadata.simulation_run_id
+    : null;
+}
+
+function evaluateCondition(
+  condition: ScriptBuilderCondition,
+  sources: {
+    variables: Map<string, string>;
+    event: Record<string, unknown>;
+    relationship: Record<string, unknown> | null;
+    subscriber: Record<string, unknown> | null;
+  }
+) {
+  const currentValue = readConditionSource(condition.source, condition.key, sources);
+  const expected = condition.value ?? "";
+  switch (condition.operator) {
+    case "equals":
+      return currentValue === expected;
+    case "not_equals":
+      return currentValue !== expected;
+    case "contains":
+      return currentValue.includes(expected);
+    case "not_contains":
+      return !currentValue.includes(expected);
+    case "exists":
+      return currentValue.length > 0;
+    case "not_exists":
+      return currentValue.length === 0;
+    default:
+      return false;
+  }
+}
+
+function readConditionSource(
+  source: ScriptBuilderCondition["source"],
+  key: string,
+  sources: {
+    variables: Map<string, string>;
+    event: Record<string, unknown>;
+    relationship: Record<string, unknown> | null;
+    subscriber: Record<string, unknown> | null;
+  }
+) {
+  if (source === "variable") return sources.variables.get(key) ?? "";
+  if (source === "event") return nestedLookup(sources.event.payload, key) ?? nestedLookup(sources.event, key) ?? "";
+  if (source === "relationship") return nestedLookup(sources.relationship, key) ?? "";
+  return nestedLookup(sources.subscriber, key) ?? "";
+}
+
+function nestedLookup(record: unknown, key: string): string | null {
+  if (!record || !key.trim()) return null;
+  const path = key.split(".").map((part) => part.trim()).filter(Boolean);
+  let current: unknown = record;
+  for (const part of path) {
+    if (!isRecord(current)) return null;
+    current = current[part];
+  }
+  if (typeof current === "string") return current;
+  if (typeof current === "number" || typeof current === "boolean") return String(current);
+  return null;
+}
+
+function recordId(value: unknown) {
+  return typeof value === "string" ? value : null;
+}
+
 async function executeMessageAction(
   supabase: SupabaseClient,
   env: Env,
@@ -1852,10 +3669,11 @@ async function executeMessageAction(
   event: Record<string, unknown>,
   runId: string,
   fanId: string,
-  actionMode: MessageScriptActionMode
+  actionMode: MessageScriptActionMode,
+  context: EventActionContext
 ): Promise<AutomationActionResult> {
   const steps = ((script.of_message_script_steps as OfMessageScriptStep[] | undefined) ?? []).sort((a, b) => a.step_order - b.step_order);
-  const firstMessage = steps.find((step) => ["message", "follow_up", "question"].includes(step.step_type) && step.message_body?.trim());
+  const firstMessage = await resolveFirstOutboundStep(supabase, script, event, steps, context);
   if (!firstMessage?.message_body) {
     await completeAutomationRun(supabase, runId, "skipped", "Script has no message step to queue");
     return "skipped";
@@ -1894,6 +3712,16 @@ async function executeMessageAction(
 async function loadEventActionContext(supabase: SupabaseClient, event: Record<string, unknown>, fanId: string): Promise<EventActionContext> {
   const creatorId = String(event.creator_id ?? "");
   const payload = isRecord(event.payload) ? event.payload : {};
+  const simulationSubscriber = isRecord(payload.subscriber) ? payload.subscriber : null;
+  if (event.execution_mode === "simulation" || payload.simulation === true) {
+    return {
+      subscriberId: null,
+      chatId: null,
+      relationshipId: null,
+      simulationSubscriber,
+      simulationRunId: typeof event.simulation_run_id === "string" ? event.simulation_run_id : null
+    };
+  }
   const platformChatId = findString(payload, "chatId", "chat_id", "platform_chat_id") ?? findNestedString(payload, ["chat", "id"]);
 
   const [subscribers, chats] = await Promise.all([
@@ -1933,7 +3761,9 @@ async function loadEventActionContext(supabase: SupabaseClient, event: Record<st
   return {
     subscriberId: typeof subscriber?.id === "string" ? subscriber.id : null,
     chatId: typeof chat?.id === "string" ? chat.id : null,
-    relationshipId
+    relationshipId,
+    simulationSubscriber: null,
+    simulationRunId: null
   };
 }
 
@@ -2031,6 +3861,144 @@ async function listCreatorAutomationRuns(supabase: SupabaseClient, creatorId: st
   return result.data ?? [];
 }
 
+async function listCreatorAutomationScenarios(supabase: SupabaseClient, creatorId: string) {
+  const scenarios = await supabase
+    .from("of_creator_automation_scenarios")
+    .select("*, linked_script:of_message_scripts(id, name, status, action_mode, trigger_event_type, category)")
+    .eq("creator_id", creatorId)
+    .order("created_at", { ascending: true });
+  assertNoError(scenarios.error);
+  const rows = (scenarios.data ?? []) as OfCreatorAutomationScenario[];
+  if (!rows.length) return rows;
+
+  const linkedScriptIds = rows.map((item) => item.linked_script_id).filter((value): value is string => typeof value === "string");
+  const [runningCounts, failedCounts, recentEvents] = await Promise.all([
+    linkedScriptIds.length
+      ? supabase.from("of_conversation_instances").select("script_id, status").in("script_id", linkedScriptIds).in("status", ["running", "waiting_delay", "waiting_reply", "waiting_approval"])
+      : Promise.resolve({ data: [], error: null }),
+    linkedScriptIds.length
+      ? supabase.from("of_conversation_instances").select("script_id, status").in("script_id", linkedScriptIds).eq("status", "failed")
+      : Promise.resolve({ data: [], error: null }),
+    supabase.from("of_events").select("id, creator_id, event_type, received_at").eq("creator_id", creatorId).order("received_at", { ascending: false }).limit(50)
+  ]);
+  assertNoError(runningCounts.error);
+  assertNoError(failedCounts.error);
+  assertNoError(recentEvents.error);
+
+  const runningByScript = countByScript(runningCounts.data ?? []);
+  const failedByScript = countByScript(failedCounts.data ?? []);
+  const recentEventRows = (recentEvents.data ?? []) as Array<Pick<OfCreatorAutomationScenario["recent_events"], never> & { id: string; event_type: string; received_at: string }>;
+
+  return rows.map((scenario) => ({
+    ...scenario,
+    running_count: scenario.linked_script_id ? runningByScript.get(scenario.linked_script_id) ?? 0 : 0,
+    failed_count: scenario.linked_script_id ? failedByScript.get(scenario.linked_script_id) ?? 0 : 0,
+    recent_events: recentEventRows.filter((event) => event.event_type === scenario.trigger_event_type).slice(0, 3)
+  }));
+}
+
+function countByScript(rows: Array<{ script_id?: string | null }>) {
+  const counts = new Map<string, number>();
+  for (const row of rows) {
+    if (!row.script_id) continue;
+    counts.set(row.script_id, (counts.get(row.script_id) ?? 0) + 1);
+  }
+  return counts;
+}
+
+async function updateAutomationScenario(supabase: SupabaseClient, scenarioId: string, body: Record<string, unknown>) {
+  const patch: Record<string, unknown> = {};
+  if ("enabled" in body) patch.enabled = Boolean(body.enabled);
+  if ("creator_enabled" in body) patch.creator_enabled = Boolean(body.creator_enabled);
+  if ("creatorEnabled" in body) patch.creator_enabled = Boolean(body.creatorEnabled);
+  if ("linked_script_id" in body) patch.linked_script_id = typeof body.linked_script_id === "string" && isUuid(body.linked_script_id) ? body.linked_script_id : null;
+  if ("linkedScriptId" in body) patch.linked_script_id = typeof body.linkedScriptId === "string" && isUuid(body.linkedScriptId) ? body.linkedScriptId : null;
+  if ("action_mode_override" in body) patch.action_mode_override = body.action_mode_override == null ? null : parseActionMode(body.action_mode_override, "draft_for_approval");
+  if ("actionModeOverride" in body) patch.action_mode_override = body.actionModeOverride == null ? null : parseActionMode(body.actionModeOverride, "draft_for_approval");
+  const result = await supabase
+    .from("of_creator_automation_scenarios")
+    .update(patch)
+    .eq("id", scenarioId)
+    .select("*, linked_script:of_message_scripts(id, name, status, action_mode, trigger_event_type, category)")
+    .single();
+  assertNoError(result.error);
+  return result.data as OfCreatorAutomationScenario;
+}
+
+async function listCreatorConversations(supabase: SupabaseClient, creatorId: string) {
+  const result = await supabase
+    .from("of_conversation_instances")
+    .select("*, of_message_scripts(name, trigger_event_type, folder_name, version_number), source_event:of_events!of_conversation_instances_originating_event_id_fkey(id, event_type, received_at)")
+    .eq("creator_id", creatorId)
+    .order("updated_at", { ascending: false })
+    .limit(200);
+  assertNoError(result.error);
+  const conversations = (result.data ?? []) as OfConversationInstance[];
+  if (!conversations.length) return conversations;
+
+  const stepIds = [...new Set(conversations.flatMap((item) => [item.current_step_id, item.next_step_id]).filter((value): value is string => typeof value === "string"))];
+  const steps = stepIds.length
+    ? await supabase.from("of_message_script_steps").select("id, step_order, step_type, message_body").in("id", stepIds)
+    : { data: [], error: null };
+  assertNoError(steps.error);
+  const stepMap = new Map(((steps.data ?? []) as Array<Pick<OfMessageScriptStep, "id" | "step_order" | "step_type" | "message_body">>).map((step) => [step.id, step]));
+
+  return conversations.map((conversation) => ({
+    ...conversation,
+    current_step: conversation.current_step_id ? stepMap.get(conversation.current_step_id) ?? null : null,
+    next_step: conversation.next_step_id ? stepMap.get(conversation.next_step_id) ?? null : null
+  }));
+}
+
+async function getConversationDetail(supabase: SupabaseClient, conversationId: string) {
+  const conversation = await supabase
+    .from("of_conversation_instances")
+    .select("*, of_message_scripts(name, trigger_event_type, folder_name, version_number), source_event:of_events!of_conversation_instances_originating_event_id_fkey(id, event_type, received_at)")
+    .eq("id", conversationId)
+    .single();
+  assertNoError(conversation.error);
+  const history = await supabase
+    .from("of_conversation_history")
+    .select("*")
+    .eq("conversation_instance_id", conversationId)
+    .order("created_at", { ascending: true });
+  assertNoError(history.error);
+  return {
+    conversation: conversation.data as OfConversationInstance,
+    history: (history.data ?? []) as OfConversationHistoryItem[]
+  };
+}
+
+async function cancelConversation(supabase: SupabaseClient, conversationId: string, reason: string) {
+  const current = await supabase.from("of_conversation_instances").select("*").eq("id", conversationId).single();
+  assertNoError(current.error);
+  if (!current.data) throw new Error("Conversation not found");
+  if (current.data.status === "completed" || current.data.status === "cancelled") return current.data as OfConversationInstance;
+
+  const cancelled = await updateConversationState(supabase, conversationId, {
+    status: "cancelled",
+    cancellation_reason: reason,
+    cancelled_at: new Date().toISOString(),
+    waiting_reason: null,
+    waiting_until: null,
+    processing_started_at: null
+  });
+  await recordConversationHistory(supabase, {
+    conversationId,
+    creatorId: cancelled.creator_id,
+    eventId: cancelled.last_event_id,
+    stepId: cancelled.current_step_id,
+    transitionKey: `cancel:${cancelled.updated_at}`,
+    eventType: "conversation_cancelled",
+    fromStatus: current.data.status as string,
+    toStatus: "cancelled",
+    detail: reason,
+    payload: {}
+  });
+  if (cancelled.automation_run_id) await syncAutomationRunToConversation(supabase, cancelled.automation_run_id, cancelled);
+  return cancelled;
+}
+
 async function updateOutboundMessage(supabase: SupabaseClient, env: Env, messageId: string, body: Record<string, unknown>) {
   const patch: Record<string, unknown> = {};
   if (typeof body.draft_text === "string") patch.draft_text = body.draft_text.trim();
@@ -2069,6 +4037,7 @@ async function updateOutboundMessage(supabase: SupabaseClient, env: Env, message
       .single();
     assertNoError(queued.error);
     const sent = await sendOutboundMessage(supabase, env, messageId, finalText);
+    await advanceConversationFromOutboundMessage(supabase, env, sent as Record<string, unknown>);
     return hydrateOutboundMessage(supabase, sent.id as string);
   } else if (body.approval_status === "rejected") {
     patch.approval_status = "rejected";
@@ -2088,6 +4057,9 @@ async function updateOutboundMessage(supabase: SupabaseClient, env: Env, message
     .select("*, of_creators(username, display_name), of_message_scripts(name)")
     .single();
   assertNoError(result.error);
+  if (body.approval_status === "rejected") {
+    await handleRejectedConversationMessage(supabase, result.data as Record<string, unknown>);
+  }
   return result.data;
 }
 
@@ -2106,6 +4078,58 @@ async function sendOutboundMessage(supabase: SupabaseClient, env: Env, messageId
     .single();
   assertNoError(sending.error);
   if (!sending.data) throw new Error("Outbound message not found");
+
+  if (sending.data.execution_mode === "simulation") {
+    const simulationFailure = await consumeSimulationFailure(supabase, sending.data.simulation_run_id);
+    if (simulationFailure) {
+      const failed = await supabase
+        .from("of_outbound_messages")
+        .update({
+          status: "failed",
+          failed_at: new Date().toISOString(),
+          failure_reason: "Injected simulation failure",
+          error_message: "Injected simulation failure"
+        })
+        .eq("id", messageId)
+        .select("*")
+        .single();
+      assertNoError(failed.error);
+      return failed.data;
+    }
+    const sent = await supabase
+      .from("of_outbound_messages")
+      .update({
+        status: "sent",
+        provider_message_id: `simulated:${messageId}`,
+        sent_at: new Date().toISOString(),
+        failed_at: null,
+        failure_reason: null,
+        error_message: null
+      })
+      .eq("id", messageId)
+      .select("*")
+      .single();
+    assertNoError(sent.error);
+    if (typeof sending.data.conversation_instance_id === "string") {
+      const conversation = await supabase.from("of_conversation_instances").select("*").eq("id", sending.data.conversation_instance_id).maybeSingle();
+      assertNoError(conversation.error);
+      if (conversation.data) {
+        await recordConversationHistory(supabase, {
+          conversationId: conversation.data.id as string,
+          creatorId: conversation.data.creator_id as string,
+          eventId: conversation.data.last_event_id as string | null,
+          stepId: typeof sending.data.script_step_id === "string" ? sending.data.script_step_id : null,
+          transitionKey: `simulated:${messageId}:${String(sent.data.sent_at)}`,
+          eventType: "message_simulated",
+          fromStatus: conversation.data.status as string,
+          toStatus: conversation.data.status as string,
+          detail: "Simulation rendered and delivered the outbound message without using BetterFans.",
+          payload: { outbound_message_id: messageId, destination: sending.data.destination ?? sending.data.fan_id, final_text: finalText }
+        });
+      }
+    }
+    return sent.data;
+  }
 
   const creator = await supabase
     .from("of_creators")
@@ -2175,6 +4199,92 @@ async function hydrateOutboundMessage(supabase: SupabaseClient, messageId: strin
     .single();
   assertNoError(result.error);
   return result.data;
+}
+
+async function advanceConversationFromOutboundMessage(supabase: SupabaseClient, env: Env, outbound: Record<string, unknown>) {
+  if (typeof outbound.conversation_instance_id !== "string" || !isUuid(outbound.conversation_instance_id)) return;
+  const conversation = await supabase.from("of_conversation_instances").select("*").eq("id", outbound.conversation_instance_id).maybeSingle();
+  assertNoError(conversation.error);
+  if (!conversation.data) return;
+  if (String(outbound.status) === "sent") {
+    await recordConversationHistory(supabase, {
+      conversationId: conversation.data.id as string,
+      creatorId: conversation.data.creator_id as string,
+      eventId: conversation.data.last_event_id as string | null,
+      stepId: typeof outbound.script_step_id === "string" ? outbound.script_step_id : null,
+      transitionKey: `approved:${String(outbound.id)}:${String(outbound.sent_at ?? "sent")}`,
+      eventType: "message_sent",
+      fromStatus: conversation.data.status as string,
+      toStatus: "running",
+      detail: "Approved outbound message was sent successfully.",
+      payload: { outbound_message_id: outbound.id }
+    });
+    const processed = await processConversationInstance(supabase, env, conversation.data.id as string, { reason: "approval_sent" });
+    if (processed.automation_run_id) await syncAutomationRunToConversation(supabase, processed.automation_run_id, processed);
+    return;
+  }
+  const retryCount = Number(conversation.data.retry_count ?? 0) + 1;
+  const canRetry = retryCount <= 3;
+  const updated = await updateConversationState(supabase, conversation.data.id as string, {
+    status: canRetry ? "waiting_delay" : "failed",
+    waiting_until: canRetry ? new Date(Date.now() + retryCount * 5 * 60000).toISOString() : null,
+    waiting_reason: canRetry ? `retry_send:${String(outbound.id)}` : null,
+    retry_count: retryCount,
+    last_error: String(outbound.failure_reason ?? outbound.error_message ?? "Outbound delivery failed"),
+    failed_at: canRetry ? null : new Date().toISOString(),
+    processing_started_at: null
+  });
+  await recordConversationHistory(supabase, {
+    conversationId: updated.id,
+    creatorId: updated.creator_id,
+    eventId: updated.last_event_id,
+    stepId: typeof outbound.script_step_id === "string" ? outbound.script_step_id : null,
+    transitionKey: `sendresult:${String(outbound.id)}:${retryCount}`,
+    eventType: canRetry ? "send_retry_scheduled" : "conversation_failed",
+    fromStatus: conversation.data.status as string,
+    toStatus: updated.status,
+    detail: canRetry ? "Delivery failed after approval; retry scheduled." : "Delivery failed after approval and retries were exhausted.",
+    payload: { outbound_message_id: outbound.id, retry_count: retryCount }
+  });
+  if (updated.automation_run_id) await syncAutomationRunToConversation(supabase, updated.automation_run_id, updated);
+}
+
+async function handleRejectedConversationMessage(supabase: SupabaseClient, outbound: Record<string, unknown>) {
+  if (typeof outbound.conversation_instance_id !== "string" || !isUuid(outbound.conversation_instance_id)) return;
+  const cancelled = await updateConversationState(supabase, outbound.conversation_instance_id, {
+    status: "cancelled",
+    cancellation_reason: "Draft rejected by operator.",
+    cancelled_at: new Date().toISOString(),
+    waiting_reason: null,
+    waiting_until: null,
+    processing_started_at: null
+  });
+  await recordConversationHistory(supabase, {
+    conversationId: cancelled.id,
+    creatorId: cancelled.creator_id,
+    eventId: cancelled.last_event_id,
+    stepId: typeof outbound.script_step_id === "string" ? outbound.script_step_id : null,
+    transitionKey: `reject:${String(outbound.id)}`,
+    eventType: "conversation_cancelled",
+    fromStatus: "waiting_approval",
+    toStatus: "cancelled",
+    detail: "Conversation cancelled because the draft was rejected.",
+    payload: { outbound_message_id: outbound.id }
+  });
+  if (cancelled.automation_run_id) await syncAutomationRunToConversation(supabase, cancelled.automation_run_id, cancelled);
+}
+
+async function consumeSimulationFailure(supabase: SupabaseClient, simulationRunId: string | null | undefined) {
+  if (!simulationRunId || !isUuid(simulationRunId)) return false;
+  const current = await supabase.from("of_automation_simulations").select("failure_plan").eq("id", simulationRunId).maybeSingle();
+  assertNoError(current.error);
+  const failurePlan = isRecord(current.data?.failure_plan) ? { ...current.data.failure_plan } : {};
+  const count = Number(failurePlan.next_send_failure ?? 0);
+  if (count <= 0) return false;
+  failurePlan.next_send_failure = count - 1;
+  const update = await supabase.from("of_automation_simulations").update({ failure_plan: failurePlan }).eq("id", simulationRunId);
+  assertNoError(update.error);
+  return true;
 }
 
 async function validateCreatorConnection(

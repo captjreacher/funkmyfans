@@ -1,9 +1,10 @@
-import { CheckCircle2, HeartPulse, MessageSquare, Play, RefreshCw, ShieldAlert, Sparkles, TrendingUp, UserRoundCheck, XCircle } from "lucide-react";
+import { CheckCircle2, HeartPulse, MessageSquare, RefreshCw, ShieldAlert, Sparkles, TrendingUp, UserRoundCheck, XCircle } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { OfAutomationRun, OfMessageScript, OfSubscriberRelationship, SyncType } from "@funkmyfans/of-types";
 import { summarizeEventType } from "@funkmyfans/of-types";
 import { MetricTile } from "../components/MetricTile";
 import { PriorityBadge } from "../components/PriorityBadge";
+import { ScriptBuilderPanel } from "../components/ScriptBuilderPanel";
 import {
   fetchCreatorAutomationRuns,
   fetchCreatorDetail,
@@ -40,18 +41,23 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
   const [automationResult, setAutomationResult] = useState<AutomationRunSummary | null>(null);
   const [scriptError, setScriptError] = useState<string | null>(null);
 
+  async function loadScripts() {
+    try {
+      const result = await fetchCreatorScripts(creatorId);
+      setScripts(result.scripts);
+      setScriptError(null);
+      return result.scripts;
+    } catch (error: unknown) {
+      console.error("Failed to fetch creator scripts", error);
+      setScripts([]);
+      setScriptError(errorMessage(error));
+      return [];
+    }
+  }
+
   useEffect(() => {
     void fetchCreatorDetail(creatorId).then(setData);
-    void fetchCreatorScripts(creatorId)
-      .then((result) => {
-        setScripts(result.scripts);
-        setScriptError(null);
-      })
-      .catch((error: unknown) => {
-        console.error("Failed to fetch creator scripts", error);
-        setScripts([]);
-        setScriptError(errorMessage(error));
-      });
+    void loadScripts();
     void fetchCreatorAutomationRuns(creatorId).then((result) => setAutomationRuns(result.runs));
   }, [creatorId]);
 
@@ -100,9 +106,7 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
 
     try {
       await updateScript(scriptId, patch);
-      const result = await fetchCreatorScripts(creatorId);
-      setScripts(result.scripts);
-      setScriptError(null);
+      await loadScripts();
     } catch (error) {
       console.error("Failed to update script", error);
       setScriptError(errorMessage(error));
@@ -227,10 +231,12 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
       {tab === "Tasks" ? <TasksPanel data={data} onStatus={handleTaskStatus} /> : null}
       {tab === "Scripts" ? (
         <ScriptsPanel
+          creatorId={creatorId}
           scripts={scripts}
           runs={automationRuns}
           result={automationResult}
           error={scriptError}
+          onReload={loadScripts}
           onPatch={handleScriptPatch}
           onRunTest={handleRunTestTrigger}
         />
@@ -373,112 +379,25 @@ function TasksPanel({ data, onStatus }: { data: CreatorDetailData; onStatus: (ta
 }
 
 function ScriptsPanel({
+  creatorId,
   scripts,
   runs,
   result,
   error,
+  onReload,
   onPatch,
   onRunTest
 }: {
+  creatorId: string;
   scripts: OfMessageScript[];
   runs: OfAutomationRun[];
   result: AutomationRunSummary | null;
   error: string | null;
+  onReload: () => Promise<OfMessageScript[]>;
   onPatch: (scriptId: string, patch: Partial<OfMessageScript>) => void;
   onRunTest: (script: OfMessageScript) => void;
 }) {
-  const invalidScripts = scripts.filter((script) => !isUuid(script.id));
-
-  return (
-    <section className="space-y-4">
-      {error ? <div className="rounded-md bg-rose-50 px-3 py-2 text-sm font-medium text-rose-800">{error}</div> : null}
-      {invalidScripts.length ? (
-        <div className="rounded-md bg-amber-50 px-3 py-2 text-sm font-medium text-amber-900">
-          {invalidScripts.length} script action{invalidScripts.length === 1 ? "" : "s"} blocked because the API returned a non-UUID script ID.
-        </div>
-      ) : null}
-      <div className="overflow-hidden rounded-md border border-stone-200 bg-white">
-        <table className="w-full min-w-[980px] text-left text-sm">
-          <thead className="bg-stone-100 text-stone-600">
-            <tr>
-              {["Script", "Trigger", "Action", "Status", "Auto-send", "Approval", "Cooldown", "Max / Fan", "Actions"].map((header) => (
-                <th key={header} className="px-4 py-3 font-semibold">{header}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-stone-100">
-            {scripts.map((script) => (
-              <tr key={script.id} className="align-top">
-                <td className="px-4 py-3">
-                  <div className="font-semibold text-stone-950">{script.name}</div>
-                  <div className="mt-1 text-xs text-stone-400">ID: {script.id}</div>
-                  <div className="mt-2 space-y-1 text-xs text-stone-500">
-                    {(script.steps ?? []).map((step) => (
-                      <div key={step.id}>{step.step_order}. {step.step_type}{step.delay_minutes ? ` / ${step.delay_minutes}m` : ""}: {step.message_body ?? step.condition_value ?? "end"}</div>
-                    ))}
-                  </div>
-                </td>
-                <td className="px-4 py-3 text-stone-700">{script.trigger_event_type}</td>
-                <td className="px-4 py-3 text-stone-700">{script.action_mode}</td>
-                <td className="px-4 py-3 text-stone-700">{script.status}</td>
-                <td className="px-4 py-3 text-stone-700">{script.auto_send_enabled ? "enabled" : "off"}</td>
-                <td className="px-4 py-3 text-stone-700">{script.requires_approval ? "required" : "not required"}</td>
-                <td className="px-4 py-3 text-stone-700">{script.cooldown_hours}h</td>
-                <td className="px-4 py-3 text-stone-700">{script.max_sends_per_fan}</td>
-                <td className="px-4 py-3">
-                  <div className="flex flex-wrap gap-2">
-                    <button type="button" onClick={() => onPatch(script.id, { status: script.status === "active" ? "inactive" : "active" })} disabled={!isUuid(script.id)} className="rounded-md border border-stone-200 px-2 py-1 text-xs font-semibold text-stone-700 disabled:opacity-45">
-                      {script.status === "active" ? "Disable" : "Enable"}
-                    </button>
-                    <button type="button" onClick={() => onPatch(script.id, { auto_send_enabled: !script.auto_send_enabled })} disabled={!isUuid(script.id)} className="rounded-md border border-stone-200 px-2 py-1 text-xs font-semibold text-stone-700 disabled:opacity-45">
-                      Auto-send
-                    </button>
-                    <button type="button" onClick={() => onPatch(script.id, { requires_approval: !script.requires_approval })} disabled={!isUuid(script.id)} className="rounded-md border border-stone-200 px-2 py-1 text-xs font-semibold text-stone-700 disabled:opacity-45">
-                      Approval
-                    </button>
-                    <button type="button" onClick={() => onPatch(script.id, { action_mode: "task_only", auto_send_enabled: false, requires_approval: true })} disabled={!isUuid(script.id) || script.action_mode === "task_only"} className="rounded-md border border-stone-200 px-2 py-1 text-xs font-semibold text-stone-700 disabled:opacity-45">
-                      Task
-                    </button>
-                    <button type="button" onClick={() => onPatch(script.id, { action_mode: "draft_for_approval", auto_send_enabled: false, requires_approval: true })} disabled={!isUuid(script.id) || script.action_mode === "draft_for_approval"} className="rounded-md border border-stone-200 px-2 py-1 text-xs font-semibold text-stone-700 disabled:opacity-45">
-                      Draft
-                    </button>
-                    <button type="button" onClick={() => onPatch(script.id, { action_mode: "auto_send", auto_send_enabled: true, requires_approval: false })} disabled={!isUuid(script.id) || script.action_mode === "auto_send"} className="rounded-md border border-stone-200 px-2 py-1 text-xs font-semibold text-stone-700 disabled:opacity-45">
-                      Send
-                    </button>
-                    <button type="button" onClick={() => onRunTest(script)} disabled={!isUuid(script.id)} className="inline-flex items-center gap-1 rounded-md bg-teal-700 px-2 py-1 text-xs font-semibold text-white disabled:bg-stone-400">
-                      <Play className="h-3 w-3" aria-hidden="true" />
-                      Test
-                    </button>
-                  </div>
-                </td>
-              </tr>
-            ))}
-            {!scripts.length ? <tr><td colSpan={9} className="px-4 py-6 text-stone-500">No scripts configured.</td></tr> : null}
-          </tbody>
-        </table>
-      </div>
-
-      {result ? (
-        <section className="grid gap-3 rounded-md border border-stone-200 bg-white p-4 sm:grid-cols-4">
-          <Field label="Matched" value={String(result.matched)} />
-          <Field label="Queued" value={String(result.queued)} />
-          <Field label="Skipped" value={String(result.skipped)} />
-          <Field label="Errors" value={result.errors.join("; ") || "none"} />
-        </section>
-      ) : null}
-
-      <Table
-        headers={["Run", "Script", "Fan", "Status", "Started"]}
-        rows={runs.map((run) => [
-          run.id.slice(0, 8),
-          run.of_message_scripts?.name ?? run.script_id,
-          run.fan_id,
-          run.error_message ? `${run.status}: ${run.error_message}` : run.status,
-          date(run.started_at)
-        ])}
-      />
-    </section>
-  );
+  return <ScriptBuilderPanel creatorId={creatorId} scripts={scripts} runs={runs} result={result} error={error} onReload={onReload} onPatch={onPatch} onRunTest={onRunTest} />;
 }
 
 function TaskGroup({ title, tasks, onStatus }: { title: string; tasks: CreatorDetailData["tasks"]; onStatus: (taskId: string, status: "in_progress" | "waiting" | "completed" | "ignored") => void }) {
