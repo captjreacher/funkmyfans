@@ -13,7 +13,7 @@ import { Subscribers } from "./pages/Subscribers";
 import { Tasks } from "./pages/Tasks";
 import { fetchDashboard, type DashboardData } from "./lib/api";
 
-type View = "dashboard" | "creators" | "creator" | "subscribers" | "tasks" | "events" | "outbound" | "operations" | "metrics" | "audit";
+type View = "dashboard" | "creators" | "creator" | "subscribers" | "tasks" | "events" | "outbound" | "operations" | "metrics";
 
 const navItems: Array<{ view: View; label: string; icon: typeof BarChart3 }> = [
   { view: "dashboard", label: "Dashboard", icon: BarChart3 },
@@ -24,7 +24,7 @@ const navItems: Array<{ view: View; label: string; icon: typeof BarChart3 }> = [
   { view: "outbound", label: "Outbound", icon: Send },
   { view: "operations", label: "Operations", icon: Shield },
   { view: "metrics", label: "Metrics", icon: BarChart3 },
-  { view: "audit", label: "Audit", icon: Activity }
+
 ];
 
 const secondaryNav = [
@@ -164,7 +164,7 @@ export function App() {
               {view === "outbound" ? <OutboundMessages /> : null}
               {view === "operations" ? <Operations /> : null}
               {view === "metrics" ? <RuntimeMetrics /> : null}
-              {view === "audit" ? <AuditTrail /> : null}
+
             </>
           )}
         </div>
