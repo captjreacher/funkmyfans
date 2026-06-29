@@ -1,16 +1,19 @@
-import { BarChart3, ClipboardList, Cog, Cpu, FileText, Plus, Radio, Search, Send, Sparkles, UserRound, Users, Zap } from "lucide-react";
+import { Activity, BarChart3, ClipboardList, Cog, Cpu, FileText, Plus, Radio, Search, Send, Shield, Sparkles, UserRound, Users } from "lucide-react";
 import { useEffect, useState } from "react";
+import { AuditTrail } from "./pages/AuditTrail";
 import { ConnectCreatorModal } from "./components/ConnectCreatorModal";
 import { CreatorDetail } from "./pages/CreatorDetail";
 import { Creators } from "./pages/Creators";
 import { Dashboard } from "./pages/Dashboard";
 import { Events } from "./pages/Events";
+import { Operations } from "./pages/Operations";
 import { OutboundMessages } from "./pages/OutboundMessages";
+import { RuntimeMetrics } from "./pages/RuntimeMetrics";
 import { Subscribers } from "./pages/Subscribers";
 import { Tasks } from "./pages/Tasks";
 import { fetchDashboard, type DashboardData } from "./lib/api";
 
-type View = "dashboard" | "creators" | "creator" | "subscribers" | "tasks" | "events" | "outbound";
+type View = "dashboard" | "creators" | "creator" | "subscribers" | "tasks" | "events" | "outbound" | "operations" | "metrics" | "audit";
 
 const navItems: Array<{ view: View; label: string; icon: typeof BarChart3 }> = [
   { view: "dashboard", label: "Dashboard", icon: BarChart3 },
@@ -18,7 +21,10 @@ const navItems: Array<{ view: View; label: string; icon: typeof BarChart3 }> = [
   { view: "subscribers", label: "Subscribers", icon: UserRound },
   { view: "tasks", label: "Tasks", icon: ClipboardList },
   { view: "events", label: "Events", icon: Radio },
-  { view: "outbound", label: "Outbound", icon: Send }
+  { view: "outbound", label: "Outbound", icon: Send },
+  { view: "operations", label: "Operations", icon: Shield },
+  { view: "metrics", label: "Metrics", icon: BarChart3 },
+  { view: "audit", label: "Audit", icon: Activity }
 ];
 
 const secondaryNav = [
@@ -57,11 +63,10 @@ export function App() {
     setConnectCreatorOpen(true);
   }
 
-  const briefing = buildBrief(data);
 
   return (
     <div className="min-h-screen text-slate-100">
-      <aside className="fixed inset-y-0 left-0 z-30 hidden w-72 border-r border-blue-500/20 bg-[#071423]/88 backdrop-blur-2xl lg:block">
+      <aside className="hidden h-full min-h-0 w-72 shrink-0 flex-col overflow-hidden border-r border-blue-500/20 bg-[#06111d] lg:flex">
         <div className="border-b border-blue-500/20 px-5 py-5">
           <div className="flex items-center gap-3">
             <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-blue-500/20 shadow-[0_0_34px_rgba(59,130,246,.26)] ring-1 ring-cyan-300/20">
@@ -113,21 +118,6 @@ export function App() {
             );
           })}
         </nav>
-
-        <div className="absolute inset-x-3 bottom-3 space-y-3">
-          <div className="glass-panel rounded-2xl p-4">
-            <div className="flex items-center gap-2 text-sm font-semibold text-white">
-              <Zap className="h-4 w-4 text-cyan-300" aria-hidden="true" />
-              Today's Brief
-            </div>
-            <div className="mt-3 grid gap-2">
-              <BriefLine label="Highest Priority" value={briefing.highestPrioritySubscriber} tone="text-cyan-300" />
-              <BriefLine label="Missed Revenue" value={briefing.missedRevenue} tone="text-emerald-300" />
-              <BriefLine label="Overdue Welcomes" value={briefing.overdueWelcomes} tone="text-pink-300" />
-              <BriefLine label="Provider" value={briefing.provider} tone="text-amber-300" />
-            </div>
-          </div>
-        </div>
       </aside>
 
       <div className="lg:pl-72">
@@ -143,7 +133,7 @@ export function App() {
               <span className="hidden rounded-lg border border-blue-400/20 px-2 py-1 text-xs font-semibold text-blue-100/60 sm:inline">Ctrl K</span>
             </label>
           </div>
-          <nav className="flex gap-1 overflow-x-auto px-2 pb-2 lg:hidden">
+          <nav className="flex-1 min-h-0 overflow-y-auto px-3 py-4">
             {navItems.map((item) => (
               <button
                 key={item.view}
@@ -172,6 +162,9 @@ export function App() {
               {view === "tasks" ? <Tasks creators={data.creators} relationships={data.relationships} initialTasks={data.tasks} /> : null}
               {view === "events" ? <Events creators={data.creators} initialEvents={data.events} /> : null}
               {view === "outbound" ? <OutboundMessages /> : null}
+              {view === "operations" ? <Operations /> : null}
+              {view === "metrics" ? <RuntimeMetrics /> : null}
+              {view === "audit" ? <AuditTrail /> : null}
             </>
           )}
         </div>
@@ -185,26 +178,4 @@ export function App() {
       />
     </div>
   );
-}
-
-function BriefLine({ label, value, tone }: { label: string; value: string | number; tone: string }) {
-  return (
-    <div className="flex items-center justify-between gap-3 rounded-xl bg-[#0D1B2A]/70 px-3 py-2">
-      <span className="text-xs font-medium text-blue-100/62">{label}</span>
-      <span className={`text-sm font-semibold ${tone}`}>{value}</span>
-    </div>
-  );
-}
-
-function buildBrief(data: DashboardData | null) {
-  if (!data) {
-    return { highestPrioritySubscriber: "n/a", missedRevenue: "n/a", overdueWelcomes: "n/a", provider: "n/a" };
-  }
-
-  return {
-    highestPrioritySubscriber: data.morningBrief.highest_priority_subscriber,
-    missedRevenue: `$${data.morningBrief.missed_revenue.toLocaleString()}`,
-    overdueWelcomes: String(data.morningBrief.overdue_welcome_conversations),
-    provider: data.morningBrief.provider
-  };
 }
