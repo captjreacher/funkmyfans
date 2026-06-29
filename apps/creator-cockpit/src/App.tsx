@@ -13,7 +13,7 @@ import { Subscribers } from "./pages/Subscribers";
 import { Tasks } from "./pages/Tasks";
 import { fetchDashboard, type DashboardData } from "./lib/api";
 
-type View = "dashboard" | "creators" | "creator" | "subscribers" | "tasks" | "events" | "outbound" | "operations" | "metrics";
+type View = "dashboard" | "creators" | "creator" | "subscribers" | "tasks" | "events" | "outbound" | "metrics";
 
 const navItems: Array<{ view: View; label: string; icon: typeof BarChart3 }> = [
   { view: "dashboard", label: "Dashboard", icon: BarChart3 },
@@ -22,7 +22,7 @@ const navItems: Array<{ view: View; label: string; icon: typeof BarChart3 }> = [
   { view: "tasks", label: "Tasks", icon: ClipboardList },
   { view: "events", label: "Events", icon: Radio },
   { view: "outbound", label: "Outbound", icon: Send },
-  { view: "operations", label: "Operations", icon: Shield },
+
   { view: "metrics", label: "Metrics", icon: BarChart3 },
 
 ];
@@ -162,7 +162,7 @@ export function App() {
               {view === "tasks" ? <Tasks creators={data.creators} relationships={data.relationships} initialTasks={data.tasks} /> : null}
               {view === "events" ? <Events creators={data.creators} initialEvents={data.events} /> : null}
               {view === "outbound" ? <OutboundMessages /> : null}
-              {view === "operations" ? <Operations /> : null}
+
               {view === "metrics" ? <RuntimeMetrics /> : null}
 
             </>
