@@ -404,6 +404,7 @@ export function ConnectCreatorModal({
         </div>
       </div>
     </div>
+  </div>
   );
 }
 
