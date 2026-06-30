@@ -8,24 +8,56 @@ import {
 import { calculateRelationshipIntelligence, calculateSubscriberAgencyIntelligence, buildDailyFocusQueue, buildMorningBrief, calculateTaskPriority, generateTaskDrafts, type TaskRuleDraft } from "@funkmyfans/of-rules-engine";
 import type {
   AutomationExecutionMode,
+  AutomationRuleActionType,
+  AutomationRuleSimulationResult,
+  AutomationRuleStatus,
+  AutomationRuleTriggerType,
+  AutomationCreatorScope,
+  AutomationRuleConditionSummary,
   AutomationSimulationStatus,
+  ConversationHealthAlert,
+  ConversationOperationsDetail,
+  ConversationOperationsExport,
+  ConversationOperationsMetrics,
+  ConversationOperationsSummary,
   ConversationRuntimeStatus,
   ConversationIntent,
   ConversationSentiment,
+  OfAutomationAuditTrailEntry,
+  OfAutomationRule,
   OfAutomationSimulation,
   OfCreatorAutomationScenario,
+  AutomationRegistryWorkspaceData,
   MessageScriptActionMode,
   MessageScriptTemplate,
   OfConversationInstance,
   OfConversationHistoryItem,
+  OfCreator,
+  OfAutomationRegistryEntry,
+  OfMessageScript,
   OfMessageScriptStep,
   OfOutboundMessage,
   OfSimulatedSubscriber,
+  SettingsAuditEntry,
+  SettingsWorkspaceData,
+  AgencyDefaultsSettings,
+  CreatorPreferenceSettings,
+  CreatorAiSafetySettings,
+  CreatorSettingsBundle,
+  SettingsEmojiLevel,
+  SettingsFlirtyLevel,
+  SettingsSalesAggressiveness,
+  ScriptAiMode,
+  ScriptApprovalMode,
   ScriptBuilderBranchRule,
   ScriptBuilderConfig,
   ScriptBuilderCondition,
   ScriptBuilderStepMetadata,
   ScriptBuilderVariable,
+  ScriptExecutionMode,
+  ScriptMediaKind,
+  ScriptMessageGenerationMode,
+  ScriptWorkspaceConfig,
   ScriptStepTemplate,
   SyncType
 } from "@funkmyfans/of-types";
@@ -55,6 +87,29 @@ interface EventActionContext {
   relationshipId: string | null;
   simulationSubscriber: Record<string, unknown> | null;
   simulationRunId: string | null;
+}
+
+interface OutboundPolicyContext {
+  creatorId: string;
+  fanId: string;
+  messageText: string;
+  requestedActionMode: MessageScriptActionMode;
+  executionMode: AutomationExecutionMode;
+  script: Record<string, unknown> | null;
+  step: OfMessageScriptStep | null;
+  event: Record<string, unknown> | null;
+  relationshipId?: string | null;
+  subscriberId?: string | null;
+  sourceRuleId?: string | null;
+  sourceRuleName?: string | null;
+}
+
+interface OutboundPolicyDecision {
+  requestedActionMode: MessageScriptActionMode;
+  resolvedActionMode: MessageScriptActionMode;
+  reasons: string[];
+  summary: string;
+  snapshot: Record<string, unknown>;
 }
 
 interface SimulationDetailData {
@@ -175,6 +230,7 @@ if (request.method === "GET" && url.pathname === "/api/dashboard") {
   assertNoError(syncRuns.error);
   assertNoError(relationships.error);
   assertNoError(contextEvents.error);
+  const dailyOperations = await buildDailyOperationsSnapshot(supabase);
 
   return Response.json(
     {
@@ -186,7 +242,8 @@ if (request.method === "GET" && url.pathname === "/api/dashboard") {
       relationships: relationships.data ?? [],
       contextEvents: contextEvents.data ?? [],
       dailyFocusQueue: buildDailyFocusQueue({ subscribers: relationships.data ?? [] }),
-      morningBrief: buildMorningBrief({ subscribers: relationships.data ?? [] })
+      morningBrief: buildMorningBrief({ subscribers: relationships.data ?? [] }),
+      dailyOperations
     },
     { headers: jsonHeaders }
   );
@@ -368,6 +425,95 @@ if (request.method === "GET" && url.pathname === "/api/dashboard") {
     return Response.json({ script }, { status: 201, headers: jsonHeaders });
   }
 
+  if (request.method === "GET" && url.pathname === "/api/scripts/workspace") {
+    const workspace = await getScriptsWorkspace(supabase);
+    return Response.json(workspace, { headers: jsonHeaders });
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/automation/workspace") {
+    const workspace = await getAutomationWorkspace(supabase);
+    return Response.json(workspace, { headers: jsonHeaders });
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/automation/registry") {
+    const registry = await getAutomationRegistry(supabase);
+    return Response.json(registry, { headers: jsonHeaders });
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/settings/workspace") {
+    const workspace = await getSettingsWorkspace(supabase, env);
+    return Response.json(workspace, { headers: jsonHeaders });
+  }
+
+  if (request.method === "PATCH" && url.pathname === "/api/settings/agency") {
+    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const agency = await updateAgencySettings(supabase, body);
+    return Response.json({ agency }, { headers: jsonHeaders });
+  }
+
+  const settingsCreatorPreferencesMatch = url.pathname.match(/^\/api\/settings\/creators\/([^/]+)\/preferences$/);
+  if (request.method === "PATCH" && settingsCreatorPreferencesMatch) {
+    if (!isUuid(settingsCreatorPreferencesMatch[1])) {
+      return Response.json({ error: "Creator id must be a database UUID" }, { status: 400, headers: jsonHeaders });
+    }
+    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const preferences = await updateCreatorPreferences(supabase, settingsCreatorPreferencesMatch[1], body);
+    return Response.json({ preferences }, { headers: jsonHeaders });
+  }
+
+  const settingsCreatorAiSafetyMatch = url.pathname.match(/^\/api\/settings\/creators\/([^/]+)\/ai-safety$/);
+  if (request.method === "PATCH" && settingsCreatorAiSafetyMatch) {
+    if (!isUuid(settingsCreatorAiSafetyMatch[1])) {
+      return Response.json({ error: "Creator id must be a database UUID" }, { status: 400, headers: jsonHeaders });
+    }
+    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const aiSafety = await updateCreatorAiSafety(supabase, settingsCreatorAiSafetyMatch[1], body);
+    return Response.json({ aiSafety }, { headers: jsonHeaders });
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/automation/rules") {
+    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const rule = await createAutomationRule(supabase, body);
+    return Response.json({ rule }, { status: 201, headers: jsonHeaders });
+  }
+
+  const automationRuleMatch = url.pathname.match(/^\/api\/automation\/rules\/([^/]+)$/);
+  if (request.method === "PATCH" && automationRuleMatch) {
+    if (!isUuid(automationRuleMatch[1])) {
+      return Response.json({ error: "Automation rule id must be a database UUID" }, { status: 400, headers: jsonHeaders });
+    }
+    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const rule = await updateAutomationRule(supabase, automationRuleMatch[1], body);
+    return Response.json({ rule }, { headers: jsonHeaders });
+  }
+
+  if (request.method === "DELETE" && automationRuleMatch) {
+    if (!isUuid(automationRuleMatch[1])) {
+      return Response.json({ error: "Automation rule id must be a database UUID" }, { status: 400, headers: jsonHeaders });
+    }
+    await deleteAutomationRule(supabase, automationRuleMatch[1]);
+    return Response.json({ ok: true }, { headers: jsonHeaders });
+  }
+
+  const automationRuleDuplicateMatch = url.pathname.match(/^\/api\/automation\/rules\/([^/]+)\/duplicate$/);
+  if (request.method === "POST" && automationRuleDuplicateMatch) {
+    if (!isUuid(automationRuleDuplicateMatch[1])) {
+      return Response.json({ error: "Automation rule id must be a database UUID" }, { status: 400, headers: jsonHeaders });
+    }
+    const rule = await duplicateAutomationRule(supabase, automationRuleDuplicateMatch[1]);
+    return Response.json({ rule }, { status: 201, headers: jsonHeaders });
+  }
+
+  const automationRuleTestMatch = url.pathname.match(/^\/api\/automation\/rules\/([^/]+)\/test$/);
+  if (request.method === "POST" && automationRuleTestMatch) {
+    if (!isUuid(automationRuleTestMatch[1])) {
+      return Response.json({ error: "Automation rule id must be a database UUID" }, { status: 400, headers: jsonHeaders });
+    }
+    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const result = await testAutomationRule(supabase, env, automationRuleTestMatch[1], body);
+    return Response.json(result, { headers: jsonHeaders });
+  }
+
   const scriptMatch = url.pathname.match(/^\/api\/scripts\/([^/]+)$/);
   if (request.method === "PATCH" && scriptMatch) {
     if (!isUuid(scriptMatch[1])) {
@@ -376,6 +522,14 @@ if (request.method === "GET" && url.pathname === "/api/dashboard") {
     const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
     const script = await updateMessageScript(supabase, scriptMatch[1], body);
     return Response.json({ script }, { headers: jsonHeaders });
+  }
+
+  if (request.method === "DELETE" && scriptMatch) {
+    if (!isUuid(scriptMatch[1])) {
+      return Response.json({ error: "Script id must be a database UUID" }, { status: 400, headers: jsonHeaders });
+    }
+    await deleteMessageScript(supabase, scriptMatch[1]);
+    return Response.json({ ok: true }, { headers: jsonHeaders });
   }
 
   const scriptBuilderMatch = url.pathname.match(/^\/api\/scripts\/([^/]+)\/builder$/);
@@ -441,6 +595,21 @@ if (request.method === "GET" && url.pathname === "/api/dashboard") {
     return Response.json({ conversations }, { headers: jsonHeaders });
   }
 
+  if (request.method === "GET" && url.pathname === "/api/operations/dashboard") {
+    const dashboard = await getOperationsDashboard(supabase, url);
+    return Response.json(dashboard, { headers: jsonHeaders });
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/operations/metrics") {
+    const metrics = await getOperationsMetrics(supabase, url);
+    return Response.json(metrics, { headers: jsonHeaders });
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/operations/audit-trail") {
+    const entries = await listAutomationAuditTrail(supabase, url);
+    return Response.json({ entries }, { headers: jsonHeaders });
+  }
+
   const creatorAutomationScenariosMatch = url.pathname.match(/^\/api\/creators\/([^/]+)\/automation-scenarios$/);
   if (request.method === "GET" && creatorAutomationScenariosMatch) {
     const scenarios = await listCreatorAutomationScenarios(supabase, creatorAutomationScenariosMatch[1]);
@@ -489,6 +658,54 @@ if (request.method === "GET" && url.pathname === "/api/dashboard") {
   if (request.method === "GET" && conversationMatch) {
     const conversation = await getConversationDetail(supabase, conversationMatch[1]);
     return Response.json(conversation, { headers: jsonHeaders });
+  }
+
+  const operationsConversationMatch = url.pathname.match(/^\/api\/operations\/conversations\/([^/]+)$/);
+  if (request.method === "GET" && operationsConversationMatch) {
+    const detail = await getConversationOperationsDetail(supabase, operationsConversationMatch[1]);
+    return Response.json(detail, { headers: jsonHeaders });
+  }
+
+  const operationsConversationRetryMatch = url.pathname.match(/^\/api\/operations\/conversations\/([^/]+)\/retry$/);
+  if (request.method === "POST" && operationsConversationRetryMatch) {
+    const detail = await retryOperationsConversation(supabase, env, operationsConversationRetryMatch[1]);
+    return Response.json(detail, { headers: jsonHeaders });
+  }
+
+  const operationsConversationResumeMatch = url.pathname.match(/^\/api\/operations\/conversations\/([^/]+)\/resume$/);
+  if (request.method === "POST" && operationsConversationResumeMatch) {
+    const detail = await resumeOperationsConversation(supabase, env, operationsConversationResumeMatch[1]);
+    return Response.json(detail, { headers: jsonHeaders });
+  }
+
+  const operationsConversationCancelMatch = url.pathname.match(/^\/api\/operations\/conversations\/([^/]+)\/cancel$/);
+  if (request.method === "POST" && operationsConversationCancelMatch) {
+    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const detail = await cancelOperationsConversation(
+      supabase,
+      operationsConversationCancelMatch[1],
+      typeof body.reason === "string" && body.reason.trim() ? body.reason.trim() : "Cancelled by operator"
+    );
+    return Response.json(detail, { headers: jsonHeaders });
+  }
+
+  const operationsConversationRestartMatch = url.pathname.match(/^\/api\/operations\/conversations\/([^/]+)\/restart$/);
+  if (request.method === "POST" && operationsConversationRestartMatch) {
+    const detail = await restartOperationsConversation(supabase, env, operationsConversationRestartMatch[1]);
+    return Response.json(detail, { headers: jsonHeaders });
+  }
+
+  const operationsConversationDuplicateMatch = url.pathname.match(/^\/api\/operations\/conversations\/([^/]+)\/duplicate-as-simulation$/);
+  if (request.method === "POST" && operationsConversationDuplicateMatch) {
+    const detail = await duplicateOperationsConversationAsSimulation(supabase, env, operationsConversationDuplicateMatch[1]);
+    return Response.json(detail, { headers: jsonHeaders });
+  }
+
+  const operationsConversationExportMatch = url.pathname.match(/^\/api\/operations\/conversations\/([^/]+)\/export$/);
+  if (request.method === "GET" && operationsConversationExportMatch) {
+    const detail = await getConversationOperationsDetail(supabase, operationsConversationExportMatch[1]);
+    const exported: ConversationOperationsExport = { exported_at: new Date().toISOString(), detail };
+    return Response.json(exported, { headers: jsonHeaders });
   }
 
   const conversationCancelMatch = url.pathname.match(/^\/api\/conversations\/([^/]+)\/cancel$/);
@@ -1733,6 +1950,787 @@ async function listCreatorScripts(supabase: SupabaseClient, creatorId: string) {
   }));
 }
 
+async function getScriptsWorkspace(supabase: SupabaseClient) {
+  const creatorsResult = await supabase
+    .from("of_creators")
+    .select("*")
+    .eq("active", true)
+    .order("display_name", { ascending: true, nullsFirst: false })
+    .order("username", { ascending: true });
+  assertNoError(creatorsResult.error);
+  const creators = (creatorsResult.data ?? []) as OfCreator[];
+
+  await ensureAgencySeedLibrary(supabase, creators);
+
+  const scriptsResult = await supabase
+    .from("of_message_scripts")
+    .select("*, of_creators(id, username, display_name)")
+    .order("updated_at", { ascending: false });
+  assertNoError(scriptsResult.error);
+  const scripts = (scriptsResult.data ?? []) as Array<Record<string, unknown>>;
+  const scriptIds = scripts.map((script) => String(script.id));
+  const stepsResult = scriptIds.length
+    ? await supabase.from("of_message_script_steps").select("*").in("script_id", scriptIds).order("step_order", { ascending: true })
+    : { data: [], error: null };
+  assertNoError(stepsResult.error);
+
+  const stepsByScript = new Map<string, OfMessageScriptStep[]>();
+  for (const step of (stepsResult.data ?? []) as OfMessageScriptStep[]) {
+    const existing = stepsByScript.get(step.script_id) ?? [];
+    existing.push(step);
+    stepsByScript.set(step.script_id, existing);
+  }
+
+  return {
+    creators,
+    scripts: scripts.map((script) => ({
+      ...script,
+      steps: stepsByScript.get(String(script.id)) ?? []
+    }))
+  };
+}
+
+async function getAutomationWorkspace(supabase: SupabaseClient) {
+  const creatorsResult = await supabase
+    .from("of_creators")
+    .select("*")
+    .eq("active", true)
+    .order("display_name", { ascending: true, nullsFirst: false })
+    .order("username", { ascending: true });
+  assertNoError(creatorsResult.error);
+  const creators = (creatorsResult.data ?? []) as OfCreator[];
+
+  await ensureAgencySeedLibrary(supabase, creators);
+  await ensureAutomationSeedRules(supabase, creators);
+
+  const scriptsResult = await supabase
+    .from("of_message_scripts")
+    .select("*, of_creators(id, username, display_name)")
+    .order("updated_at", { ascending: false });
+  assertNoError(scriptsResult.error);
+
+  const rules = await listAutomationRules(supabase);
+  return {
+    creators,
+    scripts: (scriptsResult.data ?? []) as OfMessageScript[],
+    rules
+  };
+}
+
+async function getAutomationRegistry(supabase: SupabaseClient): Promise<AutomationRegistryWorkspaceData> {
+  const result = await supabase
+    .from("of_automation_registry_entries")
+    .select("*")
+    .order("sort_order", { ascending: true })
+    .order("label", { ascending: true });
+  assertNoError(result.error);
+
+  const entries = (result.data ?? []) as OfAutomationRegistryEntry[];
+  return {
+    eventTypes: entries.filter((entry) => entry.kind === "event_type") as AutomationRegistryWorkspaceData["eventTypes"],
+    classifications: entries.filter((entry) => entry.kind === "conversation_classification") as AutomationRegistryWorkspaceData["classifications"],
+    routingDestinations: entries.filter((entry) => entry.kind === "routing_destination") as AutomationRegistryWorkspaceData["routingDestinations"],
+    playbookGoals: entries.filter((entry) => entry.kind === "playbook_goal") as AutomationRegistryWorkspaceData["playbookGoals"],
+    playbookStyles: entries.filter((entry) => entry.kind === "playbook_style") as AutomationRegistryWorkspaceData["playbookStyles"],
+    queueStates: entries.filter((entry) => entry.kind === "queue_state") as AutomationRegistryWorkspaceData["queueStates"]
+  };
+}
+
+async function getSettingsWorkspace(supabase: SupabaseClient, env: Env): Promise<SettingsWorkspaceData> {
+  const creatorsResult = await supabase
+    .from("of_creators")
+    .select("id, username, display_name, betterfans_account_id, status, last_sync_at, onboarding_status, active")
+    .order("display_name", { ascending: true, nullsFirst: false })
+    .order("username", { ascending: true });
+  const agencyResult = await ensureAgencySettingsRow(supabase);
+  const creatorSettingsResult = await supabase.from("of_creator_settings").select("*");
+  const latestSuccessEventResult = await supabase
+    .from("of_events")
+    .select("event_type, received_at")
+    .eq("processing_status", "processed")
+    .order("received_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  const latestFailedEventResult = await supabase
+    .from("of_events")
+    .select("event_type, received_at")
+    .eq("processing_status", "failed")
+    .order("received_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  const latestSyncRunResult = await supabase
+    .from("of_sync_runs")
+    .select("status, completed_at, started_at")
+    .order("started_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  const auditResult = await supabase.from("of_settings_audit").select("*").order("created_at", { ascending: false }).limit(20);
+  assertNoError(creatorsResult.error);
+  assertNoError(creatorSettingsResult.error);
+  assertNoError(latestSuccessEventResult.error);
+  assertNoError(latestFailedEventResult.error);
+  assertNoError(latestSyncRunResult.error);
+  assertNoError(auditResult.error);
+
+  const creators = (creatorsResult.data ?? []) as CreatorSettingsBundle["creator"][];
+  const creatorSettings = (creatorSettingsResult.data ?? []) as Array<Record<string, unknown>>;
+  const settingsByCreator = new Map(creatorSettings.map((item) => [String(item.creator_id), item]));
+  const bundles: CreatorSettingsBundle[] = [];
+  for (const creator of creators) {
+    const ensured = settingsByCreator.get(creator.id) ?? (await ensureCreatorSettingsRow(supabase, creator.id));
+    bundles.push({
+      creator,
+      preferences: normalizeCreatorPreferenceSettings(ensured),
+      ai_safety: normalizeCreatorAiSafetySettings(ensured)
+    });
+  }
+
+  return {
+    agency: normalizeAgencySettings(agencyResult),
+    creators: bundles,
+    runtime: {
+      betterfansApiKeyConfigured: Boolean(env.BETTERFANS_API_KEY),
+      betterfansBaseUrlConfigured: Boolean(env.BETTERFANS_BASE_URL),
+      supabaseConfigured: Boolean(env.SUPABASE_URL && env.SUPABASE_SERVICE_ROLE_KEY),
+      eventStreamStatus: eventStreamStatus(),
+      lastSuccessfulEventReceivedAt: latestSuccessEventResult.data?.received_at ?? null,
+      lastSuccessfulEventType: latestSuccessEventResult.data?.event_type ?? null,
+      lastFailedEventAt: latestFailedEventResult.data?.received_at ?? null,
+      lastFailedEventType: latestFailedEventResult.data?.event_type ?? null,
+      lastSyncRunAt: latestSyncRunResult.data?.completed_at ?? latestSyncRunResult.data?.started_at ?? null,
+      lastSyncRunStatus: latestSyncRunResult.data?.status ?? null
+    },
+    audit: ((auditResult.data ?? []) as SettingsAuditEntry[]).map((entry) => ({
+      ...entry,
+      payload: isRecord(entry.payload) ? entry.payload : {}
+    }))
+  };
+}
+
+async function buildDailyOperationsSnapshot(supabase: SupabaseClient) {
+  const agency = normalizeAgencySettings(await ensureAgencySettingsRow(supabase));
+  const timezone = agency.default_timezone || "UTC";
+  const recentCutoff = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+  const [outboundResult, replyResult, automationRunsResult, revenueTasksResult, relationshipsResult] = await Promise.all([
+    supabase
+      .from("of_outbound_messages")
+      .select("id, status, approval_status, created_at")
+      .gte("created_at", recentCutoff),
+    supabase
+      .from("of_conversation_instances")
+      .select("id")
+      .eq("status", "waiting_reply"),
+    supabase
+      .from("of_automation_runs")
+      .select("id, script_id, status, started_at")
+      .gte("started_at", recentCutoff),
+    supabase
+      .from("of_tasks")
+      .select("id, priority_score, status")
+      .not("status", "in", "(completed,cancelled,ignored,archived)"),
+    supabase
+      .from("of_subscriber_relationships")
+      .select("id, revenue_opportunity_score")
+      .gte("revenue_opportunity_score", 70)
+  ]);
+  assertNoError(outboundResult.error);
+  assertNoError(automationRunsResult.error);
+  assertNoError(revenueTasksResult.error);
+  assertNoError(relationshipsResult.error);
+
+  const todayKey = localDateKey(new Date(), timezone);
+  const outboundToday = (outboundResult.data ?? []).filter((row) => localDateKey(new Date(String(row.created_at)), timezone) === todayKey);
+  const replyRows = rowsOrEmptyIfMissingTable(replyResult, "of_conversation_instances");
+  const automationRunsToday = (automationRunsResult.data ?? []).filter((row) => localDateKey(new Date(String(row.started_at)), timezone) === todayKey);
+  const matchedRunsToday = automationRunsToday.filter((row) => row.status !== "skipped");
+  const scriptsTriggeredToday = new Set(matchedRunsToday.map((row) => String(row.script_id ?? "")).filter(Boolean)).size;
+  const revenueTasks = (revenueTasksResult.data ?? []).filter((row) => Number(row.priority_score ?? 0) >= 70).length;
+
+  return {
+    draftsNeedingApproval: outboundToday.filter((row) => row.status === "pending_approval" || row.approval_status === "pending").length,
+    failedSends: outboundToday.filter((row) => row.status === "failed" || row.status === "rejected").length,
+    fansNeedingReply: replyRows.length,
+    automationsMatchedToday: matchedRunsToday.length,
+    scriptsTriggeredToday,
+    revenueOpportunities: Math.max((relationshipsResult.data ?? []).length, revenueTasks)
+  };
+}
+
+async function ensureAgencySettingsRow(supabase: SupabaseClient) {
+  const existing = await supabase.from("of_agency_settings").select("*").order("created_at", { ascending: true }).limit(1).maybeSingle();
+  assertNoError(existing.error);
+  if (existing.data) return existing.data as Record<string, unknown>;
+  const inserted = await supabase
+    .from("of_agency_settings")
+    .insert({
+      default_approval_mode: "draft_for_approval",
+      default_ai_mode: "draft_only",
+      default_timezone: "Pacific/Auckland",
+      quiet_hours: { enabled: true, startHour: 22, endHour: 8 },
+      default_cooldown_minutes: 60,
+      daily_outbound_cap_per_creator: 150,
+      daily_outbound_cap_per_fan: 20
+    })
+    .select("*")
+    .single();
+  assertNoError(inserted.error);
+  return inserted.data as Record<string, unknown>;
+}
+
+async function ensureCreatorSettingsRow(supabase: SupabaseClient, creatorId: string) {
+  const existing = await supabase.from("of_creator_settings").select("*").eq("creator_id", creatorId).maybeSingle();
+  assertNoError(existing.error);
+  if (existing.data) return existing.data as Record<string, unknown>;
+  const inserted = await supabase
+    .from("of_creator_settings")
+    .insert({
+      creator_id: creatorId,
+      automation_enabled: true,
+      chat_automation_enabled: true,
+      ppv_automation_enabled: true,
+      tone_notes: null,
+      restricted_topics: [],
+      escalation_notes: null,
+      ai_behavior: defaultAiBehavior(),
+      safety: defaultSafetySettings()
+    })
+    .select("*")
+    .single();
+  assertNoError(inserted.error);
+  return inserted.data as Record<string, unknown>;
+}
+
+async function updateAgencySettings(supabase: SupabaseClient, body: Record<string, unknown>) {
+  const current = await ensureAgencySettingsRow(supabase);
+  const patch = normalizeAgencySettingsPatch(body, current);
+  const result = await supabase.from("of_agency_settings").update(patch).eq("id", current.id).select("*").single();
+  assertNoError(result.error);
+  await insertSettingsAudit(supabase, {
+    entityType: "agency",
+    entityId: String(current.id),
+    summary: "Agency defaults updated",
+    payload: patch
+  });
+  return normalizeAgencySettings(result.data as Record<string, unknown>);
+}
+
+async function updateCreatorPreferences(supabase: SupabaseClient, creatorId: string, body: Record<string, unknown>) {
+  const current = await ensureCreatorSettingsRow(supabase, creatorId);
+  const patch = normalizeCreatorPreferencesPatch(body, current);
+  const result = await supabase.from("of_creator_settings").update(patch).eq("creator_id", creatorId).select("*").single();
+  assertNoError(result.error);
+  await insertSettingsAudit(supabase, {
+    entityType: "creator",
+    entityId: creatorId,
+    summary: "Creator preferences updated",
+    payload: patch
+  });
+  return normalizeCreatorPreferenceSettings(result.data as Record<string, unknown>);
+}
+
+async function updateCreatorAiSafety(supabase: SupabaseClient, creatorId: string, body: Record<string, unknown>) {
+  const current = await ensureCreatorSettingsRow(supabase, creatorId);
+  const patch = normalizeCreatorAiSafetyPatch(body, current);
+  const result = await supabase.from("of_creator_settings").update(patch).eq("creator_id", creatorId).select("*").single();
+  assertNoError(result.error);
+  await insertSettingsAudit(supabase, {
+    entityType: "creator",
+    entityId: creatorId,
+    summary: "Creator AI and safety settings updated",
+    payload: patch
+  });
+  return normalizeCreatorAiSafetySettings(result.data as Record<string, unknown>);
+}
+
+async function insertSettingsAudit(
+  supabase: SupabaseClient,
+  input: { entityType: "agency" | "creator"; entityId: string | null; summary: string; payload: Record<string, unknown> }
+) {
+  const result = await supabase.from("of_settings_audit").insert({
+    entity_type: input.entityType,
+    entity_id: input.entityId,
+    actor_label: "operator",
+    change_summary: input.summary,
+    payload: input.payload
+  });
+  assertNoError(result.error);
+}
+
+function normalizeAgencySettings(value: Record<string, unknown>): AgencyDefaultsSettings {
+  return {
+    id: String(value.id),
+    default_approval_mode: parseActionMode(value.default_approval_mode, "draft_for_approval"),
+    default_ai_mode: normalizeAiModeString(value.default_ai_mode),
+    default_timezone: stringValue(value.default_timezone, "Pacific/Auckland"),
+    quiet_hours: normalizeQuietHours(value.quiet_hours),
+    default_cooldown_minutes: nonNegativeInteger(value.default_cooldown_minutes, 60),
+    daily_outbound_cap_per_creator: nonNegativeInteger(value.daily_outbound_cap_per_creator, 150),
+    daily_outbound_cap_per_fan: nonNegativeInteger(value.daily_outbound_cap_per_fan, 20),
+    created_at: String(value.created_at ?? new Date().toISOString()),
+    updated_at: String(value.updated_at ?? new Date().toISOString())
+  };
+}
+
+function normalizeCreatorPreferenceSettings(value: Record<string, unknown>): CreatorPreferenceSettings {
+  return {
+    id: String(value.id),
+    creator_id: String(value.creator_id),
+    automation_enabled: Boolean(value.automation_enabled),
+    chat_automation_enabled: Boolean(value.chat_automation_enabled),
+    ppv_automation_enabled: Boolean(value.ppv_automation_enabled),
+    tone_notes: typeof value.tone_notes === "string" ? value.tone_notes : null,
+    restricted_topics: normalizeStringArray(value.restricted_topics),
+    escalation_notes: typeof value.escalation_notes === "string" ? value.escalation_notes : null,
+    created_at: String(value.created_at ?? new Date().toISOString()),
+    updated_at: String(value.updated_at ?? new Date().toISOString())
+  };
+}
+
+function normalizeCreatorAiSafetySettings(value: Record<string, unknown>): CreatorAiSafetySettings {
+  return {
+    id: String(value.id),
+    creator_id: String(value.creator_id),
+    ai_behavior: normalizeAiBehavior(value.ai_behavior),
+    safety: normalizeSafetySettings(value.safety),
+    created_at: String(value.created_at ?? new Date().toISOString()),
+    updated_at: String(value.updated_at ?? new Date().toISOString())
+  };
+}
+
+function normalizeAgencySettingsPatch(body: Record<string, unknown>, current: Record<string, unknown>) {
+  return {
+    default_approval_mode: "default_approval_mode" in body || "defaultApprovalMode" in body
+      ? parseActionMode("default_approval_mode" in body ? body.default_approval_mode : body.defaultApprovalMode, parseActionMode(current.default_approval_mode, "draft_for_approval"))
+      : parseActionMode(current.default_approval_mode, "draft_for_approval"),
+    default_ai_mode: "default_ai_mode" in body || "defaultAiMode" in body
+      ? normalizeAiModeString("default_ai_mode" in body ? body.default_ai_mode : body.defaultAiMode)
+      : normalizeAiModeString(current.default_ai_mode),
+    default_timezone: "default_timezone" in body || "defaultTimezone" in body
+      ? stringValue("default_timezone" in body ? body.default_timezone : body.defaultTimezone, "Pacific/Auckland")
+      : stringValue(current.default_timezone, "Pacific/Auckland"),
+    quiet_hours: "quiet_hours" in body || "quietHours" in body
+      ? normalizeQuietHours("quiet_hours" in body ? body.quiet_hours : body.quietHours)
+      : normalizeQuietHours(current.quiet_hours),
+    default_cooldown_minutes: "default_cooldown_minutes" in body || "defaultCooldownMinutes" in body
+      ? nonNegativeInteger("default_cooldown_minutes" in body ? body.default_cooldown_minutes : body.defaultCooldownMinutes, 60)
+      : nonNegativeInteger(current.default_cooldown_minutes, 60),
+    daily_outbound_cap_per_creator: "daily_outbound_cap_per_creator" in body || "dailyOutboundCapPerCreator" in body
+      ? nonNegativeInteger("daily_outbound_cap_per_creator" in body ? body.daily_outbound_cap_per_creator : body.dailyOutboundCapPerCreator, 150)
+      : nonNegativeInteger(current.daily_outbound_cap_per_creator, 150),
+    daily_outbound_cap_per_fan: "daily_outbound_cap_per_fan" in body || "dailyOutboundCapPerFan" in body
+      ? nonNegativeInteger("daily_outbound_cap_per_fan" in body ? body.daily_outbound_cap_per_fan : body.dailyOutboundCapPerFan, 20)
+      : nonNegativeInteger(current.daily_outbound_cap_per_fan, 20)
+  };
+}
+
+function normalizeCreatorPreferencesPatch(body: Record<string, unknown>, current: Record<string, unknown>) {
+  return {
+    automation_enabled: "automation_enabled" in body || "automationEnabled" in body ? Boolean("automation_enabled" in body ? body.automation_enabled : body.automationEnabled) : Boolean(current.automation_enabled),
+    chat_automation_enabled: "chat_automation_enabled" in body || "chatAutomationEnabled" in body ? Boolean("chat_automation_enabled" in body ? body.chat_automation_enabled : body.chatAutomationEnabled) : Boolean(current.chat_automation_enabled),
+    ppv_automation_enabled: "ppv_automation_enabled" in body || "ppvAutomationEnabled" in body ? Boolean("ppv_automation_enabled" in body ? body.ppv_automation_enabled : body.ppvAutomationEnabled) : Boolean(current.ppv_automation_enabled),
+    tone_notes: "tone_notes" in body || "toneNotes" in body ? nullableString("tone_notes" in body ? body.tone_notes : body.toneNotes) : nullableString(current.tone_notes),
+    restricted_topics: "restricted_topics" in body || "restrictedTopics" in body ? normalizeStringArray("restricted_topics" in body ? body.restricted_topics : body.restrictedTopics) : normalizeStringArray(current.restricted_topics),
+    escalation_notes: "escalation_notes" in body || "escalationNotes" in body ? nullableString("escalation_notes" in body ? body.escalation_notes : body.escalationNotes) : nullableString(current.escalation_notes)
+  };
+}
+
+function normalizeCreatorAiSafetyPatch(body: Record<string, unknown>, current: Record<string, unknown>) {
+  const currentAi = normalizeAiBehavior(current.ai_behavior);
+  const currentSafety = normalizeSafetySettings(current.safety);
+  const aiInput = isRecord(body.ai_behavior) ? body.ai_behavior : isRecord(body.aiBehavior) ? body.aiBehavior : {};
+  const safetyInput = isRecord(body.safety) ? body.safety : {};
+  return {
+    ai_behavior: normalizeAiBehavior({ ...currentAi, ...aiInput }),
+    safety: normalizeSafetySettings({ ...currentSafety, ...safetyInput })
+  };
+}
+
+function normalizeQuietHours(value: unknown) {
+  const record = isRecord(value) ? value : {};
+  return {
+    enabled: typeof record.enabled === "boolean" ? record.enabled : true,
+    startHour: boundedHour(record.startHour, 22),
+    endHour: boundedHour(record.endHour, 8)
+  };
+}
+
+function boundedHour(value: unknown, fallback: number) {
+  const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : fallback;
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(0, Math.min(23, Math.floor(parsed)));
+}
+
+function normalizeAiModeString(value: unknown): AgencyDefaultsSettings["default_ai_mode"] {
+  return value === "disabled" || value === "draft_only" || value === "approval_required" || value === "auto_send" ? value : "draft_only";
+}
+
+function defaultAiBehavior() {
+  return {
+    ai_mode: "draft_only",
+    max_message_length: 240,
+    emoji_level: "light",
+    flirty_level: "medium",
+    sales_aggressiveness: "balanced",
+    use_creator_memory: true,
+    escalate_high_value_fan_threshold: 100
+  };
+}
+
+function defaultSafetySettings() {
+  return {
+    require_approval_first_message: true,
+    require_approval_ppv_offers: true,
+    require_approval_above_spend_threshold: 100,
+    require_approval_vip_fans: true,
+    require_approval_custom_requests: true,
+    restricted_keywords: [] as string[],
+    allow_auto_send_for_vip: false
+  };
+}
+
+function normalizeAiBehavior(value: unknown) {
+  const record = isRecord(value) ? value : {};
+  return {
+    ai_mode: normalizeAiModeString(record.ai_mode),
+    max_message_length: Math.max(40, nonNegativeInteger(record.max_message_length, 240)),
+    emoji_level: normalizeEmojiLevel(record.emoji_level),
+    flirty_level: normalizeFlirtyLevel(record.flirty_level),
+    sales_aggressiveness: normalizeSalesAggressiveness(record.sales_aggressiveness),
+    use_creator_memory: typeof record.use_creator_memory === "boolean" ? record.use_creator_memory : true,
+    escalate_high_value_fan_threshold: nonNegativeInteger(record.escalate_high_value_fan_threshold, 100)
+  };
+}
+
+function normalizeSafetySettings(value: unknown) {
+  const record = isRecord(value) ? value : {};
+  return {
+    require_approval_first_message: typeof record.require_approval_first_message === "boolean" ? record.require_approval_first_message : true,
+    require_approval_ppv_offers: typeof record.require_approval_ppv_offers === "boolean" ? record.require_approval_ppv_offers : true,
+    require_approval_above_spend_threshold: nonNegativeInteger(record.require_approval_above_spend_threshold, 100),
+    require_approval_vip_fans: typeof record.require_approval_vip_fans === "boolean" ? record.require_approval_vip_fans : true,
+    require_approval_custom_requests: typeof record.require_approval_custom_requests === "boolean" ? record.require_approval_custom_requests : true,
+    restricted_keywords: normalizeStringArray(record.restricted_keywords),
+    allow_auto_send_for_vip: typeof record.allow_auto_send_for_vip === "boolean" ? record.allow_auto_send_for_vip : false
+  };
+}
+
+async function evaluateOutboundPolicy(supabase: SupabaseClient, input: OutboundPolicyContext): Promise<OutboundPolicyDecision> {
+  if (input.requestedActionMode !== "auto_send" || input.executionMode === "simulation") {
+    return {
+      requestedActionMode: input.requestedActionMode,
+      resolvedActionMode: input.requestedActionMode === "task_only" ? "task_only" : input.requestedActionMode,
+      reasons: [],
+      summary: input.executionMode === "simulation" ? "Simulation mode bypasses production send guardrails." : "Message already requires approval.",
+      snapshot: { execution_mode: input.executionMode }
+    };
+  }
+
+  const agency = normalizeAgencySettings(await ensureAgencySettingsRow(supabase));
+  const creatorSettings = await ensureCreatorSettingsRow(supabase, input.creatorId);
+  const creatorPreferences = normalizeCreatorPreferenceSettings(creatorSettings);
+  const creatorAiSafety = normalizeCreatorAiSafetySettings(creatorSettings);
+  const relationship = input.relationshipId
+    ? await supabase.from("of_subscriber_relationships").select("*").eq("id", input.relationshipId).maybeSingle()
+    : await supabase.from("of_subscriber_relationships").select("*").eq("creator_id", input.creatorId).eq("betterfans_subscriber_id", input.fanId).maybeSingle();
+  const subscriber = input.subscriberId
+    ? await supabase.from("of_subscribers").select("*").eq("id", input.subscriberId).maybeSingle()
+    : await supabase.from("of_subscribers").select("*").eq("creator_id", input.creatorId).eq("betterfans_subscriber_id", input.fanId).maybeSingle();
+  const creatorOutboundHistory = await supabase
+    .from("of_outbound_messages")
+    .select("status, created_at")
+    .eq("creator_id", input.creatorId)
+    .gte("created_at", new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString());
+  const fanOutboundHistory = await supabase
+    .from("of_outbound_messages")
+    .select("status, created_at")
+    .eq("creator_id", input.creatorId)
+    .eq("fan_id", input.fanId)
+    .gte("created_at", new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString());
+  assertNoError(relationship.error);
+  assertNoError(subscriber.error);
+  assertNoError(creatorOutboundHistory.error);
+  assertNoError(fanOutboundHistory.error);
+
+  const builderConfig = input.script ? normalizeBuilderConfig(input.script.builder_config) : { schemaVersion: 1, variables: [], workspace: defaultWorkspaceConfig() };
+  const stepMetadata = normalizeStepMetadata(input.step?.metadata);
+  const relationshipRecord = (relationship.data ?? null) as Record<string, unknown> | null;
+  const subscriberRecord = (subscriber.data ?? null) as Record<string, unknown> | null;
+  const reasons: string[] = [];
+  const agencyTimezone = agency.default_timezone || "UTC";
+  const todayKey = localDateKey(new Date(), agencyTimezone);
+  const creatorOutboundToday = (creatorOutboundHistory.data ?? []).filter((row) => localDateKey(new Date(String(row.created_at)), agencyTimezone) === todayKey);
+  const fanOutboundToday = (fanOutboundHistory.data ?? []).filter((row) => localDateKey(new Date(String(row.created_at)), agencyTimezone) === todayKey);
+  const creatorDailyCount = creatorOutboundToday.filter((row) => row.status === "sent" || row.status === "sending" || row.status === "queued").length;
+  const fanDailyCount = fanOutboundToday.filter((row) => row.status === "sent" || row.status === "sending" || row.status === "queued").length;
+  const priorSentCount = fanOutboundToday.filter((row) => row.status === "sent").length;
+  const messageText = input.messageText.trim();
+  const lowerMessage = messageText.toLowerCase();
+  const scriptAction = input.script ? scriptActionMode(input.script) : "draft_for_approval";
+  const workspaceApprovalMode = builderConfig.workspace?.approval?.mode ?? "always_approve";
+  const workspaceAiMode = builderConfig.workspace?.ai?.mode ?? "draft_only";
+  const relationshipSpend = Number(relationshipRecord?.lifetime_spend ?? subscriberRecord?.total_spend ?? 0);
+  const vipLike = String(relationshipRecord?.persona_key ?? "").toLowerCase() === "vip" || Number(relationshipRecord?.vip_score ?? 0) >= 80;
+  const customContent = looksLikeCustomContent(lowerMessage, input.event);
+  const ppvOffer = Boolean(stepMetadata.ppvTitle) || Number(stepMetadata.ppvPrice ?? 0) > 0 || looksLikePpvOffer(lowerMessage);
+  const containsRestrictedKeyword = [
+    ...creatorAiSafety.safety.restricted_keywords,
+    ...creatorPreferences.restricted_topics
+  ].some((keyword) => keyword && lowerMessage.includes(keyword.toLowerCase()));
+  const quietHoursActive = isQuietHoursActive(agency.quiet_hours, agencyTimezone);
+  const firstMessage = priorSentCount === 0;
+  const highValue = relationshipSpend >= creatorAiSafety.ai_behavior.escalate_high_value_fan_threshold || relationshipSpend >= creatorAiSafety.safety.require_approval_above_spend_threshold;
+  const aiGenerated = stepMetadata.messageGenerationMode === "ai_generated" || workspaceAiMode !== "disabled";
+
+  if (agency.default_approval_mode !== "auto_send") reasons.push(`Agency default approval mode is ${agency.default_approval_mode}.`);
+  if (!creatorPreferences.automation_enabled) reasons.push("Creator automation is disabled.");
+  if (input.event && String(input.event.event_type ?? "") === "chat_message" && !creatorPreferences.chat_automation_enabled) reasons.push("Creator chat automation is disabled.");
+  if (ppvOffer && !creatorPreferences.ppv_automation_enabled) reasons.push("Creator PPV automation is disabled.");
+  if (scriptAction !== "auto_send") reasons.push(`Script action mode is ${scriptAction}.`);
+  if (workspaceApprovalMode !== "always_approve") reasons.push(`Script workspace approval mode is ${workspaceApprovalMode}.`);
+  if (aiGenerated && agency.default_ai_mode !== "auto_send") reasons.push(`Agency AI mode is ${agency.default_ai_mode}.`);
+  if (aiGenerated && creatorAiSafety.ai_behavior.ai_mode !== "auto_send") reasons.push(`Creator AI mode is ${creatorAiSafety.ai_behavior.ai_mode}.`);
+  if (workspaceAiMode !== "auto_send" && aiGenerated) reasons.push(`Script AI mode is ${workspaceAiMode}.`);
+  if (quietHoursActive) reasons.push("Agency quiet hours are active.");
+  if (agency.daily_outbound_cap_per_creator > 0 && creatorDailyCount >= agency.daily_outbound_cap_per_creator) reasons.push("Creator daily outbound cap reached.");
+  if (agency.daily_outbound_cap_per_fan > 0 && fanDailyCount >= agency.daily_outbound_cap_per_fan) reasons.push("Fan daily outbound cap reached.");
+  if (firstMessage && creatorAiSafety.safety.require_approval_first_message) reasons.push("First message requires approval.");
+  if (ppvOffer && creatorAiSafety.safety.require_approval_ppv_offers) reasons.push("PPV offers require approval.");
+  if (highValue) reasons.push("High-value fans require approval.");
+  if (vipLike && creatorAiSafety.safety.require_approval_vip_fans && !creatorAiSafety.safety.allow_auto_send_for_vip) reasons.push("VIP fans require approval.");
+  if (customContent && creatorAiSafety.safety.require_approval_custom_requests) reasons.push("Custom-content conversations require approval.");
+  if (containsRestrictedKeyword) reasons.push("Message contains a restricted keyword or restricted topic.");
+  if (!relationship.data && !subscriber.data) reasons.push("Subscriber context is incomplete, so the message defaults to approval.");
+
+  return {
+    requestedActionMode: input.requestedActionMode,
+    resolvedActionMode: reasons.length ? "draft_for_approval" : "auto_send",
+    reasons,
+    summary: reasons.length ? `Auto-send downgraded to approval: ${reasons.join(" ")}` : "All send guardrails passed.",
+    snapshot: {
+      agency_approval_mode: agency.default_approval_mode,
+      agency_ai_mode: agency.default_ai_mode,
+      creator_ai_mode: creatorAiSafety.ai_behavior.ai_mode,
+      script_action_mode: scriptAction,
+      script_ai_mode: workspaceAiMode,
+      script_approval_mode: workspaceApprovalMode,
+      quiet_hours_active: quietHoursActive,
+      creator_daily_count: creatorDailyCount,
+      fan_daily_count: fanDailyCount,
+      prior_sent_count: priorSentCount,
+      vip_like: vipLike,
+      custom_content: customContent,
+      ppv_offer: ppvOffer,
+      contains_restricted_keyword: containsRestrictedKeyword,
+      source_rule_id: input.sourceRuleId ?? null,
+      source_rule_name: input.sourceRuleName ?? null
+    }
+  };
+}
+
+function looksLikePpvOffer(lowerMessage: string) {
+  return /\bppv\b|\blocked\b|\bunlock\b|\$\d+/.test(lowerMessage);
+}
+
+function looksLikeCustomContent(lowerMessage: string, event: Record<string, unknown> | null) {
+  if (/\bcustom\b|\bpersonalized\b|\bmenu\b/.test(lowerMessage)) return true;
+  const payloadText = event && isRecord(event.payload) ? JSON.stringify(event.payload).toLowerCase() : "";
+  return payloadText.includes("custom");
+}
+
+function normalizeEmojiLevel(value: unknown): SettingsEmojiLevel {
+  return value === "none" || value === "light" || value === "moderate" || value === "heavy" ? value : "light";
+}
+
+function normalizeFlirtyLevel(value: unknown): SettingsFlirtyLevel {
+  return value === "low" || value === "medium" || value === "high" ? value : "medium";
+}
+
+function normalizeSalesAggressiveness(value: unknown): SettingsSalesAggressiveness {
+  return value === "soft" || value === "balanced" || value === "assertive" ? value : "balanced";
+}
+
+function nullableString(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+async function listAutomationRules(supabase: SupabaseClient) {
+  const rulesResult = await supabase
+    .from("of_automation_rules")
+    .select("*, selected_script:of_message_scripts(id, name, status, trigger_event_type, category), creator:of_creators(id, username, display_name)")
+    .order("updated_at", { ascending: false });
+  assertNoError(rulesResult.error);
+  const rules = (rulesResult.data ?? []) as OfAutomationRule[];
+  if (!rules.length) return rules;
+
+  const simulationResult = await supabase
+    .from("of_automation_simulations")
+    .select("id, rule_id, creator_id, event_type, started_at, updated_at, runtime_state, script:of_message_scripts(id, name)")
+    .not("rule_id", "is", null)
+    .order("updated_at", { ascending: false })
+    .limit(100);
+  assertNoError(simulationResult.error);
+  const rows = (simulationResult.data ?? []) as Array<Record<string, unknown>>;
+  const byRule = new Map<string, AutomationRuleSimulationResult[]>();
+  for (const row of rows) {
+    const ruleId = typeof row.rule_id === "string" ? row.rule_id : null;
+    if (!ruleId) continue;
+    const runtimeState = isRecord(row.runtime_state) ? row.runtime_state : {};
+    const recent = byRule.get(ruleId) ?? [];
+    const action = isAutomationRuleAction(runtimeState.action) ? runtimeState.action : "run_script";
+    recent.push({
+      matched: runtimeState.matched !== false,
+      triggerMatched: runtimeState.triggerMatched !== false,
+      action,
+      scriptId: isRecord(row.script) && typeof row.script.id === "string" ? row.script.id : null,
+      scriptName: isRecord(row.script) && typeof row.script.name === "string" ? row.script.name : null,
+      creatorId: typeof row.creator_id === "string" ? row.creator_id : "",
+      creatorName: typeof runtimeState.creatorName === "string" ? runtimeState.creatorName : "Creator",
+      simulatedAt: typeof row.updated_at === "string" ? row.updated_at : typeof row.started_at === "string" ? row.started_at : new Date().toISOString(),
+      eventType: typeof row.event_type === "string" ? row.event_type : "manual",
+      conditions: Array.isArray(runtimeState.conditions) ? (runtimeState.conditions as AutomationRuleConditionSummary[]) : [],
+      automationSimulationId: typeof row.id === "string" ? row.id : null,
+      outboundMessages: [],
+      summary: typeof runtimeState.summary === "string" ? runtimeState.summary : "Recent simulated run"
+    });
+    byRule.set(ruleId, recent.slice(0, 3));
+  }
+
+  return rules.map((rule) => ({
+    ...rule,
+    recent_simulations: byRule.get(rule.id) ?? []
+  }));
+}
+
+async function createAutomationRule(supabase: SupabaseClient, body: Record<string, unknown>) {
+  const payload = normalizeAutomationRuleInput(body);
+  const result = await supabase.from("of_automation_rules").insert(payload).select("*").single();
+  assertNoError(result.error);
+  return getAutomationRuleById(supabase, String(result.data.id));
+}
+
+async function updateAutomationRule(supabase: SupabaseClient, ruleId: string, body: Record<string, unknown>) {
+  const patch = normalizeAutomationRulePatch(body);
+  const result = await supabase.from("of_automation_rules").update(patch).eq("id", ruleId).select("*").single();
+  assertNoError(result.error);
+  return getAutomationRuleById(supabase, ruleId);
+}
+
+async function deleteAutomationRule(supabase: SupabaseClient, ruleId: string) {
+  const result = await supabase.from("of_automation_rules").delete().eq("id", ruleId);
+  assertNoError(result.error);
+}
+
+async function duplicateAutomationRule(supabase: SupabaseClient, ruleId: string) {
+  const existing = await supabase.from("of_automation_rules").select("*").eq("id", ruleId).single();
+  assertNoError(existing.error);
+  if (!existing.data) throw new Error("Automation rule not found");
+  const source = existing.data as Record<string, unknown>;
+  const created = await createAutomationRule(supabase, {
+    ...source,
+    name: `${String(source.name ?? "Automation Rule")} Copy`,
+    status: "draft"
+  });
+  return created;
+}
+
+async function getAutomationRuleById(supabase: SupabaseClient, ruleId: string) {
+  const result = await supabase
+    .from("of_automation_rules")
+    .select("*, selected_script:of_message_scripts(id, name, status, trigger_event_type, category), creator:of_creators(id, username, display_name)")
+    .eq("id", ruleId)
+    .single();
+  assertNoError(result.error);
+  return result.data as OfAutomationRule;
+}
+
+function normalizeAutomationRuleInput(body: Record<string, unknown>) {
+  const patch = normalizeAutomationRulePatch(body);
+  if (typeof patch.name !== "string" || !patch.name.trim()) throw new Error("Automation rule name is required");
+  return {
+    name: patch.name,
+    description: patch.description ?? null,
+    creator_scope: patch.creator_scope ?? "selected_creator",
+    creator_id: patch.creator_id ?? null,
+    status: patch.status ?? "draft",
+    trigger_type: patch.trigger_type ?? "manual",
+    action_type: patch.action_type ?? "run_script",
+    selected_script_id: patch.selected_script_id ?? null,
+    approval_mode: patch.approval_mode ?? "draft_for_approval",
+    conditions: patch.conditions ?? [],
+    cooldown_minutes: patch.cooldown_minutes ?? 0,
+    frequency_limit: patch.frequency_limit ?? 1,
+    metadata: patch.metadata ?? {},
+    last_triggered_at: null
+  };
+}
+
+function normalizeAutomationRulePatch(body: Record<string, unknown>) {
+  const patch: Record<string, unknown> = {};
+  if ("name" in body) patch.name = stringValue(body.name).trim();
+  if ("description" in body) patch.description = typeof body.description === "string" ? body.description.trim() || null : null;
+  if ("creator_scope" in body || "creatorScope" in body) {
+    const value = "creator_scope" in body ? body.creator_scope : body.creatorScope;
+    patch.creator_scope = isCreatorScope(value) ? value : "selected_creator";
+  }
+  if ("creator_id" in body || "creatorId" in body) {
+    const value = "creator_id" in body ? body.creator_id : body.creatorId;
+    patch.creator_id = typeof value === "string" && isUuid(value) ? value : null;
+  }
+  if ("status" in body) patch.status = isAutomationRuleStatus(body.status) ? body.status : "draft";
+  if ("trigger_type" in body || "triggerType" in body) {
+    const value = "trigger_type" in body ? body.trigger_type : body.triggerType;
+    patch.trigger_type = isAutomationRuleTrigger(value) ? value : "manual";
+  }
+  if ("action_type" in body || "actionType" in body) {
+    const value = "action_type" in body ? body.action_type : body.actionType;
+    patch.action_type = isAutomationRuleAction(value) ? value : "run_script";
+  }
+  if ("selected_script_id" in body || "selectedScriptId" in body) {
+    const value = "selected_script_id" in body ? body.selected_script_id : body.selectedScriptId;
+    patch.selected_script_id = typeof value === "string" && isUuid(value) ? value : null;
+  }
+  if ("approval_mode" in body || "approvalMode" in body) {
+    const value = "approval_mode" in body ? body.approval_mode : body.approvalMode;
+    patch.approval_mode = parseActionMode(value, "draft_for_approval");
+  }
+  if ("conditions" in body) patch.conditions = normalizeAutomationRuleConditions(body.conditions);
+  if ("cooldown_minutes" in body || "cooldownMinutes" in body) {
+    const value = "cooldown_minutes" in body ? body.cooldown_minutes : body.cooldownMinutes;
+    patch.cooldown_minutes = nonNegativeInteger(value, 0);
+  }
+  if ("frequency_limit" in body || "frequencyLimit" in body) {
+    const value = "frequency_limit" in body ? body.frequency_limit : body.frequencyLimit;
+    patch.frequency_limit = Math.max(1, nonNegativeInteger(value, 1));
+  }
+  if ("metadata" in body) patch.metadata = isRecord(body.metadata) ? body.metadata : {};
+  return patch;
+}
+
+function normalizeAutomationRuleConditions(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  return value.map(normalizeCondition).filter((item): item is ScriptBuilderCondition => item !== null);
+}
+
+function isAutomationRuleStatus(value: unknown): value is AutomationRuleStatus {
+  return value === "active" || value === "draft" || value === "paused" || value === "archived";
+}
+
+function isAutomationRuleTrigger(value: unknown): value is AutomationRuleTriggerType {
+  return value === "new_subscriber" || value === "subscription_expiring" || value === "subscription_renewed" || value === "no_chat_activity" || value === "new_inbound_message" || value === "ppv_purchased" || value === "high_spender_detected" || value === "fan_inactive" || value === "manual" || value === "birthday" || value === "vip";
+}
+
+function isAutomationRuleAction(value: unknown): value is AutomationRuleActionType {
+  return value === "run_script" || value === "create_task" || value === "queue_outbound_draft" || value === "notify_agency";
+}
+
+function isCreatorScope(value: unknown): value is AutomationCreatorScope {
+  return value === "all_creators" || value === "selected_creator";
+}
+
+function rowAction(value: unknown) {
+  return typeof value === "string" ? value : "";
+}
+
 async function createMessageScript(supabase: SupabaseClient, creatorId: string, body: Partial<MessageScriptTemplate>) {
   if (!body.name?.trim()) throw new Error("Script name is required");
   if (!body.triggerEventType?.trim()) throw new Error("Script triggerEventType is required");
@@ -1904,6 +2902,448 @@ async function duplicateScriptDefinition(supabase: SupabaseClient, scriptId: str
   return created;
 }
 
+async function deleteMessageScript(supabase: SupabaseClient, scriptId: string) {
+  const result = await supabase.from("of_message_scripts").delete().eq("id", scriptId);
+  assertNoError(result.error);
+}
+
+async function ensureAgencySeedLibrary(supabase: SupabaseClient, creators: OfCreator[]) {
+  for (const creator of creators) {
+    const existing = await supabase.from("of_message_scripts").select("name").eq("creator_id", creator.id);
+    assertNoError(existing.error);
+    const existingNames = new Set((existing.data ?? []).map((item) => String(item.name).toLowerCase()));
+    for (const template of agencySeedLibrary()) {
+      if (existingNames.has(template.name.toLowerCase())) continue;
+      try {
+        await createMessageScript(supabase, creator.id, template);
+      } catch (error) {
+        if (!isDuplicateKeyError(error)) throw error;
+      }
+    }
+  }
+}
+
+async function ensureAutomationSeedRules(supabase: SupabaseClient, creators: OfCreator[]) {
+  for (const creator of creators) {
+    const scriptsResult = await supabase.from("of_message_scripts").select("id, name").eq("creator_id", creator.id);
+    assertNoError(scriptsResult.error);
+    const scriptByName = new Map((scriptsResult.data ?? []).map((item) => [String(item.name).toLowerCase(), String(item.id)]));
+    const rulesResult = await supabase.from("of_automation_rules").select("name").eq("creator_id", creator.id);
+    assertNoError(rulesResult.error);
+    const existing = new Set((rulesResult.data ?? []).map((item) => String(item.name).toLowerCase()));
+
+    for (const seed of automationRuleSeeds()) {
+      if (existing.has(seed.name.toLowerCase())) continue;
+      const scriptId = scriptByName.get(seed.scriptName.toLowerCase()) ?? null;
+      try {
+        await createAutomationRule(supabase, {
+          name: seed.name,
+          description: seed.description,
+          creator_scope: "selected_creator",
+          creator_id: creator.id,
+          status: "draft",
+          trigger_type: seed.triggerType,
+          action_type: "run_script",
+          selected_script_id: scriptId,
+          approval_mode: seed.approvalMode,
+          conditions: seed.conditions,
+          cooldown_minutes: seed.cooldownMinutes,
+          frequency_limit: seed.frequencyLimit,
+          metadata: { seed: true, seed_key: seed.key }
+        });
+      } catch (error) {
+        if (!isDuplicateKeyError(error)) throw error;
+      }
+    }
+  }
+}
+
+function automationRuleSeeds() {
+  return [
+    {
+      key: "new_subscriber_welcome",
+      name: "New subscriber -> Welcome New Subscriber",
+      description: "Trigger the standard welcome playbook as soon as a new fan comes in.",
+      triggerType: "new_subscriber" as const,
+      scriptName: "Welcome New Subscriber",
+      approvalMode: "draft_for_approval" as const,
+      cooldownMinutes: 60,
+      frequencyLimit: 1,
+      conditions: []
+    },
+    {
+      key: "new_subscriber_ppv",
+      name: "New subscriber -> Welcome + PPV",
+      description: "Queue a stronger monetisation follow-up for new subscribers when you want a warm PPV offer.",
+      triggerType: "new_subscriber" as const,
+      scriptName: "Welcome + PPV",
+      approvalMode: "draft_for_approval" as const,
+      cooldownMinutes: 120,
+      frequencyLimit: 1,
+      conditions: [condition("relationship", "lifetime_spend", "gte", "0")]
+    },
+    {
+      key: "expiring_tomorrow",
+      name: "Expiring tomorrow -> Expiring Tomorrow",
+      description: "Run urgent retention outreach for subscribers whose expiration window is closing.",
+      triggerType: "subscription_expiring" as const,
+      scriptName: "Expiring Tomorrow",
+      approvalMode: "draft_for_approval" as const,
+      cooldownMinutes: 360,
+      frequencyLimit: 1,
+      conditions: [condition("event", "payload.days_until_expiry", "lte", "1")]
+    },
+    {
+      key: "renewal_reminder",
+      name: "Renewal reminder -> Renewal Reminder",
+      description: "Nudge warm subscribers before renewal with a softer save message.",
+      triggerType: "subscription_renewed" as const,
+      scriptName: "Renewal Reminder",
+      approvalMode: "draft_for_approval" as const,
+      cooldownMinutes: 1440,
+      frequencyLimit: 1,
+      conditions: []
+    },
+    {
+      key: "high_spender",
+      name: "High spender -> High Spender Follow-up",
+      description: "Flag strong spenders into a premium follow-up script.",
+      triggerType: "high_spender_detected" as const,
+      scriptName: "High Spender Follow-up",
+      approvalMode: "draft_for_approval" as const,
+      cooldownMinutes: 240,
+      frequencyLimit: 2,
+      conditions: [condition("relationship", "lifetime_spend", "gte", "100")]
+    },
+    {
+      key: "vip",
+      name: "VIP -> VIP Thank You",
+      description: "Protect VIP relationship quality with a gratitude touchpoint.",
+      triggerType: "vip" as const,
+      scriptName: "VIP Thank You",
+      approvalMode: "task_only" as const,
+      cooldownMinutes: 1440,
+      frequencyLimit: 1,
+      conditions: [condition("relationship", "vip_score", "gte", "75")]
+    },
+    {
+      key: "no_chat_7d",
+      name: "No chat 7 days -> Reactivate Subscriber",
+      description: "Re-engage a fan who has gone cold in the inbox for a week.",
+      triggerType: "no_chat_activity" as const,
+      scriptName: "Reactivate Subscriber",
+      approvalMode: "draft_for_approval" as const,
+      cooldownMinutes: 10080,
+      frequencyLimit: 1,
+      conditions: [condition("relationship", "last_subscriber_message_at", "within_days", "7")]
+    },
+    {
+      key: "birthday",
+      name: "Birthday -> Birthday Message",
+      description: "Celebrate a fan birthday with a safe personalised message.",
+      triggerType: "birthday" as const,
+      scriptName: "Birthday Message",
+      approvalMode: "draft_for_approval" as const,
+      cooldownMinutes: 1440,
+      frequencyLimit: 1,
+      conditions: []
+    }
+  ];
+}
+
+function agencySeedLibrary(): MessageScriptTemplate[] {
+  return [
+    seedTemplate({
+      key: "welcome_new_subscriber",
+      name: "Welcome New Subscriber",
+      description: "Warm first-touch playbook for fresh subscribers that starts the relationship without sounding robotic.",
+      triggerEventType: "subscriber_created",
+      category: "Welcome",
+      tags: ["seed", "welcome", "new-subscriber"],
+      execution: { mode: "immediate" },
+      ai: { mode: "draft_only" },
+      approval: { mode: "always_approve" },
+      variables: [
+        variable("subscriber_name", "Subscriber Name", "there"),
+        variable("creator_signature", "Creator Signature", "xo")
+      ],
+      steps: [
+        step("message", "Hey {{subscriber_name}}. Love that you just joined me. You picked a fun time to come in."),
+        step("question", "Tell me what kind of vibe you want most from me so I can spoil you properly."),
+        step("follow_up", "Checking in in case you got busy. I can make your first few days here feel very personal.", {
+          delayMinutes: 720
+        })
+      ]
+    }),
+    seedTemplate({
+      key: "welcome_ppv",
+      name: "Welcome + PPV",
+      description: "Welcomes a new fan, warms them up, then introduces a starter PPV without pushing too hard.",
+      triggerEventType: "subscriber_created",
+      category: "Revenue",
+      tags: ["seed", "welcome", "ppv"],
+      execution: { mode: "delay", delayMinutes: 10 },
+      ai: { mode: "requires_approval" },
+      approval: { mode: "auto_approve_below_threshold", threshold: 35 },
+      variables: [
+        variable("subscriber_name", "Subscriber Name", "babe"),
+        variable("starter_ppv_title", "Starter PPV Title", "new girl set"),
+        variable("starter_ppv_price", "Starter PPV Price", "19")
+      ],
+      steps: [
+        step("message", "Hey {{subscriber_name}}, thanks for subscribing. I always love seeing a new name pop up."),
+        step("follow_up", "I can send you my {{starter_ppv_title}} for {{starter_ppv_price}} if you want a little welcome treat.", {
+          delayMinutes: 20,
+          ppvTitle: "Starter PPV",
+          ppvPrice: 19
+        }),
+        step("end", "")
+      ]
+    }),
+    seedTemplate({
+      key: "renewal_reminder",
+      name: "Renewal Reminder",
+      description: "Soft renewal nudge for subscribers worth keeping warm before the final urgency window.",
+      triggerEventType: "subscription_renewal",
+      category: "Retention",
+      tags: ["seed", "renewal", "retention"],
+      execution: { mode: "schedule", scheduleLabel: "Morning before renewal cycle" },
+      ai: { mode: "draft_only" },
+      approval: { mode: "always_approve" },
+      conditions: [condition("relationship", "lifetime_spend", "gte", "25")],
+      variables: [variable("renewal_bonus", "Renewal Bonus", "little surprise set")],
+      steps: [
+        step("message", "I love keeping my favourites close. Renew with me and I’ll make it worth it with a {{renewal_bonus}}."),
+        step("follow_up", "Just making sure you saw my note before the day runs away from us.", { delayMinutes: 600 })
+      ]
+    }),
+    seedTemplate({
+      key: "expiring_tomorrow",
+      name: "Expiring Tomorrow",
+      description: "High-intent retention playbook for subscribers about to lapse tomorrow.",
+      triggerEventType: "subscription_expiring",
+      category: "Retention",
+      tags: ["seed", "expiry", "urgent"],
+      execution: { mode: "immediate" },
+      ai: { mode: "requires_approval" },
+      approval: { mode: "always_approve" },
+      conditions: [condition("event", "payload.days_until_expiry", "lte", "1")],
+      variables: [variable("save_offer", "Save Offer", "private drop tonight")],
+      steps: [
+        step("message", "Your sub is almost up and I’d hate to lose you right before I send out something special."),
+        step("follow_up", "If you stay with me, I’ll line up a {{save_offer}} just for you.", { delayMinutes: 180 })
+      ]
+    }),
+    seedTemplate({
+      key: "vip_thank_you",
+      name: "VIP Thank You",
+      description: "Protects top spenders with fast gratitude and a premium-feeling touch point.",
+      triggerEventType: "vip",
+      category: "VIP",
+      tags: ["seed", "vip", "loyalty"],
+      execution: { mode: "immediate" },
+      ai: { mode: "draft_only" },
+      approval: { mode: "never_approve" },
+      conditions: [condition("relationship", "lifetime_spend", "gte", "100")],
+      variables: [variable("vip_reward", "VIP Reward", "behind-the-scenes tease")],
+      steps: [
+        step("message", "You’ve been seriously good to me and I notice it. Thank you for being one of my VIPs."),
+        step("follow_up", "I want to send you a {{vip_reward}} because I really appreciate you.", { delayMinutes: 5 })
+      ]
+    }),
+    seedTemplate({
+      key: "reactivate_subscriber",
+      name: "Reactivate Subscriber",
+      description: "Brings back cooling or expired fans with a comeback message that feels personal, not desperate.",
+      triggerEventType: "no_chat_activity",
+      category: "Winback",
+      tags: ["seed", "winback", "reactivation"],
+      execution: { mode: "delay", delayMinutes: 1440 },
+      ai: { mode: "requires_approval" },
+      approval: { mode: "always_approve" },
+      conditions: [condition("relationship", "last_subscriber_message_at", "within_days", "14")],
+      variables: [variable("comeback_offer", "Comeback Offer", "little comeback bundle")],
+      steps: [
+        step("message", "You’ve been quiet lately and I wanted to tempt you back in."),
+        step("follow_up", "If you’re still around, I can make it easy to restart with a {{comeback_offer}}.", {
+          delayMinutes: 1440,
+          messageGenerationMode: "ai_generated"
+        })
+      ]
+    }),
+    seedTemplate({
+      key: "daily_checkin",
+      name: "Daily Check-in",
+      description: "Manual-only touchpoint for chat teams to keep active spenders warm each day.",
+      triggerEventType: "manual",
+      category: "Relationship",
+      tags: ["seed", "manual", "daily"],
+      execution: { mode: "manual_only" },
+      ai: { mode: "disabled" },
+      approval: { mode: "never_approve" },
+      conditions: [condition("relationship", "engagement_score", "gte", "55")],
+      steps: [
+        step("message", "Thinking about you today. How’s your day treating you so far?"),
+        step("question", "Want soft attention, playful energy, or something a little more dangerous tonight?", { delayMinutes: 240 })
+      ]
+    }),
+    seedTemplate({
+      key: "birthday_message",
+      name: "Birthday Message",
+      description: "Easy celebration script for birthday moments with optional gift energy.",
+      triggerEventType: "birthday",
+      category: "Occasions",
+      tags: ["seed", "birthday", "relationship"],
+      execution: { mode: "schedule", scheduleLabel: "9:00 AM creator local time" },
+      ai: { mode: "draft_only" },
+      approval: { mode: "never_approve" },
+      variables: [variable("birthday_gift", "Birthday Gift", "birthday tease")],
+      steps: [
+        step("message", "Happy birthday, gorgeous. I wanted to be one of the first people to spoil you today."),
+        step("follow_up", "If you want, I can send over a little {{birthday_gift}} to make today even better.", {
+          delayMinutes: 60,
+          mediaKind: "image"
+        })
+      ]
+    }),
+    seedTemplate({
+      key: "custom_content_offer",
+      name: "Custom Content Offer",
+      description: "Manual offer flow for warm buyers who are likely ready for custom content.",
+      triggerEventType: "manual",
+      category: "Customs",
+      tags: ["seed", "customs", "upsell"],
+      execution: { mode: "manual_only" },
+      ai: { mode: "requires_approval" },
+      approval: { mode: "always_approve" },
+      conditions: [condition("relationship", "customs_purchased", "equals", "0"), condition("relationship", "lifetime_spend", "gte", "75")],
+      variables: [variable("custom_menu", "Custom Menu", "solo clip, voice note, or full custom")],
+      steps: [
+        step("message", "I can make something custom for you if you want me in a more personal mood."),
+        step("question", "Would you want a {{custom_menu}}?", { delayMinutes: 30, messageGenerationMode: "ai_generated" })
+      ]
+    }),
+    seedTemplate({
+      key: "high_spender_followup",
+      name: "High Spender Follow-up",
+      description: "Post-purchase relationship and revenue follow-up for proven spenders.",
+      triggerEventType: "high_spender",
+      category: "Revenue",
+      tags: ["seed", "high-spender", "follow-up"],
+      execution: { mode: "immediate" },
+      ai: { mode: "auto_send" },
+      approval: { mode: "auto_approve_below_threshold", threshold: 20 },
+      conditions: [condition("relationship", "lifetime_spend", "gte", "100")],
+      variables: [variable("next_offer", "Next Offer", "VIP unlock")],
+      steps: [
+        step("message", "You always know how to get my attention. I appreciate how hard you spoil me."),
+        step("follow_up", "If you want me to line up a {{next_offer}} next, say the word.", {
+          delayMinutes: 90,
+          stopConditions: [condition("relationship", "pending_actions", "gt", "0")]
+        })
+      ]
+    })
+  ];
+}
+
+function seedTemplate(input: {
+  key: string;
+  name: string;
+  description: string;
+  triggerEventType: string;
+  category: string;
+  tags: string[];
+  execution: ScriptWorkspaceConfig["execution"];
+  ai: ScriptWorkspaceConfig["ai"];
+  approval: ScriptWorkspaceConfig["approval"];
+  variables?: ScriptBuilderVariable[];
+  conditions?: ScriptBuilderCondition[];
+  steps: ScriptStepTemplate[];
+}): MessageScriptTemplate {
+  return {
+    name: input.name,
+    description: input.description,
+    triggerEventType: input.triggerEventType,
+    autoSendEnabled: input.ai?.mode === "auto_send",
+    requiresApproval: input.approval?.mode !== "never_approve",
+    actionMode: input.ai?.mode === "auto_send" ? "auto_send" : "draft_for_approval",
+    cooldownHours: 24,
+    maxSendsPerFan: 1,
+    folderName: seedFolderForCategory(input.category),
+    category: input.category,
+    tags: input.tags,
+    versionNumber: 1,
+    sourceScriptId: null,
+    builderConfig: {
+      schemaVersion: 1,
+      variables: input.variables ?? [],
+      workspace: {
+        templateKey: input.key,
+        execution: input.execution,
+        ai: input.ai,
+        approval: input.approval,
+        conditions: input.conditions ?? [],
+        archivedAt: null
+      }
+    },
+    steps: input.steps.map((stepItem, index) => ({
+      ...stepItem,
+      order: index
+    }))
+  };
+}
+
+function seedFolderForCategory(category: string) {
+  if (category === "VIP") return "VIP";
+  if (category === "Retention" || category === "Winback") return "Retention";
+  if (category === "Revenue" || category === "Customs") return "Revenue";
+  if (category === "Occasions") return "Occasions";
+  return "Playbooks";
+}
+
+function variable(key: string, label: string, defaultValue: string): ScriptBuilderVariable {
+  return { key, label, defaultValue };
+}
+
+function condition(
+  source: ScriptBuilderCondition["source"],
+  key: string,
+  operator: ScriptBuilderCondition["operator"],
+  value: string
+): ScriptBuilderCondition {
+  return { source, key, operator, value };
+}
+
+function step(
+  type: ScriptStepTemplate["type"],
+  body: string,
+  options?: {
+    delayMinutes?: number;
+    messageGenerationMode?: ScriptMessageGenerationMode;
+    mediaKind?: ScriptMediaKind;
+    mediaUrl?: string;
+    ppvTitle?: string;
+    ppvPrice?: number;
+    stopConditions?: ScriptBuilderCondition[];
+  }
+): ScriptStepTemplate {
+  return {
+    type,
+    order: 0,
+    body: body || undefined,
+    delayMinutes: options?.delayMinutes,
+    metadata: {
+      kind: type === "question" ? "ask_question" : type === "wait" ? "wait" : type === "end" ? "end_conversation" : "send_message",
+      messageGenerationMode: options?.messageGenerationMode,
+      mediaKind: options?.mediaKind,
+      mediaUrl: options?.mediaUrl,
+      ppvTitle: options?.ppvTitle,
+      ppvPrice: options?.ppvPrice,
+      stopConditions: options?.stopConditions
+    }
+  };
+}
+
 async function insertScriptTemplateSteps(supabase: SupabaseClient, scriptId: string, steps: ScriptStepTemplate[]) {
   const idMap = new Map<string, string>();
   for (const step of steps) {
@@ -1994,11 +3434,59 @@ function normalizeStringArray(value: unknown) {
 
 function normalizeBuilderConfig(value: unknown): ScriptBuilderConfig {
   if (!isRecord(value)) {
-    return { schemaVersion: 1, variables: [] };
+    return { schemaVersion: 1, variables: [], workspace: defaultWorkspaceConfig() };
   }
   return {
     schemaVersion: typeof value.schemaVersion === "number" && value.schemaVersion > 0 ? Math.floor(value.schemaVersion) : 1,
-    variables: Array.isArray(value.variables) ? value.variables.map(normalizeVariable).filter((item): item is ScriptBuilderVariable => item !== null) : []
+    variables: Array.isArray(value.variables) ? value.variables.map(normalizeVariable).filter((item): item is ScriptBuilderVariable => item !== null) : [],
+    workspace: normalizeWorkspaceConfig(value.workspace)
+  };
+}
+
+function normalizeWorkspaceConfig(value: unknown): ScriptWorkspaceConfig {
+  if (!isRecord(value)) return defaultWorkspaceConfig();
+  return {
+    templateKey: typeof value.templateKey === "string" && value.templateKey.trim() ? value.templateKey.trim() : undefined,
+    styleKey: typeof value.styleKey === "string" && value.styleKey.trim() ? value.styleKey.trim() : undefined,
+    archivedAt: typeof value.archivedAt === "string" && value.archivedAt.trim() ? value.archivedAt : null,
+    execution: normalizeExecutionConfig(value.execution),
+    ai: normalizeAiConfig(value.ai),
+    approval: normalizeApprovalConfig(value.approval),
+    conditions: Array.isArray(value.conditions) ? value.conditions.map(normalizeCondition).filter((item): item is ScriptBuilderCondition => item !== null) : []
+  };
+}
+
+function defaultWorkspaceConfig(): ScriptWorkspaceConfig {
+  return {
+    templateKey: undefined,
+    styleKey: undefined,
+    archivedAt: null,
+    execution: { mode: "immediate" },
+    ai: { mode: "draft_only" },
+    approval: { mode: "always_approve" },
+    conditions: []
+  };
+}
+
+function normalizeExecutionConfig(value: unknown): ScriptWorkspaceConfig["execution"] {
+  if (!isRecord(value)) return { mode: "immediate" };
+  return {
+    mode: isExecutionMode(value.mode) ? value.mode : "immediate",
+    delayMinutes: value.delayMinutes == null ? undefined : nonNegativeInteger(value.delayMinutes, 0),
+    scheduleLabel: typeof value.scheduleLabel === "string" && value.scheduleLabel.trim() ? value.scheduleLabel.trim() : undefined
+  };
+}
+
+function normalizeAiConfig(value: unknown): ScriptWorkspaceConfig["ai"] {
+  if (!isRecord(value)) return { mode: "draft_only" };
+  return { mode: isScriptAiMode(value.mode) ? value.mode : "draft_only" };
+}
+
+function normalizeApprovalConfig(value: unknown): ScriptWorkspaceConfig["approval"] {
+  if (!isRecord(value)) return { mode: "always_approve" };
+  return {
+    mode: isApprovalMode(value.mode) ? value.mode : "always_approve",
+    threshold: value.threshold == null ? undefined : nonNegativeInteger(value.threshold, 0)
   };
 }
 
@@ -2022,6 +3510,12 @@ function normalizeStepMetadata(value: unknown): ScriptBuilderStepMetadata {
     variableValue: typeof value.variableValue === "string" ? value.variableValue : undefined,
     waitForReply: typeof value.waitForReply === "boolean" ? value.waitForReply : undefined,
     branchRules: Array.isArray(value.branchRules) ? value.branchRules.map(normalizeBranchRule).filter((item): item is ScriptBuilderBranchRule => item !== null) : undefined,
+    messageGenerationMode: isMessageGenerationMode(value.messageGenerationMode) ? value.messageGenerationMode : undefined,
+    mediaUrl: typeof value.mediaUrl === "string" && value.mediaUrl.trim() ? value.mediaUrl.trim() : undefined,
+    mediaKind: isMediaKind(value.mediaKind) ? value.mediaKind : undefined,
+    ppvTitle: typeof value.ppvTitle === "string" && value.ppvTitle.trim() ? value.ppvTitle.trim() : undefined,
+    ppvPrice: value.ppvPrice == null ? undefined : positiveNumber(value.ppvPrice),
+    stopConditions: Array.isArray(value.stopConditions) ? value.stopConditions.map(normalizeCondition).filter((item): item is ScriptBuilderCondition => item !== null) : undefined,
     notes: typeof value.notes === "string" && value.notes.trim() ? value.notes.trim() : undefined
   };
 }
@@ -2060,7 +3554,32 @@ function isConditionSource(value: unknown): value is ScriptBuilderCondition["sou
 }
 
 function isConditionOperator(value: unknown): value is ScriptBuilderCondition["operator"] {
-  return value === "equals" || value === "not_equals" || value === "contains" || value === "not_contains" || value === "exists" || value === "not_exists";
+  return value === "equals" || value === "not_equals" || value === "contains" || value === "not_contains" || value === "exists" || value === "not_exists" || value === "gt" || value === "gte" || value === "lt" || value === "lte" || value === "within_days";
+}
+
+function isExecutionMode(value: unknown): value is ScriptExecutionMode {
+  return value === "immediate" || value === "delay" || value === "schedule" || value === "manual_only";
+}
+
+function isScriptAiMode(value: unknown): value is ScriptAiMode {
+  return value === "disabled" || value === "draft_only" || value === "requires_approval" || value === "auto_send";
+}
+
+function isApprovalMode(value: unknown): value is ScriptApprovalMode {
+  return value === "always_approve" || value === "auto_approve_below_threshold" || value === "never_approve";
+}
+
+function isMessageGenerationMode(value: unknown): value is ScriptMessageGenerationMode {
+  return value === "template" || value === "ai_generated";
+}
+
+function isMediaKind(value: unknown): value is ScriptMediaKind {
+  return value === "image" || value === "video" || value === "audio" || value === "gallery";
+}
+
+function positiveNumber(value: unknown) {
+  const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
+  return Number.isFinite(parsed) ? Math.max(0, parsed) : undefined;
 }
 
 function buildDuplicateScriptName(name: string, versionNumber: number) {
@@ -2119,6 +3638,7 @@ async function startAutomationSimulation(supabase: SupabaseClient, env: Env, cre
     .insert({
       creator_id: creatorId,
       script_id: prepared.script.id,
+      rule_id: prepared.ruleId,
       scenario_id: prepared.scenario?.id ?? null,
       simulated_subscriber_id: prepared.subscriber.id,
       status: "running",
@@ -2165,7 +3685,9 @@ async function startAutomationSimulation(supabase: SupabaseClient, env: Env, cre
     prepared.script,
     eventInsert.data as Record<string, unknown>,
     `simulation:${prepared.subscriber.id}`,
-    prepared.scenario
+    prepared.scenario,
+    prepared.actionModeOverride,
+    prepared.ruleId
   );
   if (actionResult === "failed") {
     await supabase.from("of_automation_simulations").update({ status: "failed", last_error: "Simulation execution failed." }).eq("id", simulation.id);
@@ -2200,11 +3722,17 @@ async function prepareSimulationLaunch(supabase: SupabaseClient, creatorId: stri
   }
   if (!script) throw new Error("Simulation requires a script or scenario linked to a script");
 
+  const actionModeOverride =
+    typeof body.actionModeOverride === "string"
+      ? parseActionMode(body.actionModeOverride, scriptActionMode(script))
+      : null;
+  const ruleId = typeof body.ruleId === "string" && isUuid(body.ruleId) ? body.ruleId : null;
+
   const eventType = stringValue(body.eventType, scenario?.trigger_event_type ?? String(script.trigger_event_type ?? "custom_event"));
   const eventPayloadInput = isRecord(body.eventPayload) ? body.eventPayload : {};
   const initialVariables = isRecord(body.variables) ? body.variables : {};
   const eventPayload = buildSimulationEventPayload(subscriber, eventType, eventPayloadInput, initialVariables, creatorId);
-  return { subscriber, scenario, script, eventType, eventPayload, initialVariables };
+  return { subscriber, scenario, script, eventType, eventPayload, initialVariables, actionModeOverride, ruleId };
 }
 
 function buildSimulationEventPayload(
@@ -2413,6 +3941,167 @@ async function resetSimulation(supabase: SupabaseClient, simulationId: string) {
   return getSimulationDetail(supabase, simulationId);
 }
 
+async function testAutomationRule(
+  supabase: SupabaseClient,
+  env: Env,
+  ruleId: string,
+  body: Record<string, unknown>
+): Promise<AutomationRuleSimulationResult> {
+  const rule = await getAutomationRuleById(supabase, ruleId);
+  const creatorId = typeof body.creatorId === "string" && isUuid(body.creatorId)
+    ? body.creatorId
+    : rule.creator_id;
+  if (!creatorId) throw new Error("A creator must be selected for automation rule testing.");
+  const creatorResult = await supabase.from("of_creators").select("id, username, display_name").eq("id", creatorId).single();
+  assertNoError(creatorResult.error);
+  const creator = creatorResult.data as Pick<OfCreator, "id" | "username" | "display_name">;
+
+  const subscriberInput = isRecord(body.subscriber) ? body.subscriber : {};
+  const relationship = buildAutomationSimulationRelationship(subscriberInput, isRecord(body.relationship) ? body.relationship : {});
+  const eventType = stringValue(body.eventType, mapRuleTriggerToEventType(rule.trigger_type));
+  const eventPayload = isRecord(body.eventPayload) ? body.eventPayload : buildAutomationRuleEventPayload(rule.trigger_type, subscriberInput, relationship);
+  const triggerMatched = eventType === mapRuleTriggerToEventType(rule.trigger_type);
+  const conditionResults = evaluateAutomationRuleConditions(rule.conditions ?? [], { eventPayload, relationship, subscriber: subscriberInput });
+  const matched = triggerMatched && conditionResults.every((item) => item.matched);
+
+  let automationSimulationId: string | null = null;
+  let outboundMessages: OfOutboundMessage[] = [];
+  let summary = matched ? `Rule matched. Action: ${rule.action_type}.` : "Rule did not match.";
+
+  if (matched && rule.selected_script_id && (rule.action_type === "run_script" || rule.action_type === "queue_outbound_draft")) {
+    const simulation = await startAutomationSimulation(supabase, env, creatorId, {
+      ruleId: rule.id,
+      scriptId: rule.selected_script_id,
+      eventType,
+      eventPayload,
+      actionModeOverride: rule.approval_mode,
+      subscriber: {
+        ...subscriberInput,
+        custom_variables: isRecord(subscriberInput.custom_variables) ? subscriberInput.custom_variables : {}
+      },
+      variables: {
+        subscriber_name: stringValue(subscriberInput.name, stringValue(subscriberInput.username, "there")),
+        creator_name: creator.display_name ?? creator.username ?? "Creator"
+      }
+    });
+    automationSimulationId = simulation.simulation.id;
+    outboundMessages = simulation.outboundMessages;
+    summary = outboundMessages.length
+      ? `Rule matched and would queue ${outboundMessages.length} outbound message${outboundMessages.length === 1 ? "" : "s"} using ${rule.selected_script?.name ?? "the selected script"}.`
+      : `Rule matched and would run ${rule.selected_script?.name ?? "the selected script"}.`;
+    await supabase.from("of_automation_simulations").update({
+      runtime_state: {
+        matched: true,
+        triggerMatched: true,
+        action: rule.action_type,
+        creatorName: creator.display_name ?? creator.username ?? "Creator",
+        conditions: conditionResults,
+        summary
+      }
+    }).eq("id", automationSimulationId);
+  } else if (matched && (rule.action_type === "create_task" || rule.action_type === "notify_agency")) {
+    summary = rule.action_type === "create_task"
+      ? "Rule matched and would create an operator task."
+      : "Rule matched and would notify the agency team.";
+  } else if (matched && rule.action_type === "queue_outbound_draft" && !rule.selected_script_id) {
+    summary = "Rule matched but no script is linked, so no outbound draft could be generated.";
+  }
+
+  return {
+    matched,
+    triggerMatched,
+    action: rule.action_type,
+    scriptId: rule.selected_script_id,
+    scriptName: rule.selected_script?.name ?? null,
+    creatorId,
+    creatorName: creator.display_name ?? creator.username ?? "Creator",
+    simulatedAt: new Date().toISOString(),
+    eventType,
+    conditions: conditionResults,
+    automationSimulationId,
+    outboundMessages,
+    summary
+  };
+}
+
+function buildAutomationSimulationRelationship(subscriber: Record<string, unknown>, relationship: Record<string, unknown>) {
+  return {
+    lifetime_spend: Number(relationship.lifetime_spend ?? subscriber.lifetime_value ?? 0) || 0,
+    vip_score: Number(relationship.vip_score ?? (subscriber.spend_level === "high" ? 80 : 20)) || 0,
+    current_subscription_status: stringValue(relationship.current_subscription_status, stringValue(subscriber.subscription_status, "active")),
+    ppv_purchases: Number(relationship.ppv_purchases ?? 0) || 0,
+    purchase_count: Number(relationship.purchase_count ?? 0) || 0,
+    last_subscriber_message_at: typeof relationship.last_subscriber_message_at === "string" ? relationship.last_subscriber_message_at : new Date().toISOString(),
+    ...relationship
+  };
+}
+
+function buildAutomationRuleEventPayload(triggerType: string, subscriber: Record<string, unknown>, relationship: Record<string, unknown>) {
+  return {
+    fanId: stringValue(subscriber.username, stringValue(subscriber.name, "simulation_fan")),
+    subscriber: {
+      name: stringValue(subscriber.name, "Test Subscriber"),
+      username: stringValue(subscriber.username, "test_subscriber"),
+      subscription_status: stringValue(subscriber.subscription_status, "active"),
+      renewal_state: stringValue(subscriber.renewal_state, "current"),
+      spend_level: stringValue(subscriber.spend_level, "medium"),
+      lifetime_value: Number(subscriber.lifetime_value ?? 0) || 0
+    },
+    purchase_status: triggerType === "ppv_purchased" ? "purchased" : null,
+    days_until_expiry: Number(relationship.days_until_expiry ?? 1) || 1,
+    vip: Number(relationship.vip_score ?? 0) >= 75
+  };
+}
+
+function evaluateAutomationRuleConditions(
+  conditions: ScriptBuilderCondition[],
+  input: {
+    eventPayload: Record<string, unknown>;
+    relationship: Record<string, unknown>;
+    subscriber: Record<string, unknown>;
+  }
+): AutomationRuleConditionSummary[] {
+  const variables = new Map<string, string>();
+  return conditions.map((conditionItem) => {
+    const actual = readConditionSource(conditionItem.source, conditionItem.key, {
+      variables,
+      event: { payload: input.eventPayload },
+      relationship: input.relationship,
+      subscriber: input.subscriber
+    });
+    const matched = evaluateCondition(conditionItem, {
+      variables,
+      event: { payload: input.eventPayload },
+      relationship: input.relationship,
+      subscriber: input.subscriber
+    });
+    return {
+      key: conditionItem.key,
+      label: `${conditionItem.source}.${conditionItem.key}`,
+      matched,
+      actual,
+      expected: `${conditionItem.operator}${conditionItem.value != null ? ` ${conditionItem.value}` : ""}`.trim()
+    };
+  });
+}
+
+function mapRuleTriggerToEventType(triggerType: string) {
+  const mapping: Record<string, string> = {
+    new_subscriber: "subscriber_created",
+    subscription_expiring: "subscriber_expiring",
+    subscription_renewed: "subscription_renewed",
+    no_chat_activity: "no_chat_activity",
+    new_inbound_message: "chat_message",
+    ppv_purchased: "ppv_purchased",
+    high_spender_detected: "high_spender",
+    fan_inactive: "fan_inactive",
+    manual: "manual",
+    birthday: "birthday",
+    vip: "vip"
+  };
+  return mapping[triggerType] ?? triggerType;
+}
+
 async function loadSimulationRecord(supabase: SupabaseClient, simulationId: string) {
   const result = await supabase.from("of_automation_simulations").select("*").eq("id", simulationId).single();
   assertNoError(result.error);
@@ -2441,7 +4130,8 @@ async function runAutomationsForEvent(supabase: SupabaseClient, env: Env, eventI
   }
 
   const eligibleScripts = await resolveEligibleAutomationScripts(supabase, String(event.data.creator_id), event.data.event_type);
-  const summary = { eventId, matched: eligibleScripts.length, queued: 0, skipped: 0, errors: [] as string[] };
+  const eligibleRules = await resolveEligibleAutomationRules(supabase, String(event.data.creator_id), event.data, eventContext);
+  const summary = { eventId, matched: eligibleScripts.length + eligibleRules.length, queued: 0, skipped: 0, errors: [] as string[] };
   for (const item of eligibleScripts) {
     try {
       const result = await runAutomationForScript(supabase, env, item.script, event.data, fanId, item.scenario);
@@ -2449,6 +4139,15 @@ async function runAutomationsForEvent(supabase: SupabaseClient, env: Env, eventI
       else summary.queued++;
     } catch (error) {
       summary.errors.push(error instanceof Error ? error.message : "Unexpected automation error");
+    }
+  }
+  for (const rule of eligibleRules) {
+    try {
+      const result = await executeAutomationRule(supabase, env, rule, event.data, fanId, eventContext);
+      if (result === "skipped") summary.skipped++;
+      else summary.queued++;
+    } catch (error) {
+      summary.errors.push(error instanceof Error ? error.message : "Unexpected automation rule error");
     }
   }
   return summary;
@@ -2460,7 +4159,10 @@ async function runAutomationForScript(
   script: Record<string, unknown>,
   event: Record<string, unknown>,
   fanId: string,
-  scenario: OfCreatorAutomationScenario | null
+  scenario: OfCreatorAutomationScenario | null,
+  actionModeOverride: MessageScriptActionMode | null = null,
+  ruleId: string | null = null,
+  ruleName: string | null = null
 ): Promise<AutomationActionResult> {
   const duplicate = await supabase
     .from("of_automation_runs")
@@ -2471,7 +4173,7 @@ async function runAutomationForScript(
   assertNoError(duplicate.error);
   if (duplicate.data?.length) return "skipped";
 
-  const actionMode = scenario?.action_mode_override ?? scriptActionMode(script);
+  const actionMode = actionModeOverride ?? scenario?.action_mode_override ?? scriptActionMode(script);
   const skipReason = await automationSkipReason(supabase, script, fanId);
   const executionMode = event.execution_mode === "simulation" ? "simulation" : "production";
   const simulationRunId = typeof event.simulation_run_id === "string" ? event.simulation_run_id : null;
@@ -2485,7 +4187,7 @@ async function runAutomationForScript(
       action_mode: actionMode,
       execution_mode: executionMode,
       simulation_run_id: simulationRunId,
-      metadata: executionMode === "simulation" ? { simulation: true } : {},
+      metadata: executionMode === "simulation" ? { simulation: true, rule_id: ruleId, rule_name: ruleName } : { rule_id: ruleId, rule_name: ruleName },
       status: skipReason ? "skipped" : "running",
       completed_at: skipReason ? new Date().toISOString() : null,
       error_message: skipReason
@@ -2515,7 +4217,9 @@ async function runAutomationForScript(
       eventPayload: isRecord(event.payload) ? event.payload : null,
       executionMode,
       simulationRunId,
-      simulationSubscriber: context.simulationSubscriber
+      simulationSubscriber: context.simulationSubscriber,
+      sourceRuleId: ruleId,
+      sourceRuleName: ruleName
     });
     if (!conversation) return "skipped";
     if (executionMode === "simulation" && simulationRunId) {
@@ -2639,6 +4343,8 @@ async function createConversationInstance(
     executionMode: AutomationExecutionMode;
     simulationRunId: string | null;
     simulationSubscriber: Record<string, unknown> | null;
+    sourceRuleId: string | null;
+    sourceRuleName: string | null;
   }
 ) {
   const steps = ((input.script.of_message_script_steps as OfMessageScriptStep[] | undefined) ?? []).sort((a, b) => a.step_order - b.step_order);
@@ -2664,10 +4370,15 @@ async function createConversationInstance(
         ? {
             simulation: true,
             simulation_run_id: input.simulationRunId,
+            source_rule_id: input.sourceRuleId,
+            source_rule_name: input.sourceRuleName,
             subscriber_snapshot: input.simulationSubscriber,
             event_payload: input.eventPayload
           }
-        : {}
+        : {
+            source_rule_id: input.sourceRuleId,
+            source_rule_name: input.sourceRuleName
+          }
     })
     .select("*")
     .single();
@@ -2793,6 +4504,170 @@ async function resolveEligibleAutomationScripts(supabase: SupabaseClient, creato
     eligible.push({ script, scenario });
   }
   return eligible;
+}
+
+async function resolveEligibleAutomationRules(
+  supabase: SupabaseClient,
+  creatorId: string,
+  event: Record<string, unknown>,
+  context: EventActionContext
+) {
+  const triggerType = mapEventTypeToRuleTrigger(String(event.event_type ?? ""));
+  const result = await supabase
+    .from("of_automation_rules")
+    .select("*, selected_script:of_message_scripts(id, name, status, trigger_event_type, category), creator:of_creators(id, username, display_name)")
+    .eq("status", "active")
+    .eq("trigger_type", triggerType)
+    .or(`creator_scope.eq.all_creators,creator_id.eq.${creatorId}`);
+  assertNoError(result.error);
+  const rules = (result.data ?? []) as OfAutomationRule[];
+  if (!rules.length) return [];
+
+  const relationship = context.relationshipId
+    ? await supabase.from("of_subscriber_relationships").select("*").eq("id", context.relationshipId).maybeSingle()
+    : { data: null, error: null };
+  const subscriber = context.subscriberId
+    ? await supabase.from("of_subscribers").select("*").eq("id", context.subscriberId).maybeSingle()
+    : { data: null, error: null };
+  assertNoError(relationship.error);
+  assertNoError(subscriber.error);
+
+  return rules.filter((rule) =>
+    evaluateAutomationRuleConditions(rule.conditions ?? [], {
+      eventPayload: isRecord(event.payload) ? event.payload : {},
+      relationship: (relationship.data ?? {}) as Record<string, unknown>,
+      subscriber: (subscriber.data ?? {}) as Record<string, unknown>
+    }).every((condition) => condition.matched)
+  );
+}
+
+async function executeAutomationRule(
+  supabase: SupabaseClient,
+  env: Env,
+  rule: OfAutomationRule,
+  event: Record<string, unknown>,
+  fanId: string,
+  context: EventActionContext
+): Promise<AutomationActionResult> {
+  const skipReason = await automationRuleSkipReason(supabase, rule, event, fanId);
+  if (skipReason) return "skipped";
+
+  if ((rule.action_type === "run_script" || rule.action_type === "queue_outbound_draft") && rule.selected_script_id) {
+    const scriptResult = await supabase.from("of_message_scripts").select("*, of_message_script_steps(*)").eq("id", rule.selected_script_id).single();
+    assertNoError(scriptResult.error);
+    const result = await runAutomationForScript(
+      supabase,
+      env,
+      scriptResult.data as Record<string, unknown>,
+      event,
+      fanId,
+      null,
+      rule.approval_mode,
+      rule.id,
+      rule.name
+    );
+    if (result !== "skipped") {
+      await supabase.from("of_automation_rules").update({ last_triggered_at: new Date().toISOString() }).eq("id", rule.id);
+    }
+    return result;
+  }
+
+  const taskResult = await createAutomationRuleTask(supabase, rule, event, fanId, context);
+  if (taskResult !== "failed") {
+    await supabase.from("of_automation_rules").update({ last_triggered_at: new Date().toISOString() }).eq("id", rule.id);
+  }
+  return taskResult;
+}
+
+async function automationRuleSkipReason(
+  supabase: SupabaseClient,
+  rule: OfAutomationRule,
+  event: Record<string, unknown>,
+  fanId: string
+) {
+  const cooldownMinutes = Math.max(0, rule.cooldown_minutes ?? 0);
+  const frequencyLimit = Math.max(1, rule.frequency_limit ?? 1);
+  const cutoff = new Date(Date.now() - cooldownMinutes * 60000).toISOString();
+
+  const automationRuns = await supabase
+    .from("of_automation_runs")
+    .select("id, metadata, started_at")
+    .eq("creator_id", event.creator_id)
+    .eq("fan_id", fanId)
+    .gte("started_at", cutoff);
+  assertNoError(automationRuns.error);
+  const matchingRuns = (automationRuns.data ?? []).filter((row) => isRecord(row.metadata) && row.metadata.rule_id === rule.id);
+  if (matchingRuns.length >= frequencyLimit) return "Rule frequency limit reached";
+
+  const tasks = await supabase
+    .from("of_tasks")
+    .select("id, created_at")
+    .eq("creator_id", event.creator_id)
+    .eq("source_type", "automation_rule")
+    .eq("source_id", rule.id)
+    .gte("created_at", cutoff);
+  assertNoError(tasks.error);
+  if ((tasks.data ?? []).length >= frequencyLimit) return "Rule task frequency limit reached";
+  return null;
+}
+
+async function createAutomationRuleTask(
+  supabase: SupabaseClient,
+  rule: OfAutomationRule,
+  event: Record<string, unknown>,
+  fanId: string,
+  context: EventActionContext
+): Promise<AutomationActionResult> {
+  const title =
+    rule.action_type === "notify_agency"
+      ? `${rule.name}: notify agency`
+      : `${rule.name}: operator follow-up`;
+  const description =
+    rule.action_type === "notify_agency"
+      ? `Automation rule matched and wants an agency-level notification for fan ${fanId}.`
+      : `Automation rule matched and wants a task created for fan ${fanId}.`;
+  const result = await supabase.from("of_tasks").insert({
+    creator_id: event.creator_id,
+    source_type: "automation_rule",
+    source_id: rule.id,
+    source_event_id: event.id,
+    subscriber_id: context.subscriberId,
+    task_type: "automation_rule_action",
+    rule_name: rule.name,
+    rule_version: "v1",
+    priority: rule.action_type === "notify_agency" ? "high" : "medium",
+    priority_score: rule.action_type === "notify_agency" ? 82 : 65,
+    priority_reason: "Generated from automation workspace rule",
+    status: "open",
+    title,
+    description,
+    reason: description,
+    evidence: [{ label: "Trigger", value: String(event.event_type ?? "unknown") }],
+    confidence: 0.88,
+    recommended_action: rule.selected_script?.name ? `Review script ${rule.selected_script.name}` : "Review the matching fan context",
+    suggested_action: rule.action_type,
+    suggested_script: rule.selected_script?.name ?? null,
+    ai_suggestion: { source: "automation_rule", action: rule.action_type }
+  }).select("id").single();
+  assertNoError(result.error);
+  return "task_created";
+}
+
+function mapEventTypeToRuleTrigger(eventType: string): AutomationRuleTriggerType | "manual" {
+  const mapping: Record<string, AutomationRuleTriggerType> = {
+    subscriber_created: "new_subscriber",
+    subscriber_expiring: "subscription_expiring",
+    subscription_renewed: "subscription_renewed",
+    no_chat_activity: "no_chat_activity",
+    chat_message: "new_inbound_message",
+    ppv_purchased: "ppv_purchased",
+    high_spender: "high_spender_detected",
+    fan_inactive: "fan_inactive",
+    manual: "manual",
+    birthday: "birthday",
+    vip: "vip"
+  };
+  return mapping[eventType] ?? "manual";
 }
 
 async function touchAutomationScenario(supabase: SupabaseClient, scenarioId: string) {
@@ -3230,6 +5105,19 @@ async function queueConversationMessageStep(
   const actionMode = scriptActionMode(input.script);
   const template = interpolateTemplate(input.step.message_body ?? "", toVariableMap(input.variables));
   const renderedVariables = pickTemplateVariables(input.step.message_body ?? "", input.variables);
+  const policy = await evaluateOutboundPolicy(supabase, {
+    creatorId: input.conversation.creator_id,
+    fanId: subscriberFanId(input.context, input.conversation, input.event),
+    messageText: template,
+    requestedActionMode: actionMode,
+    executionMode: input.conversation.execution_mode,
+    script: input.script,
+    step: input.step,
+    event: input.event,
+    relationshipId: input.context.relationshipId,
+    subscriberId: input.context.subscriberId
+  });
+  const resolvedActionMode = policy.resolvedActionMode;
   const existingOutbound = await findConversationOutboundMessage(supabase, input.conversation.id, input.step.id);
   let outbound = existingOutbound;
 
@@ -3266,9 +5154,9 @@ async function queueConversationMessageStep(
         generated_text: template,
         message_body: template,
         draft_text: template,
-        final_text: actionMode === "auto_send" ? template : null,
-        status: actionMode === "auto_send" ? "queued" : "pending_approval",
-        approval_status: actionMode === "auto_send" ? "not_required" : "pending",
+        final_text: resolvedActionMode === "auto_send" ? template : null,
+        status: resolvedActionMode === "auto_send" ? "queued" : "pending_approval",
+        approval_status: resolvedActionMode === "auto_send" ? "not_required" : "pending",
         sent_at: null,
         failed_at: null,
         failure_reason: null,
@@ -3277,6 +5165,16 @@ async function queueConversationMessageStep(
           source_template: input.step.message_body ?? "",
           rendered_variables: renderedVariables,
           action_mode: actionMode,
+          resolved_action_mode: resolvedActionMode,
+          source_script_id: input.conversation.script_id,
+          source_script_name: input.script.name ?? "Script",
+          source_rule_id: isRecord(input.conversation.metadata) ? input.conversation.metadata.source_rule_id ?? null : null,
+          source_rule_name: isRecord(input.conversation.metadata) ? input.conversation.metadata.source_rule_name ?? null : null,
+          approval_mode: resolvedActionMode,
+          policy_reasons: policy.reasons,
+          policy_summary: policy.summary,
+          policy_snapshot: policy.snapshot,
+          original_message: template,
           execution_mode: input.conversation.execution_mode
         }
       })
@@ -3298,7 +5196,7 @@ async function queueConversationMessageStep(
     });
   }
 
-  if (actionMode !== "auto_send") {
+  if (resolvedActionMode !== "auto_send") {
     if (outbound && (String(outbound.status) === "pending_approval" || String(outbound.status) === "queued" || String(outbound.status) === "sending")) {
       const waitingStatus: ConversationRuntimeStatus = "waiting_approval";
       const conversation = await updateConversationState(supabase, input.conversation.id, {
@@ -3336,8 +5234,8 @@ async function queueConversationMessageStep(
       eventType: "draft_created",
       fromStatus: input.conversation.status,
       toStatus: conversation.status,
-      detail: "Draft created and waiting for approval.",
-      payload: { outbound_message_id: outbound.id, next_step_id: input.nextStep?.id ?? null }
+      detail: policy.reasons.length ? "Draft created because approval guardrails were triggered." : "Draft created and waiting for approval.",
+      payload: { outbound_message_id: outbound.id, next_step_id: input.nextStep?.id ?? null, policy_reasons: policy.reasons }
     });
     return { conversation, variables: input.variables, nextStep: null, outcome: "approval" as const };
   }
@@ -3624,9 +5522,32 @@ function evaluateCondition(
       return currentValue.length > 0;
     case "not_exists":
       return currentValue.length === 0;
+    case "gt":
+      return numericValue(currentValue) > numericValue(expected);
+    case "gte":
+      return numericValue(currentValue) >= numericValue(expected);
+    case "lt":
+      return numericValue(currentValue) < numericValue(expected);
+    case "lte":
+      return numericValue(currentValue) <= numericValue(expected);
+    case "within_days":
+      return withinDays(currentValue, numericValue(expected));
     default:
       return false;
   }
+}
+
+function numericValue(value: string) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function withinDays(value: string, days: number) {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return false;
+  const diff = timestamp - Date.now();
+  const diffDays = diff / 86400000;
+  return diffDays <= days;
 }
 
 function readConditionSource(
@@ -3679,7 +5600,20 @@ async function executeMessageAction(
     return "skipped";
   }
 
-  const isAutoSend = actionMode === "auto_send";
+  const policy = await evaluateOutboundPolicy(supabase, {
+    creatorId: String(event.creator_id),
+    fanId,
+    messageText: firstMessage.message_body,
+    requestedActionMode: actionMode,
+    executionMode: event.execution_mode === "simulation" ? "simulation" : "production",
+    script,
+    step: firstMessage,
+    event,
+    relationshipId: context.relationshipId,
+    subscriberId: context.subscriberId
+  });
+  const resolvedActionMode = policy.resolvedActionMode;
+  const isAutoSend = resolvedActionMode === "auto_send";
   const outbound = await supabase
     .from("of_outbound_messages")
     .insert({
@@ -3697,12 +5631,41 @@ async function executeMessageAction(
     sent_at: null,
     failed_at: null,
     failure_reason: null,
-    error_message: null
+    error_message: null,
+    metadata: {
+      action_mode: actionMode,
+      resolved_action_mode: resolvedActionMode,
+      source_script_id: script.id ?? null,
+      source_script_name: script.name ?? "Script",
+      source_rule_id: null,
+      source_rule_name: null,
+      approval_mode: resolvedActionMode,
+      policy_reasons: policy.reasons,
+      policy_summary: policy.summary,
+      policy_snapshot: policy.snapshot,
+      original_message: firstMessage.message_body
+    }
     })
     .select("*")
     .single();
   assertNoError(outbound.error);
 
+  if (!isAutoSend) {
+    await recordAutomationAudit(supabase, {
+      creatorId: String(event.creator_id),
+      outboundMessageId: String(outbound.data.id),
+      entityType: "outbound_message",
+      action: "draft_created",
+      detail: policy.reasons.length ? "Outbound was downgraded to approval before sending." : "Outbound was queued for approval.",
+      metadata: {
+        requested_action_mode: actionMode,
+        resolved_action_mode: resolvedActionMode,
+        reasons: policy.reasons
+      },
+      actorType: "system",
+      actorLabel: "automation"
+    });
+  }
   if (!isAutoSend) return "draft_created";
 
   const sent = await sendOutboundMessage(supabase, env, outbound.data.id as string, firstMessage.message_body);
@@ -3969,6 +5932,489 @@ async function getConversationDetail(supabase: SupabaseClient, conversationId: s
   };
 }
 
+async function getOperationsDashboard(supabase: SupabaseClient, url: URL) {
+  const conversations = await listOperationsConversations(supabase, url);
+  const summary = await buildConversationOperationsSummary(supabase, conversations);
+  return { summary, conversations };
+}
+
+async function getOperationsMetrics(supabase: SupabaseClient, url: URL): Promise<ConversationOperationsMetrics> {
+  const conversations = await listOperationsConversations(supabase, url);
+  const summary = await buildConversationOperationsSummary(supabase, conversations);
+  const statusCounts = conversations.reduce<Record<string, number>>((acc, conversation) => {
+    acc[conversation.status] = (acc[conversation.status] ?? 0) + 1;
+    return acc;
+  }, {});
+  const scriptCountsMap = new Map<string, { script_id: string; script_name: string; count: number }>();
+  const creatorCountsMap = new Map<string, { creator_id: string; creator_name: string; count: number }>();
+  const waitingBuckets = [
+    { label: "0-15m", count: 0 },
+    { label: "15-60m", count: 0 },
+    { label: "1-6h", count: 0 },
+    { label: "6h+", count: 0 }
+  ];
+  const dailyVolumeMap = new Map<string, { date: string; started: number; completed: number; failed: number }>();
+
+  for (const conversation of conversations) {
+    const scriptId = conversation.script_id;
+    const scriptName = conversation.of_message_scripts?.name ?? "Unknown script";
+    scriptCountsMap.set(scriptId, {
+      script_id: scriptId,
+      script_name: scriptName,
+      count: (scriptCountsMap.get(scriptId)?.count ?? 0) + 1
+    });
+
+    const creatorId = conversation.creator_id;
+    const creatorName =
+      conversation.of_creators && typeof conversation.of_creators === "object"
+        ? String((conversation.of_creators as Record<string, unknown>).display_name ?? (conversation.of_creators as Record<string, unknown>).username ?? creatorId)
+        : creatorId;
+    creatorCountsMap.set(creatorId, {
+      creator_id: creatorId,
+      creator_name: creatorName,
+      count: (creatorCountsMap.get(creatorId)?.count ?? 0) + 1
+    });
+
+    if (conversation.waiting_until) {
+      const minutes = Math.max(0, (new Date(conversation.waiting_until).getTime() - Date.now()) / 60000);
+      if (minutes <= 15) waitingBuckets[0].count += 1;
+      else if (minutes <= 60) waitingBuckets[1].count += 1;
+      else if (minutes <= 360) waitingBuckets[2].count += 1;
+      else waitingBuckets[3].count += 1;
+    }
+
+    const createdDate = conversation.created_at.slice(0, 10);
+    const createdBucket = dailyVolumeMap.get(createdDate) ?? { date: createdDate, started: 0, completed: 0, failed: 0 };
+    createdBucket.started += 1;
+    dailyVolumeMap.set(createdDate, createdBucket);
+
+    if (conversation.completed_at) {
+      const completedDate = conversation.completed_at.slice(0, 10);
+      const completedBucket = dailyVolumeMap.get(completedDate) ?? { date: completedDate, started: 0, completed: 0, failed: 0 };
+      completedBucket.completed += 1;
+      dailyVolumeMap.set(completedDate, completedBucket);
+    }
+
+    if (conversation.failed_at) {
+      const failedDate = conversation.failed_at.slice(0, 10);
+      const failedBucket = dailyVolumeMap.get(failedDate) ?? { date: failedDate, started: 0, completed: 0, failed: 0 };
+      failedBucket.failed += 1;
+      dailyVolumeMap.set(failedDate, failedBucket);
+    }
+  }
+
+  return {
+    summary,
+    statusCounts,
+    scriptCounts: [...scriptCountsMap.values()].sort((left, right) => right.count - left.count).slice(0, 8),
+    creatorCounts: [...creatorCountsMap.values()].sort((left, right) => right.count - left.count).slice(0, 8),
+    waitingBuckets,
+    dailyVolume: [...dailyVolumeMap.values()].sort((left, right) => left.date.localeCompare(right.date)).slice(-7)
+  };
+}
+
+async function listOperationsConversations(supabase: SupabaseClient, url: URL) {
+  const result = await supabase
+    .from("of_conversation_instances")
+    .select("*, of_message_scripts(name, trigger_event_type, folder_name, version_number), of_creators(username, display_name), source_event:of_events!of_conversation_instances_originating_event_id_fkey(id, event_type, received_at)")
+    .order("updated_at", { ascending: false })
+    .limit(300);
+  assertNoError(result.error);
+  const conversations = (result.data ?? []) as (OfConversationInstance & { of_creators?: Record<string, unknown> | null })[];
+  const enriched = await hydrateConversationSteps(supabase, conversations);
+
+  const creatorId = url.searchParams.get("creatorId");
+  const executionMode = url.searchParams.get("executionMode");
+  const status = url.searchParams.get("status");
+  const statusGroup = url.searchParams.get("statusGroup");
+  const search = (url.searchParams.get("search") ?? "").trim().toLowerCase();
+  const limit = Math.max(1, Math.min(Number(url.searchParams.get("limit") ?? "100"), 200));
+
+  return enriched
+    .filter((conversation) => {
+      if (creatorId && conversation.creator_id !== creatorId) return false;
+      if (executionMode && executionMode !== "all" && conversation.execution_mode !== executionMode) return false;
+      if (status && status !== "all" && conversation.status !== status) return false;
+      if (statusGroup && statusGroup !== "all") {
+        const group = statusGroupForConversation(conversation.status);
+        if (group !== statusGroup) return false;
+      }
+      if (!search) return true;
+      const haystack = [
+        conversation.id,
+        conversation.of_message_scripts?.name,
+        conversation.of_message_scripts?.trigger_event_type,
+        conversation.of_creators && typeof conversation.of_creators === "object"
+          ? String((conversation.of_creators as Record<string, unknown>).display_name ?? (conversation.of_creators as Record<string, unknown>).username ?? "")
+          : ""
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(search);
+    })
+    .slice(0, limit);
+}
+
+async function hydrateConversationSteps<T extends OfConversationInstance>(supabase: SupabaseClient, conversations: T[]) {
+  if (!conversations.length) return conversations;
+  const stepIds = [...new Set(conversations.flatMap((item) => [item.current_step_id, item.next_step_id]).filter((value): value is string => typeof value === "string"))];
+  const steps = stepIds.length
+    ? await supabase.from("of_message_script_steps").select("id, step_order, step_type, message_body").in("id", stepIds)
+    : { data: [], error: null };
+  assertNoError(steps.error);
+  const stepMap = new Map(((steps.data ?? []) as Array<Pick<OfMessageScriptStep, "id" | "step_order" | "step_type" | "message_body">>).map((step) => [step.id, step]));
+  return conversations.map((conversation) => ({
+    ...conversation,
+    current_step: conversation.current_step_id ? stepMap.get(conversation.current_step_id) ?? null : null,
+    next_step: conversation.next_step_id ? stepMap.get(conversation.next_step_id) ?? null : null
+  }));
+}
+
+async function getConversationOperationsDetail(supabase: SupabaseClient, conversationId: string): Promise<ConversationOperationsDetail> {
+  const [detail, outboundResult, auditTrail, simulationResult, creatorResult] = await Promise.all([
+    getConversationDetail(supabase, conversationId),
+    supabase.from("of_outbound_messages").select("*").eq("conversation_instance_id", conversationId).order("created_at", { ascending: true }),
+    listAutomationAuditTrail(supabase, new URL(`https://ops.local/?conversationId=${conversationId}`)),
+    supabase.from("of_automation_simulations").select("*").eq("conversation_instance_id", conversationId).order("created_at", { ascending: false }).limit(1).maybeSingle(),
+    supabase
+      .from("of_conversation_instances")
+      .select("creator_id, of_creators(id, username, display_name), subscriber_id, relationship_id")
+      .eq("id", conversationId)
+      .single()
+  ]);
+  assertNoError(outboundResult.error);
+  assertNoError(simulationResult.error);
+  assertNoError(creatorResult.error);
+
+  const subscriberId = creatorResult.data?.subscriber_id as string | null | undefined;
+  const relationshipId = creatorResult.data?.relationship_id as string | null | undefined;
+  const [subscriberResult, relationshipResult] = await Promise.all([
+    subscriberId ? supabase.from("of_subscribers").select("*").eq("id", subscriberId).maybeSingle() : Promise.resolve({ data: null, error: null }),
+    relationshipId ? supabase.from("of_subscriber_relationships").select("*").eq("id", relationshipId).maybeSingle() : Promise.resolve({ data: null, error: null })
+  ]);
+  assertNoError(subscriberResult.error);
+  assertNoError(relationshipResult.error);
+
+  return {
+    conversation: detail.conversation,
+    history: detail.history,
+    outboundMessages: (outboundResult.data ?? []) as OfOutboundMessage[],
+    auditTrail,
+    relatedSimulation: (simulationResult.data ?? null) as OfAutomationSimulation | null,
+    subscriber: (subscriberResult.data ?? null) as Record<string, unknown> | null,
+    relationship: (relationshipResult.data ?? null) as Record<string, unknown> | null,
+    creator: (creatorResult.data?.of_creators ?? null) as ConversationOperationsDetail["creator"]
+  };
+}
+
+async function retryOperationsConversation(supabase: SupabaseClient, env: Env, conversationId: string) {
+  const current = await loadConversationForOperations(supabase, conversationId);
+  const updated = await updateConversationState(supabase, conversationId, {
+    status: "running",
+    last_error: null,
+    failed_at: null,
+    waiting_reason: null,
+    waiting_until: null,
+    processing_started_at: null,
+    retry_count: Number(current.retry_count ?? 0) + 1
+  });
+  await recordAutomationAudit(supabase, {
+    creatorId: updated.creator_id,
+    conversationId: updated.id,
+    action: "retry",
+    detail: "Operator retried the conversation.",
+    metadata: { previous_status: current.status, retry_count: updated.retry_count }
+  });
+  await processConversationInstance(supabase, env, conversationId, { reason: "retry_send" });
+  return getConversationOperationsDetail(supabase, conversationId);
+}
+
+async function resumeOperationsConversation(supabase: SupabaseClient, env: Env, conversationId: string) {
+  const current = await loadConversationForOperations(supabase, conversationId);
+  const updated = await updateConversationState(supabase, conversationId, {
+    status: "running",
+    waiting_reason: null,
+    waiting_until: null,
+    processing_started_at: null,
+    last_resumed_at: new Date().toISOString()
+  });
+  await recordAutomationAudit(supabase, {
+    creatorId: updated.creator_id,
+    conversationId: updated.id,
+    action: "resume",
+    detail: "Operator resumed the conversation.",
+    metadata: { previous_status: current.status }
+  });
+  await processConversationInstance(supabase, env, conversationId, { reason: "recovery_resume" });
+  return getConversationOperationsDetail(supabase, conversationId);
+}
+
+async function cancelOperationsConversation(supabase: SupabaseClient, conversationId: string, reason: string) {
+  const cancelled = await cancelConversation(supabase, conversationId, reason);
+  await recordAutomationAudit(supabase, {
+    creatorId: cancelled.creator_id,
+    conversationId: cancelled.id,
+    action: "cancel",
+    detail: reason,
+    metadata: { status: cancelled.status }
+  });
+  return getConversationOperationsDetail(supabase, conversationId);
+}
+
+async function restartOperationsConversation(supabase: SupabaseClient, env: Env, conversationId: string) {
+  const relaunched = await relaunchConversationFromExisting(supabase, env, conversationId);
+  return getConversationOperationsDetail(supabase, relaunched.id);
+}
+
+async function duplicateOperationsConversationAsSimulation(supabase: SupabaseClient, env: Env, conversationId: string) {
+  const detail = await getConversationOperationsDetail(supabase, conversationId);
+  const conversation = detail.conversation;
+  const subscriberSnapshot = buildSimulationSubscriberSnapshot(detail);
+  const simulation = await startAutomationSimulation(supabase, env, conversation.creator_id, {
+    scriptId: conversation.script_id,
+    eventType: conversation.source_event?.event_type ?? "chat_message",
+    eventPayload: isRecord(conversation.metadata) && isRecord(conversation.metadata.event_payload)
+      ? conversation.metadata.event_payload
+      : {},
+    variables: conversation.variables,
+    subscriber: subscriberSnapshot
+  });
+  await recordAutomationAudit(supabase, {
+    creatorId: conversation.creator_id,
+    conversationId: conversation.id,
+    simulationRunId: simulation.simulation.id,
+    action: "duplicate_as_simulation",
+    detail: "Operator duplicated the conversation as a simulation.",
+    metadata: { simulation_id: simulation.simulation.id }
+  });
+  return getConversationOperationsDetail(supabase, conversationId);
+}
+
+async function relaunchConversationFromExisting(supabase: SupabaseClient, env: Env, conversationId: string) {
+  const current = await loadConversationForOperations(supabase, conversationId);
+  const eventResult = current.originating_event_id
+    ? await supabase.from("of_events").select("*").eq("id", current.originating_event_id).single()
+    : { data: null, error: null };
+  assertNoError(eventResult.error);
+  if (!eventResult.data) throw new Error("Cannot restart a conversation without a source event.");
+
+  const scriptResult = await supabase.from("of_message_scripts").select("*, of_message_script_steps(*)").eq("id", current.script_id).single();
+  assertNoError(scriptResult.error);
+  const payload = isRecord(eventResult.data.payload) ? eventResult.data.payload : {};
+  const fanId = extractFanId(payload) ?? String(current.variables?.fan_id ?? "");
+  if (!fanId) throw new Error("Cannot restart a conversation without a fan identifier.");
+
+  const context = await loadEventActionContext(supabase, eventResult.data, fanId);
+  const actionMode = scriptActionMode(scriptResult.data as Record<string, unknown>);
+  const run = await supabase
+    .from("of_automation_runs")
+    .insert({
+      creator_id: current.creator_id,
+      script_id: current.script_id,
+      fan_id: fanId,
+      source_event_id: current.originating_event_id,
+      action_mode: actionMode,
+      execution_mode: current.execution_mode,
+      simulation_run_id: readSimulationRunId(current),
+      metadata: { restarted_from_conversation_id: conversationId },
+      status: "running"
+    })
+    .select("*")
+    .single();
+  assertNoError(run.error);
+
+  const restarted = await createConversationInstance(supabase, {
+    creatorId: current.creator_id,
+    subscriberId: current.subscriber_id,
+    relationshipId: current.relationship_id,
+    script: scriptResult.data as Record<string, unknown>,
+    automationRunId: String(run.data.id),
+    eventId: current.originating_event_id,
+    fanId,
+    eventType: String(eventResult.data.event_type ?? ""),
+    eventPayload: payload,
+    executionMode: current.execution_mode,
+    simulationRunId: readSimulationRunId(current),
+    simulationSubscriber: context.simulationSubscriber,
+    sourceRuleId: isRecord(current.metadata) && typeof current.metadata.source_rule_id === "string" ? current.metadata.source_rule_id : null,
+    sourceRuleName: isRecord(current.metadata) && typeof current.metadata.source_rule_name === "string" ? current.metadata.source_rule_name : null
+  });
+  if (!restarted) throw new Error("Unable to restart conversation because a duplicate active instance already exists.");
+
+  await cancelConversation(supabase, conversationId, "Restarted by operator.");
+  await recordAutomationAudit(supabase, {
+    creatorId: current.creator_id,
+    conversationId,
+    action: "restart",
+    detail: "Operator restarted the conversation.",
+    metadata: { replacement_conversation_id: restarted.id }
+  });
+  await recordAutomationAudit(supabase, {
+    creatorId: restarted.creator_id,
+    conversationId: restarted.id,
+    action: "restart",
+    detail: "Conversation created from operator restart.",
+    metadata: { source_conversation_id: conversationId }
+  });
+  await recordConversationHistory(supabase, {
+    conversationId: restarted.id,
+    creatorId: restarted.creator_id,
+    eventId: current.originating_event_id,
+    stepId: restarted.current_step_id,
+    transitionKey: `restart:${conversationId}`,
+    eventType: "conversation_restarted",
+    fromStatus: null,
+    toStatus: restarted.status,
+    detail: `Conversation restarted from ${conversationId}.`,
+    payload: { source_conversation_id: conversationId }
+  });
+  await processConversationInstance(supabase, env, restarted.id, { resumeEvent: eventResult.data as Record<string, unknown>, resumeContext: context, reason: "launch" });
+  return restarted;
+}
+
+async function loadConversationForOperations(supabase: SupabaseClient, conversationId: string) {
+  const current = await supabase.from("of_conversation_instances").select("*").eq("id", conversationId).single();
+  assertNoError(current.error);
+  if (!current.data) throw new Error("Conversation not found");
+  return current.data as OfConversationInstance;
+}
+
+async function buildConversationOperationsSummary(
+  supabase: SupabaseClient,
+  conversations: Array<OfConversationInstance & { of_creators?: Record<string, unknown> | null }>
+): Promise<ConversationOperationsSummary> {
+  const healthAlerts = buildConversationHealthAlerts(conversations);
+  return {
+    total: conversations.length,
+    active: conversations.filter((item) => item.status === "running").length,
+    waiting: conversations.filter((item) => item.status.startsWith("waiting")).length,
+    completed: conversations.filter((item) => item.status === "completed").length,
+    cancelled: conversations.filter((item) => item.status === "cancelled").length,
+    failed: conversations.filter((item) => item.status === "failed").length,
+    production: conversations.filter((item) => item.execution_mode === "production").length,
+    simulation: conversations.filter((item) => item.execution_mode === "simulation").length,
+    overdue: conversations.filter((item) => isConversationOverdue(item)).length,
+    awaitingApproval: conversations.filter((item) => item.status === "waiting_approval").length,
+    awaitingReply: conversations.filter((item) => item.status === "waiting_reply").length,
+    healthAlerts
+  };
+}
+
+function buildConversationHealthAlerts(conversations: OfConversationInstance[]): ConversationHealthAlert[] {
+  const now = Date.now();
+  return conversations.flatMap((conversation) => {
+    const alerts: ConversationHealthAlert[] = [];
+    const updatedAt = new Date(conversation.updated_at).getTime();
+    const waitingUntil = conversation.waiting_until ? new Date(conversation.waiting_until).getTime() : null;
+    if (conversation.status === "running" && now - updatedAt > 15 * 60 * 1000) {
+      alerts.push(buildHealthAlert(conversation, "critical", "stuck_running", "Running conversation appears stuck", "The conversation has been in running state for over 15 minutes."));
+    }
+    if (conversation.status === "waiting_delay" && waitingUntil && waitingUntil < now) {
+      alerts.push(buildHealthAlert(conversation, "warning", "delay_overdue", "Delay is overdue", "The conversation is still waiting even though its delay window has passed."));
+    }
+    if (conversation.status === "waiting_approval" && now - updatedAt > 60 * 60 * 1000) {
+      alerts.push(buildHealthAlert(conversation, "warning", "approval_overdue", "Approval is overdue", "The conversation has waited more than an hour for approval."));
+    }
+    if (conversation.status === "waiting_reply" && now - updatedAt > 6 * 60 * 60 * 1000) {
+      alerts.push(buildHealthAlert(conversation, "info", "reply_overdue", "Reply wait is aging", "The conversation has been waiting on a subscriber reply for over 6 hours."));
+    }
+    if (conversation.status === "failed" && Number(conversation.retry_count ?? 0) >= 2) {
+      alerts.push(buildHealthAlert(conversation, "critical", "repeated_failures", "Repeated failures detected", "This conversation has failed after multiple retries."));
+    }
+    return alerts;
+  });
+}
+
+function buildHealthAlert(
+  conversation: OfConversationInstance,
+  severity: ConversationHealthAlert["severity"],
+  kind: ConversationHealthAlert["kind"],
+  title: string,
+  detail: string
+): ConversationHealthAlert {
+  return {
+    id: `${conversation.id}:${kind}`,
+    conversation_id: conversation.id,
+    creator_id: conversation.creator_id,
+    severity,
+    kind,
+    title,
+    detail,
+    triggered_at: conversation.updated_at
+  };
+}
+
+function statusGroupForConversation(status: ConversationRuntimeStatus) {
+  if (status === "running") return "active";
+  if (status.startsWith("waiting")) return "waiting";
+  return "terminal";
+}
+
+function isConversationOverdue(conversation: OfConversationInstance) {
+  if (conversation.status === "waiting_delay" && conversation.waiting_until) return new Date(conversation.waiting_until).getTime() < Date.now();
+  if (conversation.status === "running") return Date.now() - new Date(conversation.updated_at).getTime() > 15 * 60 * 1000;
+  return false;
+}
+
+async function listAutomationAuditTrail(supabase: SupabaseClient, url: URL): Promise<OfAutomationAuditTrailEntry[]> {
+  let query = supabase.from("of_automation_audit_trail").select("*").order("created_at", { ascending: false }).limit(200);
+  const creatorId = url.searchParams.get("creatorId");
+  const conversationId = url.searchParams.get("conversationId");
+  const action = url.searchParams.get("action");
+  if (creatorId) query = query.eq("creator_id", creatorId);
+  if (conversationId) query = query.eq("conversation_instance_id", conversationId);
+  if (action && action !== "all") query = query.eq("action", action);
+  const result = await query;
+  assertNoError(result.error);
+  return (result.data ?? []) as OfAutomationAuditTrailEntry[];
+}
+
+async function recordAutomationAudit(
+  supabase: SupabaseClient,
+  input: {
+    creatorId: string;
+    conversationId?: string | null;
+    simulationRunId?: string | null;
+    outboundMessageId?: string | null;
+    entityType?: "conversation" | "simulation" | "outbound_message" | "runtime";
+    action: string;
+    detail: string;
+    metadata?: Record<string, unknown>;
+    actorType?: "system" | "operator";
+    actorLabel?: string | null;
+  }
+) {
+  const inserted = await supabase.from("of_automation_audit_trail").insert({
+    creator_id: input.creatorId,
+    conversation_instance_id: input.conversationId ?? null,
+    simulation_run_id: input.simulationRunId ?? null,
+    outbound_message_id: input.outboundMessageId ?? null,
+    entity_type: input.entityType ?? "conversation",
+    action: input.action,
+    actor_type: input.actorType ?? "operator",
+    actor_label: input.actorLabel ?? "creator-cockpit",
+    detail: input.detail,
+    metadata: input.metadata ?? {}
+  });
+  assertNoError(inserted.error);
+}
+
+function buildSimulationSubscriberSnapshot(detail: ConversationOperationsDetail) {
+  const subscriber = isRecord(detail.subscriber) ? detail.subscriber : {};
+  const relationship = isRecord(detail.relationship) ? detail.relationship : {};
+  return {
+    name: String(subscriber.display_name ?? relationship.display_name ?? subscriber.username ?? "Simulated subscriber"),
+    username: String(subscriber.username ?? relationship.username ?? "simulation_user"),
+    subscription_status: String(subscriber.subscription_status ?? relationship.current_subscription_status ?? "active"),
+    renewal_state: "existing",
+    spend_level: String(relationship.persona_key ?? "standard"),
+    lifetime_value: Number(relationship.lifetime_spend ?? subscriber.total_spend ?? 0),
+    message_history_summary: typeof relationship.operator_briefing === "string" ? relationship.operator_briefing : null,
+    custom_variables: isRecord(detail.conversation.variables) ? detail.conversation.variables : {}
+  };
+}
+
 async function cancelConversation(supabase: SupabaseClient, conversationId: string, reason: string) {
   const current = await supabase.from("of_conversation_instances").select("*").eq("id", conversationId).single();
   assertNoError(current.error);
@@ -4000,15 +6446,21 @@ async function cancelConversation(supabase: SupabaseClient, conversationId: stri
 }
 
 async function updateOutboundMessage(supabase: SupabaseClient, env: Env, messageId: string, body: Record<string, unknown>) {
+  const current = await supabase.from("of_outbound_messages").select("*").eq("id", messageId).single();
+  assertNoError(current.error);
+  if (!current.data) throw new Error("Outbound message not found");
+
   const patch: Record<string, unknown> = {};
   if (typeof body.draft_text === "string") patch.draft_text = body.draft_text.trim();
   if (typeof body.final_text === "string") patch.final_text = body.final_text.trim();
   if (typeof body.approved_by === "string") patch.approved_by = body.approved_by.trim() || "operator";
+  const actorLabel =
+    (typeof body.edited_by === "string" && body.edited_by.trim()) ||
+    (typeof body.approved_by === "string" && body.approved_by.trim()) ||
+    "operator";
+  const currentMetadata = isRecord(current.data.metadata) ? current.data.metadata : {};
 
   if (body.approval_status === "approved") {
-    const current = await supabase.from("of_outbound_messages").select("*").eq("id", messageId).single();
-    assertNoError(current.error);
-    if (!current.data) throw new Error("Outbound message not found");
     if (current.data.status !== "pending_approval") throw new Error("Only pending approval messages can be approved");
 
     const finalText =
@@ -4022,12 +6474,69 @@ async function updateOutboundMessage(supabase: SupabaseClient, env: Env, message
               ? current.data.draft_text.trim()
               : typeof current.data.message_body === "string" && current.data.message_body.trim()
                 ? current.data.message_body.trim()
-          : null;
+                : null;
     if (!finalText) throw new Error("Approved outbound messages require final text");
+
+    const [scriptResult, eventResult, stepResult] = await Promise.all([
+      typeof current.data.script_id === "string"
+        ? supabase.from("of_message_scripts").select("*").eq("id", current.data.script_id).maybeSingle()
+        : Promise.resolve({ data: null, error: null }),
+      typeof current.data.source_event_id === "string"
+        ? supabase.from("of_events").select("*").eq("id", current.data.source_event_id).maybeSingle()
+        : Promise.resolve({ data: null, error: null }),
+      typeof current.data.script_step_id === "string"
+        ? supabase.from("of_message_script_steps").select("*").eq("id", current.data.script_step_id).maybeSingle()
+        : Promise.resolve({ data: null, error: null })
+    ]);
+    assertNoError(scriptResult.error);
+    assertNoError(eventResult.error);
+    assertNoError(stepResult.error);
+    const policy = await evaluateOutboundPolicy(supabase, {
+      creatorId: String(current.data.creator_id),
+      fanId: String(current.data.fan_id),
+      messageText: finalText,
+      requestedActionMode: "auto_send",
+      executionMode: current.data.execution_mode === "simulation" ? "simulation" : "production",
+      script: (scriptResult.data ?? null) as Record<string, unknown> | null,
+      step: (stepResult.data ?? null) as OfMessageScriptStep | null,
+      event: (eventResult.data ?? null) as Record<string, unknown> | null,
+      sourceRuleId: typeof currentMetadata.source_rule_id === "string" ? currentMetadata.source_rule_id : null,
+      sourceRuleName: typeof currentMetadata.source_rule_name === "string" ? currentMetadata.source_rule_name : null
+    });
+    if (policy.resolvedActionMode !== "auto_send") {
+      await recordAutomationAudit(supabase, {
+        creatorId: String(current.data.creator_id),
+        conversationId: typeof current.data.conversation_instance_id === "string" ? current.data.conversation_instance_id : null,
+        outboundMessageId: messageId,
+        entityType: "outbound_message",
+        action: "approval_blocked",
+        detail: "Operator approval did not bypass the outbound send guardrails.",
+        metadata: {
+          actor: actorLabel,
+          reasons: policy.reasons,
+          original_message: current.data.message_body,
+          final_message: finalText
+        },
+        actorType: "operator",
+        actorLabel
+      });
+      throw new Error(policy.summary);
+    }
+
     patch.approval_status = "approved";
     patch.status = "queued";
     patch.final_text = finalText;
     patch.approved_by = typeof patch.approved_by === "string" && patch.approved_by ? patch.approved_by : "operator";
+    patch.metadata = {
+      ...currentMetadata,
+      final_message: finalText,
+      approval_mode: "auto_send",
+      policy_reasons: policy.reasons,
+      policy_summary: policy.summary,
+      policy_snapshot: policy.snapshot,
+      last_edited_by: actorLabel,
+      last_edited_at: new Date().toISOString()
+    };
 
     const queued = await supabase
       .from("of_outbound_messages")
@@ -4036,6 +6545,22 @@ async function updateOutboundMessage(supabase: SupabaseClient, env: Env, message
       .select("*")
       .single();
     assertNoError(queued.error);
+    await recordAutomationAudit(supabase, {
+      creatorId: String(current.data.creator_id),
+      conversationId: typeof current.data.conversation_instance_id === "string" ? current.data.conversation_instance_id : null,
+      outboundMessageId: messageId,
+      entityType: "outbound_message",
+      action: "approved",
+      detail: "Outbound message approved for sending.",
+      metadata: {
+        approved_by: patch.approved_by,
+        original_message: current.data.message_body,
+        final_message: finalText,
+        reasons: policy.reasons
+      },
+      actorType: "operator",
+      actorLabel
+    });
     const sent = await sendOutboundMessage(supabase, env, messageId, finalText);
     await advanceConversationFromOutboundMessage(supabase, env, sent as Record<string, unknown>);
     return hydrateOutboundMessage(supabase, sent.id as string);
@@ -4043,11 +6568,31 @@ async function updateOutboundMessage(supabase: SupabaseClient, env: Env, message
     patch.approval_status = "rejected";
     patch.status = "rejected";
     patch.approved_by = typeof patch.approved_by === "string" && patch.approved_by ? patch.approved_by : "operator";
+    patch.metadata = {
+      ...currentMetadata,
+      rejection_reason: typeof body.reason === "string" && body.reason.trim() ? body.reason.trim() : "Rejected by operator",
+      rejected_at: new Date().toISOString()
+    };
   } else if (body.status === "failed") {
     patch.status = "failed";
+    if (current.data.approval_status === "pending") patch.approval_status = "rejected";
     patch.failed_at = new Date().toISOString();
     patch.failure_reason = typeof body.failure_reason === "string" ? body.failure_reason : typeof body.error_message === "string" ? body.error_message : "Marked failed by operator";
     patch.error_message = patch.failure_reason;
+    patch.metadata = {
+      ...currentMetadata,
+      follow_up_required: true,
+      follow_up_reason: typeof body.reason === "string" && body.reason.trim() ? body.reason.trim() : patch.failure_reason,
+      follow_up_marked_by: actorLabel,
+      follow_up_marked_at: new Date().toISOString()
+    };
+  } else if ("draft_text" in patch || "final_text" in patch) {
+    patch.metadata = {
+      ...currentMetadata,
+      final_message: typeof patch.final_text === "string" && patch.final_text ? patch.final_text : current.data.final_text,
+      last_edited_by: actorLabel,
+      last_edited_at: new Date().toISOString()
+    };
   }
 
   const result = await supabase
@@ -4057,8 +6602,58 @@ async function updateOutboundMessage(supabase: SupabaseClient, env: Env, message
     .select("*, of_creators(username, display_name), of_message_scripts(name)")
     .single();
   assertNoError(result.error);
+  if (("draft_text" in patch || "final_text" in patch) && body.approval_status == null && body.status == null) {
+    await recordAutomationAudit(supabase, {
+      creatorId: String(current.data.creator_id),
+      conversationId: typeof current.data.conversation_instance_id === "string" ? current.data.conversation_instance_id : null,
+      outboundMessageId: messageId,
+      entityType: "outbound_message",
+      action: "edited",
+      detail: "Outbound draft edited before approval.",
+      metadata: {
+        edited_by: actorLabel,
+        original_message: current.data.message_body,
+        final_message: result.data.final_text ?? result.data.draft_text ?? result.data.message_body
+      },
+      actorType: "operator",
+      actorLabel
+    });
+  }
   if (body.approval_status === "rejected") {
+    await recordAutomationAudit(supabase, {
+      creatorId: String(current.data.creator_id),
+      conversationId: typeof current.data.conversation_instance_id === "string" ? current.data.conversation_instance_id : null,
+      outboundMessageId: messageId,
+      entityType: "outbound_message",
+      action: "rejected",
+      detail: "Outbound draft rejected by operator.",
+      metadata: {
+        rejected_by: actorLabel,
+        reason: typeof body.reason === "string" && body.reason.trim() ? body.reason.trim() : "Rejected by operator",
+        original_message: current.data.message_body,
+        final_message: result.data.final_text ?? result.data.draft_text ?? result.data.message_body
+      },
+      actorType: "operator",
+      actorLabel
+    });
     await handleRejectedConversationMessage(supabase, result.data as Record<string, unknown>);
+  } else if (body.status === "failed") {
+    await recordAutomationAudit(supabase, {
+      creatorId: String(current.data.creator_id),
+      conversationId: typeof current.data.conversation_instance_id === "string" ? current.data.conversation_instance_id : null,
+      outboundMessageId: messageId,
+      entityType: "outbound_message",
+      action: "needs_human_follow_up",
+      detail: "Outbound was diverted to human follow-up.",
+      metadata: {
+        edited_by: actorLabel,
+        reason: patch.failure_reason,
+        original_message: current.data.message_body,
+        final_message: result.data.final_text ?? result.data.draft_text ?? result.data.message_body
+      },
+      actorType: "operator",
+      actorLabel
+    });
   }
   return result.data;
 }
@@ -4110,6 +6705,21 @@ async function sendOutboundMessage(supabase: SupabaseClient, env: Env, messageId
       .select("*")
       .single();
     assertNoError(sent.error);
+    await recordAutomationAudit(supabase, {
+      creatorId: String(sending.data.creator_id),
+      conversationId: typeof sending.data.conversation_instance_id === "string" ? sending.data.conversation_instance_id : null,
+      simulationRunId: typeof sending.data.simulation_run_id === "string" ? sending.data.simulation_run_id : null,
+      outboundMessageId: messageId,
+      entityType: "outbound_message",
+      action: "sent",
+      detail: "Simulation delivered the outbound message.",
+      metadata: {
+        destination: sending.data.destination ?? sending.data.fan_id,
+        final_message: finalText
+      },
+      actorType: "system",
+      actorLabel: "simulation"
+    });
     if (typeof sending.data.conversation_instance_id === "string") {
       const conversation = await supabase.from("of_conversation_instances").select("*").eq("id", sending.data.conversation_instance_id).maybeSingle();
       assertNoError(conversation.error);
@@ -4166,6 +6776,21 @@ async function sendOutboundMessage(supabase: SupabaseClient, env: Env, messageId
       .select("*")
       .single();
     assertNoError(sent.error);
+    await recordAutomationAudit(supabase, {
+      creatorId: String(sending.data.creator_id),
+      conversationId: typeof sending.data.conversation_instance_id === "string" ? sending.data.conversation_instance_id : null,
+      outboundMessageId: messageId,
+      entityType: "outbound_message",
+      action: "sent",
+      detail: "Outbound message sent to BetterFans.",
+      metadata: {
+        destination: sending.data.destination ?? sending.data.fan_id,
+        provider_message_id: delivered.providerMessageId,
+        final_message: finalText
+      },
+      actorType: "system",
+      actorLabel: "betterfans"
+    });
     return sent.data;
   } catch (error) {
     const failureReason = error instanceof Error ? error.message : "Unexpected BetterFans send failure";
@@ -4187,6 +6812,21 @@ async function sendOutboundMessage(supabase: SupabaseClient, env: Env, messageId
       .select("*")
       .single();
     assertNoError(failed.error);
+    await recordAutomationAudit(supabase, {
+      creatorId: String(sending.data.creator_id),
+      conversationId: typeof sending.data.conversation_instance_id === "string" ? sending.data.conversation_instance_id : null,
+      outboundMessageId: messageId,
+      entityType: "outbound_message",
+      action: "send_failed",
+      detail: "BetterFans delivery failed.",
+      metadata: {
+        destination: sending.data.destination ?? sending.data.fan_id,
+        final_message: finalText,
+        reason: failureReason
+      },
+      actorType: "system",
+      actorLabel: "betterfans"
+    });
     return failed.data;
   }
 }
@@ -4932,6 +7572,33 @@ function probabilityLabel(score: number) {
   return "Low";
 }
 
+function localDateKey(value: Date, timezone: string) {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(value);
+}
+
+function localHour(value: Date, timezone: string) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    hour: "2-digit",
+    hour12: false
+  }).formatToParts(value);
+  const hourPart = parts.find((part) => part.type === "hour")?.value ?? "0";
+  return Number(hourPart);
+}
+
+function isQuietHoursActive(quietHours: AgencyDefaultsSettings["quiet_hours"], timezone: string) {
+  if (!quietHours.enabled) return false;
+  const hour = localHour(new Date(), timezone);
+  if (quietHours.startHour === quietHours.endHour) return true;
+  if (quietHours.startHour < quietHours.endHour) return hour >= quietHours.startHour && hour < quietHours.endHour;
+  return hour >= quietHours.startHour || hour < quietHours.endHour;
+}
+
 function recommendationFromScores(intent: ConversationIntent | null, ppv: number, custom: number, churn: number, renewal: number) {
   if (churn >= 70) return "Prioritise retention outreach before upsell.";
   if (intent === "price_objection") return "Acknowledge price concern and offer a lower-friction option.";
@@ -4991,4 +7658,26 @@ function assertNoError(error: { message: string; code?: string } | null) {
   if (error) {
     throw new Error(error.message);
   }
+}
+
+function rowsOrEmptyIfMissingTable<T>(result: { data: T[] | null; error: { message: string; code?: string } | null }, tableName: string) {
+  if (result.error) {
+    if (isMissingSchemaCacheRelationError(result.error, tableName)) {
+      return [] as T[];
+    }
+    assertNoError(result.error);
+  }
+  return (result.data ?? []) as T[];
+}
+
+function isMissingSchemaCacheRelationError(error: { message: string; code?: string }, tableName: string) {
+  const message = error.message.toLowerCase();
+  const normalizedTableName = tableName.toLowerCase();
+  return message.includes("schema cache") && message.includes(normalizedTableName);
+}
+
+function isDuplicateKeyError(error: unknown) {
+  if (!isRecord(error)) return false;
+  const message = typeof error.message === "string" ? error.message.toLowerCase() : "";
+  return error.code === "23505" || message.includes("duplicate key value violates unique constraint");
 }

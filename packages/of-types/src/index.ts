@@ -22,12 +22,65 @@ export type MessageScriptStatus = "active" | "inactive";
 export type MessageScriptActionMode = "task_only" | "draft_for_approval" | "auto_send";
 export type MessageScriptStepType = "message" | "follow_up" | "question" | "branch" | "wait" | "set_variable" | "end";
 export type ScriptBuilderStepKind = "send_message" | "wait" | "ask_question" | "branch" | "set_variable" | "end_conversation";
+export type ScriptExecutionMode = "immediate" | "delay" | "schedule" | "manual_only";
+export type ScriptAiMode = "disabled" | "draft_only" | "requires_approval" | "auto_send";
+export type ScriptApprovalMode = "always_approve" | "auto_approve_below_threshold" | "never_approve";
+export type ScriptMessageGenerationMode = "template" | "ai_generated";
+export type ScriptMediaKind = "image" | "video" | "audio" | "gallery";
 export type AutomationRunStatus = "running" | "completed" | "failed" | "skipped";
 export type OutboundMessageStatus = "pending_approval" | "queued" | "sending" | "sent" | "failed" | "rejected";
 export type OutboundApprovalStatus = "not_required" | "pending" | "approved" | "rejected";
 export type ConversationRuntimeStatus = "running" | "waiting_delay" | "waiting_reply" | "waiting_approval" | "completed" | "cancelled" | "failed";
 export type AutomationExecutionMode = "production" | "simulation";
 export type AutomationSimulationStatus = "draft" | "running" | "paused" | "completed" | "cancelled" | "failed";
+export type AutomationRegistryKind =
+  | "event_type"
+  | "conversation_classification"
+  | "routing_destination"
+  | "playbook_goal"
+  | "playbook_style"
+  | "queue_state";
+export type ConversationClassificationType =
+  | "unknown_lead"
+  | "existing_subscriber"
+  | "existing_conversation"
+  | "automation_response"
+  | "priority_customer"
+  | "vip"
+  | "spam"
+  | "creator_only"
+  | "agency_only"
+  | "shared_conversation";
+export type RoutingDestinationType = "general_queue" | "automation_queue" | "review_queue" | "creator_queue" | "agency_queue" | "shared_queue" | "escalation_queue";
+export type PlaybookGoalType =
+  | "welcome_new_subscriber"
+  | "build_relationship"
+  | "high_spender_follow_up"
+  | "upsell_custom_content"
+  | "recover_expired_subscriber"
+  | "re_engage_quiet_fan"
+  | "warning_stand_down"
+  | "manual_campaign";
+export type PlaybookStyleType =
+  | "friendly"
+  | "flirty"
+  | "direct_sales"
+  | "vip"
+  | "relationship_builder"
+  | "authority"
+  | "warning"
+  | "soft_reactivation";
+export type QueueStateType =
+  | "unassigned"
+  | "assigned_creator"
+  | "assigned_agency"
+  | "shared"
+  | "waiting_customer"
+  | "waiting_creator"
+  | "waiting_agency"
+  | "waiting_ai_approval"
+  | "completed"
+  | "archived";
 export type RelationshipState = "prospect" | "new_subscriber" | "welcomed" | "engaged" | "vip" | "cooling" | "at_risk" | "expired" | "reactivated";
 export type SubscriberPersonaKey =
   | "new_fan"
@@ -134,6 +187,30 @@ export interface OfCreatorSnapshot {
   posts_count: number;
   created_at: string;
   updated_at: string;
+}
+
+export interface OfAutomationRegistryEntry {
+  id: string;
+  kind: AutomationRegistryKind;
+  registry_key: string;
+  label: string;
+  description: string | null;
+  category: string | null;
+  premium: boolean;
+  is_default: boolean;
+  sort_order: number;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AutomationRegistryWorkspaceData {
+  eventTypes: OfAutomationRegistryEntry[];
+  classifications: OfAutomationRegistryEntry[];
+  routingDestinations: OfAutomationRegistryEntry[];
+  playbookGoals: OfAutomationRegistryEntry[];
+  playbookStyles: OfAutomationRegistryEntry[];
+  queueStates: OfAutomationRegistryEntry[];
 }
 
 export interface OfSubscriber {
@@ -558,6 +635,7 @@ export interface OfMessageScript {
   builder_config?: ScriptBuilderConfig;
   created_at: string;
   updated_at: string;
+  of_creators?: Pick<OfCreator, "id" | "username" | "display_name"> | null;
   steps?: OfMessageScriptStep[];
 }
 
@@ -587,8 +665,33 @@ export interface ScriptBuilderVariable {
 export interface ScriptBuilderCondition {
   source: "variable" | "event" | "relationship" | "subscriber";
   key: string;
-  operator: "equals" | "not_equals" | "contains" | "not_contains" | "exists" | "not_exists";
+  operator: "equals" | "not_equals" | "contains" | "not_contains" | "exists" | "not_exists" | "gt" | "gte" | "lt" | "lte" | "within_days";
   value?: string;
+}
+
+export interface ScriptWorkspaceExecutionConfig {
+  mode: ScriptExecutionMode;
+  delayMinutes?: number;
+  scheduleLabel?: string;
+}
+
+export interface ScriptWorkspaceAiConfig {
+  mode: ScriptAiMode;
+}
+
+export interface ScriptWorkspaceApprovalConfig {
+  mode: ScriptApprovalMode;
+  threshold?: number;
+}
+
+export interface ScriptWorkspaceConfig {
+  templateKey?: string;
+  styleKey?: string;
+  archivedAt?: string | null;
+  execution?: ScriptWorkspaceExecutionConfig;
+  ai?: ScriptWorkspaceAiConfig;
+  approval?: ScriptWorkspaceApprovalConfig;
+  conditions?: ScriptBuilderCondition[];
 }
 
 export interface ScriptBuilderBranchRule {
@@ -606,10 +709,184 @@ export interface ScriptBuilderStepMetadata {
   variableValue?: string;
   waitForReply?: boolean;
   branchRules?: ScriptBuilderBranchRule[];
+  messageGenerationMode?: ScriptMessageGenerationMode;
+  mediaUrl?: string;
+  mediaKind?: ScriptMediaKind;
+  ppvTitle?: string;
+  ppvPrice?: number;
+  stopConditions?: ScriptBuilderCondition[];
   notes?: string;
 }
 
 export type ChatAutomationScenarioKey = "new_subscriber" | "subscription_expiring" | "inactive_subscriber" | "ppv_promotion";
+export type AutomationRuleStatus = "active" | "draft" | "paused" | "archived";
+export type AutomationRuleTriggerType =
+  | "new_subscriber"
+  | "subscription_expiring"
+  | "subscription_renewed"
+  | "no_chat_activity"
+  | "new_inbound_message"
+  | "ppv_purchased"
+  | "high_spender_detected"
+  | "fan_inactive"
+  | "manual"
+  | "birthday"
+  | "vip";
+export type AutomationRuleActionType = "run_script" | "create_task" | "queue_outbound_draft" | "notify_agency";
+export type AutomationCreatorScope = "all_creators" | "selected_creator";
+export type SettingsAuditEntityType = "agency" | "creator";
+export type SettingsEmojiLevel = "none" | "light" | "moderate" | "heavy";
+export type SettingsFlirtyLevel = "low" | "medium" | "high";
+export type SettingsSalesAggressiveness = "soft" | "balanced" | "assertive";
+
+export interface AgencyQuietHours {
+  enabled: boolean;
+  startHour: number;
+  endHour: number;
+}
+
+export interface AgencyDefaultsSettings {
+  id: string;
+  default_approval_mode: MessageScriptActionMode;
+  default_ai_mode: "disabled" | "draft_only" | "approval_required" | "auto_send";
+  default_timezone: string;
+  quiet_hours: AgencyQuietHours;
+  default_cooldown_minutes: number;
+  daily_outbound_cap_per_creator: number;
+  daily_outbound_cap_per_fan: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreatorPreferenceSettings {
+  id: string;
+  creator_id: string;
+  automation_enabled: boolean;
+  chat_automation_enabled: boolean;
+  ppv_automation_enabled: boolean;
+  tone_notes: string | null;
+  restricted_topics: string[];
+  escalation_notes: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreatorAiBehaviorSettings {
+  ai_mode: "disabled" | "draft_only" | "approval_required" | "auto_send";
+  max_message_length: number;
+  emoji_level: SettingsEmojiLevel;
+  flirty_level: SettingsFlirtyLevel;
+  sales_aggressiveness: SettingsSalesAggressiveness;
+  use_creator_memory: boolean;
+  escalate_high_value_fan_threshold: number;
+}
+
+export interface CreatorSafetySettings {
+  require_approval_first_message: boolean;
+  require_approval_ppv_offers: boolean;
+  require_approval_above_spend_threshold: number;
+  require_approval_vip_fans: boolean;
+  require_approval_custom_requests: boolean;
+  restricted_keywords: string[];
+  allow_auto_send_for_vip: boolean;
+}
+
+export interface CreatorAiSafetySettings {
+  id: string;
+  creator_id: string;
+  ai_behavior: CreatorAiBehaviorSettings;
+  safety: CreatorSafetySettings;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SettingsRuntimeHealth {
+  betterfansApiKeyConfigured: boolean;
+  betterfansBaseUrlConfigured: boolean;
+  supabaseConfigured: boolean;
+  eventStreamStatus: {
+    connectionStatus: string;
+    transport: string;
+    persistentWebSocket: string;
+    message: string;
+  };
+  lastSuccessfulEventReceivedAt: string | null;
+  lastSuccessfulEventType: string | null;
+  lastFailedEventAt: string | null;
+  lastFailedEventType: string | null;
+  lastSyncRunAt: string | null;
+  lastSyncRunStatus: string | null;
+}
+
+export interface SettingsAuditEntry {
+  id: string;
+  entity_type: SettingsAuditEntityType;
+  entity_id: string | null;
+  actor_label: string | null;
+  change_summary: string;
+  payload: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface CreatorSettingsBundle {
+  creator: Pick<OfCreator, "id" | "username" | "display_name" | "betterfans_account_id" | "status" | "last_sync_at" | "onboarding_status" | "active">;
+  preferences: CreatorPreferenceSettings;
+  ai_safety: CreatorAiSafetySettings;
+}
+
+export interface SettingsWorkspaceData {
+  agency: AgencyDefaultsSettings;
+  creators: CreatorSettingsBundle[];
+  runtime: SettingsRuntimeHealth;
+  audit: SettingsAuditEntry[];
+}
+
+export interface AutomationRuleConditionSummary {
+  key: string;
+  label: string;
+  matched: boolean;
+  actual: string;
+  expected: string;
+}
+
+export interface AutomationRuleSimulationResult {
+  matched: boolean;
+  triggerMatched: boolean;
+  action: AutomationRuleActionType;
+  scriptId: string | null;
+  scriptName: string | null;
+  creatorId: string;
+  creatorName: string;
+  simulatedAt: string;
+  eventType: string;
+  conditions: AutomationRuleConditionSummary[];
+  automationSimulationId: string | null;
+  outboundMessages: OfOutboundMessage[];
+  summary: string;
+}
+
+export interface OfAutomationRule {
+  id: string;
+  name: string;
+  description: string | null;
+  creator_scope: AutomationCreatorScope;
+  creator_id: string | null;
+  status: AutomationRuleStatus;
+  trigger_type: AutomationRuleTriggerType | string;
+  action_type: AutomationRuleActionType;
+  selected_script_id: string | null;
+  approval_mode: MessageScriptActionMode;
+  conditions: ScriptBuilderCondition[];
+  cooldown_minutes: number;
+  frequency_limit: number;
+  metadata: Record<string, unknown>;
+  last_triggered_at: string | null;
+  created_at: string;
+  updated_at: string;
+  selected_script?: Pick<OfMessageScript, "id" | "name" | "status" | "trigger_event_type" | "category"> | null;
+  creator?: Pick<OfCreator, "id" | "username" | "display_name"> | null;
+  recent_simulations?: AutomationRuleSimulationResult[];
+}
 
 export interface OfCreatorAutomationScenario {
   id: string;
@@ -635,6 +912,7 @@ export interface OfCreatorAutomationScenario {
 export interface ScriptBuilderConfig {
   schemaVersion?: number;
   variables?: ScriptBuilderVariable[];
+  workspace?: ScriptWorkspaceConfig;
 }
 
 export interface OfAutomationRun {
@@ -704,6 +982,84 @@ export interface OfConversationHistoryItem {
   detail: string | null;
   payload: Record<string, unknown>;
   created_at: string;
+}
+
+export type ConversationStatusGroup = "active" | "waiting" | "terminal";
+export type AutomationAuditActorType = "system" | "operator";
+export type AutomationAuditEntityType = "conversation" | "simulation" | "outbound_message" | "runtime";
+export type ConversationOperationalAction =
+  | "retry"
+  | "resume"
+  | "cancel"
+  | "restart"
+  | "duplicate_as_simulation"
+  | "export";
+export type HealthAlertSeverity = "info" | "warning" | "critical";
+
+export interface OfAutomationAuditTrailEntry {
+  id: string;
+  creator_id: string;
+  conversation_instance_id: string | null;
+  simulation_run_id: string | null;
+  outbound_message_id: string | null;
+  entity_type: AutomationAuditEntityType;
+  action: string;
+  actor_type: AutomationAuditActorType;
+  actor_label: string | null;
+  detail: string | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface ConversationHealthAlert {
+  id: string;
+  conversation_id: string;
+  creator_id: string;
+  severity: HealthAlertSeverity;
+  kind: "stuck_running" | "delay_overdue" | "approval_overdue" | "reply_overdue" | "repeated_failures";
+  title: string;
+  detail: string;
+  triggered_at: string;
+}
+
+export interface ConversationOperationsSummary {
+  total: number;
+  active: number;
+  waiting: number;
+  completed: number;
+  cancelled: number;
+  failed: number;
+  production: number;
+  simulation: number;
+  overdue: number;
+  awaitingApproval: number;
+  awaitingReply: number;
+  healthAlerts: ConversationHealthAlert[];
+}
+
+export interface ConversationOperationsDetail {
+  conversation: OfConversationInstance;
+  history: OfConversationHistoryItem[];
+  outboundMessages: OfOutboundMessage[];
+  auditTrail: OfAutomationAuditTrailEntry[];
+  relatedSimulation: OfAutomationSimulation | null;
+  subscriber: Record<string, unknown> | null;
+  relationship: Record<string, unknown> | null;
+  creator: Pick<OfCreator, "id" | "username" | "display_name"> | null;
+}
+
+export interface ConversationOperationsMetrics {
+  summary: ConversationOperationsSummary;
+  statusCounts: Record<string, number>;
+  scriptCounts: Array<{ script_id: string; script_name: string; count: number }>;
+  creatorCounts: Array<{ creator_id: string; creator_name: string; count: number }>;
+  waitingBuckets: Array<{ label: string; count: number }>;
+  dailyVolume: Array<{ date: string; started: number; completed: number; failed: number }>;
+}
+
+export interface ConversationOperationsExport {
+  exported_at: string;
+  detail: ConversationOperationsDetail;
 }
 
 export interface OfOutboundMessage {

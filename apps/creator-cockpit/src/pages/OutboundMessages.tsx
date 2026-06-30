@@ -1,11 +1,13 @@
-import { AlertCircle, CheckCircle2, Clock3, Send } from "lucide-react";
+import { AlertCircle, CheckCircle2, Clock3, Send, ShieldAlert, UserRoundPen, XCircle } from "lucide-react";
 import type { OfOutboundMessage } from "@funkmyfans/of-types";
 import { useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
 import { fetchOutboundMessages, updateOutboundMessage } from "../lib/api";
 
 export function OutboundMessages() {
   const [messages, setMessages] = useState<OfOutboundMessage[]>([]);
   const [draftEdits, setDraftEdits] = useState<Record<string, string>>({});
+  const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -13,12 +15,15 @@ export function OutboundMessages() {
   }, []);
 
   const queues = useMemo(() => {
-    const drafts = messages.filter((message) => message.status === "pending_approval" || (message.approval_status === "pending" && message.status !== "failed"));
+    const needsApproval = messages.filter(
+      (message) => message.status === "pending_approval" || (message.approval_status === "pending" && message.status !== "failed" && message.status !== "rejected"),
+    );
+    const approvedSending = messages.filter(
+      (message) => message.status === "queued" || message.status === "sending" || (message.approval_status === "approved" && message.status !== "sent"),
+    );
     const sent = messages.filter((message) => message.status === "sent");
-    const queued = messages.filter((message) => message.status === "queued" || message.status === "sending");
-    const failed = messages.filter((message) => message.status === "failed");
-    const rejected = messages.filter((message) => message.approval_status === "rejected" || message.status === "rejected");
-    return { drafts, sent, queued, failed, rejected };
+    const failed = messages.filter((message) => message.status === "failed" || message.status === "rejected");
+    return { needsApproval, approvedSending, sent, failed };
   }, [messages]);
 
   async function refreshMessages() {
@@ -31,187 +36,330 @@ export function OutboundMessages() {
     }
   }
 
+  async function saveEdit(message: OfOutboundMessage) {
+    const nextText = currentDraft(message, draftEdits);
+    await runMessageAction(message.id, () => updateOutboundMessage(message.id, { draft_text: nextText, edited_by: "operator" }));
+  }
+
   async function approveDraft(message: OfOutboundMessage) {
-    const finalText = draftEdits[message.id] ?? message.draft_text ?? message.message_body;
-    try {
-      const result = await updateOutboundMessage(message.id, {
+    const finalText = currentDraft(message, draftEdits);
+    await runMessageAction(message.id, () =>
+      updateOutboundMessage(message.id, {
         draft_text: finalText,
         final_text: finalText,
         approval_status: "approved",
-        approved_by: "operator"
-      });
-      setMessages((current) => current.map((item) => (item.id === message.id ? result.message : item)));
-      setError(null);
-    } catch (approveError) {
-      setError(errorMessage(approveError));
-    }
+        approved_by: "operator",
+      }),
+    );
   }
 
   async function rejectDraft(message: OfOutboundMessage) {
-    try {
-      const result = await updateOutboundMessage(message.id, {
+    await runMessageAction(message.id, () =>
+      updateOutboundMessage(message.id, {
         approval_status: "rejected",
-        approved_by: "operator"
-      });
-      setMessages((current) => current.map((item) => (item.id === message.id ? result.message : item)));
+        approved_by: "operator",
+        reason: "Rejected by operator",
+      }),
+    );
+  }
+
+  async function markNeedsHumanFollowUp(message: OfOutboundMessage) {
+    await runMessageAction(message.id, () =>
+      updateOutboundMessage(message.id, {
+        status: "failed",
+        approved_by: "operator",
+        reason: "Needs human follow-up",
+        error_message: "Needs human follow-up",
+      }),
+    );
+  }
+
+  async function runMessageAction(messageId: string, task: () => Promise<{ message: OfOutboundMessage }>) {
+    try {
+      setBusyId(messageId);
+      const result = await task();
+      setMessages((current) => current.map((item) => (item.id === messageId ? result.message : item)));
       setError(null);
-    } catch (rejectError) {
-      setError(errorMessage(rejectError));
+    } catch (actionError) {
+      setError(errorMessage(actionError));
+    } finally {
+      setBusyId(null);
     }
   }
 
   return (
-    <main className="space-y-4">
-      <section>
-        <h1 className="text-2xl font-semibold text-stone-950">Outbound Operations</h1>
-        <div className="mt-1 text-sm text-stone-500">Review generated drafts, monitor queued approvals, and audit sent automation messages.</div>
+    <main className="space-y-5">
+      <section className="glass-panel rounded-[28px] p-5">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <div className="text-sm font-semibold uppercase tracking-[0.24em] text-cyan-300/80">Outbound Approval</div>
+            <h1 className="mt-2 text-3xl font-semibold text-white">Safe outbound review queue for daily agency operations</h1>
+            <p className="mt-2 max-w-4xl text-sm leading-6 text-blue-100/70">
+              Review what needs approval, see what is actively sending, and keep anything uncertain inside a human-controlled loop.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => void refreshMessages()}
+            className="rounded-2xl border border-blue-400/20 bg-[#102338]/72 px-4 py-3 text-sm font-semibold text-blue-50"
+          >
+            Refresh Queue
+          </button>
+        </div>
       </section>
 
-      {error ? <div className="rounded-md bg-rose-50 px-3 py-2 text-sm font-medium text-rose-800">{error}</div> : null}
+      {error ? <div className="rounded-2xl border border-rose-400/25 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">{error}</div> : null}
 
-      <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <CountCard label="Drafts Awaiting Approval" value={queues.drafts.length} icon={Clock3} />
-        <CountCard label="Sending" value={queues.queued.length} icon={Send} />
-        <CountCard label="Sent Messages" value={queues.sent.length} icon={CheckCircle2} />
-        <CountCard label="Failed" value={queues.failed.length} icon={AlertCircle} />
+      <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <CountCard label="Needs Approval" value={queues.needsApproval.length} icon={Clock3} />
+        <CountCard label="Approved / Sending" value={queues.approvedSending.length} icon={Send} />
+        <CountCard label="Sent" value={queues.sent.length} icon={CheckCircle2} />
+        <CountCard label="Failed / Follow-up" value={queues.failed.length} icon={AlertCircle} />
       </section>
 
-      <DraftQueue
-        messages={queues.drafts}
-        draftEdits={draftEdits}
-        onDraftEdit={(messageId, text) => setDraftEdits((current) => ({ ...current, [messageId]: text }))}
-        onApprove={(message) => void approveDraft(message)}
-        onReject={(message) => void rejectDraft(message)}
+      <QueueSection
+        title="Needs Approval"
+        subtitle="Drafts that are blocked until an operator reviews, edits, rejects, or escalates them."
+        icon={ShieldAlert}
+        tone="approval"
+      >
+        {queues.needsApproval.length ? (
+          <div className="grid gap-4">
+            {queues.needsApproval.map((message) => {
+              const draftText = currentDraft(message, draftEdits);
+              const changed = draftText !== (message.draft_text ?? message.message_body);
+              const busy = busyId === message.id;
+              return (
+                <article key={message.id} className="rounded-[24px] border border-amber-400/15 bg-[#091827]/55 p-4">
+                  <MessageMetaRow message={message} />
+                  <label className="mt-4 block">
+                    <div className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-blue-100/58">Message Preview</div>
+                    <textarea
+                      value={draftText}
+                      onChange={(event) => setDraftEdits((current) => ({ ...current, [message.id]: event.target.value }))}
+                      className="command-card min-h-32 w-full rounded-2xl px-4 py-3 text-sm leading-6 text-blue-50"
+                    />
+                  </label>
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      disabled={!changed || busy}
+                      onClick={() => void saveEdit(message)}
+                      className="rounded-2xl border border-blue-400/20 bg-[#102338]/72 px-3 py-2 text-sm font-semibold text-blue-50 disabled:opacity-40"
+                    >
+                      <span className="inline-flex items-center gap-2">
+                        <UserRoundPen className="h-4 w-4" aria-hidden="true" />
+                        Edit Before Approve
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => void approveDraft(message)}
+                      className="selected-glow rounded-2xl px-3 py-2 text-sm font-semibold text-white disabled:opacity-40"
+                    >
+                      Approve
+                    </button>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => void rejectDraft(message)}
+                      className="rounded-2xl border border-rose-400/30 bg-rose-500/10 px-3 py-2 text-sm font-semibold text-rose-100 disabled:opacity-40"
+                    >
+                      Reject
+                    </button>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => void markNeedsHumanFollowUp(message)}
+                      className="rounded-2xl border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-sm font-semibold text-amber-100 disabled:opacity-40"
+                    >
+                      Mark as Needs Human Follow-up
+                    </button>
+                  </div>
+                  {policySummary(message) ? <div className="mt-3 text-sm leading-6 text-amber-100/82">{policySummary(message)}</div> : null}
+                </article>
+              );
+            })}
+          </div>
+        ) : (
+          <EmptyState copy="No drafts are waiting for approval right now." />
+        )}
+      </QueueSection>
+
+      <MessageGroup
+        title="Approved / Sending"
+        subtitle="Messages that have cleared review and are moving through delivery."
+        icon={Send}
+        tone="sending"
+        messages={queues.approvedSending}
       />
-
-      <MessageTable title="Sent Messages" messages={queues.sent} empty="No sent messages yet." />
-      <MessageTable title="Sending" messages={queues.queued} empty="No approved messages are sending." />
-      <MessageTable title="Failed Messages" messages={queues.failed} empty="No failed messages." />
-      <MessageTable title="Rejected Messages" messages={queues.rejected} empty="No rejected messages." />
+      <MessageGroup title="Sent" subtitle="Delivered outbound history for quick spot checks." icon={CheckCircle2} tone="sent" messages={queues.sent} />
+      <MessageGroup
+        title="Failed"
+        subtitle="Messages that failed delivery, were rejected, or were intentionally diverted to human follow-up."
+        icon={XCircle}
+        tone="failed"
+        messages={queues.failed}
+      />
     </main>
   );
 }
 
-function DraftQueue({
+function MessageGroup({
+  title,
+  subtitle,
+  icon,
+  tone,
   messages,
-  draftEdits,
-  onDraftEdit,
-  onApprove,
-  onReject
 }: {
+  title: string;
+  subtitle: string;
+  icon: typeof Send;
+  tone: "sending" | "sent" | "failed";
   messages: OfOutboundMessage[];
-  draftEdits: Record<string, string>;
-  onDraftEdit: (messageId: string, text: string) => void;
-  onApprove: (message: OfOutboundMessage) => void;
-  onReject: (message: OfOutboundMessage) => void;
 }) {
   return (
-    <section className="overflow-hidden rounded-md border border-stone-200 bg-white">
-      <div className="border-b border-stone-200 px-4 py-3">
-        <h2 className="text-base font-semibold text-stone-950">Drafts Awaiting Approval</h2>
-      </div>
-      <table className="w-full min-w-[1080px] text-left text-sm">
-        <thead className="bg-stone-100 text-stone-600">
-          <tr>
-            {["Creator", "Fan", "Script", "Draft", "Source Event", "Created", "Actions"].map((header) => (
-              <th key={header} className="px-4 py-3 font-semibold">{header}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-stone-100">
+    <QueueSection title={title} subtitle={subtitle} icon={icon} tone={tone}>
+      {messages.length ? (
+        <div className="grid gap-3">
           {messages.map((message) => (
-            <tr key={message.id} className="align-top">
-              <td className="px-4 py-3 text-stone-700">{creatorLabel(message)}</td>
-              <td className="px-4 py-3 text-stone-700">{message.fan_id}</td>
-              <td className="px-4 py-3 text-stone-700">{message.of_message_scripts?.name ?? message.script_id ?? "manual"}</td>
-              <td className="px-4 py-3">
-                <textarea
-                  value={draftEdits[message.id] ?? message.draft_text ?? message.message_body}
-                  onChange={(event) => onDraftEdit(message.id, event.target.value)}
-                  className="min-h-24 w-full rounded-md border border-stone-200 px-3 py-2 text-sm text-stone-800 outline-none focus:border-teal-700"
-                />
-              </td>
-              <td className="px-4 py-3 text-stone-700">{shortId(message.source_event_id)}</td>
-              <td className="px-4 py-3 text-stone-700">{date(message.created_at)}</td>
-              <td className="px-4 py-3">
-                <div className="flex flex-wrap gap-2">
-                  <button type="button" onClick={() => onApprove(message)} className="rounded-md bg-teal-700 px-2 py-1 text-xs font-semibold text-white">Approve</button>
-                  <button type="button" onClick={() => onReject(message)} className="rounded-md border border-stone-200 px-2 py-1 text-xs font-semibold text-stone-700">Reject</button>
-                </div>
-              </td>
-            </tr>
+            <article key={message.id} className="rounded-[24px] border border-blue-400/15 bg-[#091827]/55 p-4">
+              <MessageMetaRow message={message} />
+              <div className="mt-4 rounded-2xl bg-[#071423]/80 px-4 py-3 text-sm leading-6 text-blue-50">
+                {message.final_text ?? message.draft_text ?? message.message_body}
+              </div>
+              <div className="mt-3 flex flex-wrap gap-2 text-xs text-blue-100/62">
+                <StatusPill label={message.status} tone={tone} />
+                <StatusPill label={`approval: ${message.approval_status}`} tone={tone} />
+                {message.approved_by ? <StatusPill label={`actor: ${message.approved_by}`} tone={tone} /> : null}
+                {message.failure_reason ?? message.error_message ? <StatusPill label={message.failure_reason ?? message.error_message ?? ""} tone="failed" /> : null}
+              </div>
+            </article>
           ))}
-          {!messages.length ? (
-            <tr>
-              <td colSpan={7} className="px-4 py-6 text-stone-500">No drafts awaiting approval.</td>
-            </tr>
-          ) : null}
-        </tbody>
-      </table>
+        </div>
+      ) : (
+        <EmptyState copy={`No messages in ${title.toLowerCase()} right now.`} />
+      )}
+    </QueueSection>
+  );
+}
+
+function QueueSection({
+  title,
+  subtitle,
+  icon: Icon,
+  tone,
+  children,
+}: {
+  title: string;
+  subtitle: string;
+  icon: typeof Send;
+  tone: "approval" | "sending" | "sent" | "failed";
+  children: ReactNode;
+}) {
+  const toneClass =
+    tone === "approval"
+      ? "text-amber-200"
+      : tone === "sending"
+        ? "text-cyan-200"
+        : tone === "sent"
+          ? "text-emerald-200"
+          : "text-rose-200";
+  return (
+    <section className="glass-panel rounded-[28px] p-5">
+      <div className="flex items-start gap-3">
+        <div className={`mt-0.5 flex h-10 w-10 items-center justify-center rounded-2xl bg-white/5 ${toneClass}`}>
+          <Icon className="h-4 w-4" aria-hidden="true" />
+        </div>
+        <div>
+          <div className="text-lg font-semibold text-white">{title}</div>
+          <div className="text-sm text-blue-100/64">{subtitle}</div>
+        </div>
+      </div>
+      <div className="mt-5">{children}</div>
     </section>
   );
 }
 
-function MessageTable({ title, messages, empty }: { title: string; messages: OfOutboundMessage[]; empty: string }) {
+function MessageMetaRow({ message }: { message: OfOutboundMessage }) {
+  const meta = messageMetadata(message);
   return (
-    <section className="overflow-hidden rounded-md border border-stone-200 bg-white">
-      <div className="border-b border-stone-200 px-4 py-3">
-        <h2 className="text-base font-semibold text-stone-950">{title}</h2>
-      </div>
-      <table className="w-full min-w-[1080px] text-left text-sm">
-        <thead className="bg-stone-100 text-stone-600">
-          <tr>
-            {["Creator", "Fan", "Script", "Message", "Status", "Approval", "Event", "Created", "Sent", "Error"].map((header) => (
-              <th key={header} className="px-4 py-3 font-semibold">{header}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-stone-100">
-          {messages.map((message) => (
-            <tr key={message.id} className="align-top">
-              <td className="px-4 py-3 text-stone-700">{creatorLabel(message)}</td>
-              <td className="px-4 py-3 text-stone-700">{message.fan_id}</td>
-              <td className="px-4 py-3 text-stone-700">{message.of_message_scripts?.name ?? message.script_id ?? "manual"}</td>
-              <td className="max-w-md px-4 py-3 text-stone-700">{message.final_text ?? message.draft_text ?? message.message_body}</td>
-              <td className="px-4 py-3 font-semibold text-stone-800">{message.status}</td>
-              <td className="px-4 py-3 text-stone-700">{message.approval_status}</td>
-              <td className="px-4 py-3 text-stone-700">{shortId(message.source_event_id)}</td>
-              <td className="px-4 py-3 text-stone-700">{date(message.created_at)}</td>
-              <td className="px-4 py-3 text-stone-700">{date(message.sent_at)}</td>
-              <td className="px-4 py-3 text-stone-700">{message.failure_reason ?? message.error_message ?? "none"}</td>
-            </tr>
-          ))}
-          {!messages.length ? (
-            <tr>
-              <td colSpan={10} className="px-4 py-6 text-stone-500">{empty}</td>
-            </tr>
-          ) : null}
-        </tbody>
-      </table>
-    </section>
+    <div className="grid gap-3 xl:grid-cols-[1.1fr_1.1fr_1fr_1fr_0.9fr_1fr]">
+      <MetaBlock label="Creator" value={creatorLabel(message)} />
+      <MetaBlock label="Fan" value={message.fan_id} />
+      <MetaBlock label="Source Rule" value={meta.sourceRuleName} />
+      <MetaBlock label="Source Script" value={meta.sourceScriptName} />
+      <MetaBlock label="Approval Mode" value={meta.approvalMode} />
+      <MetaBlock label="Created" value={date(message.created_at)} />
+    </div>
+  );
+}
+
+function MetaBlock({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-2xl border border-blue-400/15 bg-[#071423]/72 px-3 py-3">
+      <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-blue-100/56">{label}</div>
+      <div className="mt-2 text-sm font-medium text-white">{value}</div>
+    </div>
   );
 }
 
 function CountCard({ label, value, icon: Icon }: { label: string; value: number; icon: typeof Clock3 }) {
   return (
-    <div className="rounded-md border border-stone-200 bg-white p-4">
+    <div className="premium-card rounded-[24px] p-4">
       <div className="flex items-center justify-between gap-3">
         <div>
-          <div className="text-sm font-medium text-stone-500">{label}</div>
-          <div className="mt-1 text-2xl font-semibold text-stone-950">{value}</div>
+          <div className="text-xs font-semibold uppercase tracking-[0.16em] text-cyan-200/80">{label}</div>
+          <div className="mt-2 text-3xl font-semibold text-white">{value}</div>
         </div>
-        <Icon className="h-5 w-5 text-teal-700" aria-hidden="true" />
+        <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-cyan-400/10 text-cyan-300">
+          <Icon className="h-5 w-5" aria-hidden="true" />
+        </div>
       </div>
     </div>
   );
 }
 
-function creatorLabel(message: OfOutboundMessage) {
-  return message.of_creators?.display_name ?? message.of_creators?.username ?? message.creator_id;
+function EmptyState({ copy }: { copy: string }) {
+  return <div className="rounded-[24px] border border-blue-400/15 bg-[#091827]/55 px-4 py-6 text-sm text-blue-100/60">{copy}</div>;
 }
 
-function shortId(value: string | null | undefined) {
-  return value ? value.slice(0, 8) : "none";
+function StatusPill({ label, tone }: { label: string; tone: "sending" | "sent" | "failed" }) {
+  const className =
+    tone === "sending"
+      ? "bg-cyan-400/12 text-cyan-200"
+      : tone === "sent"
+        ? "bg-emerald-500/12 text-emerald-200"
+        : "bg-rose-500/12 text-rose-200";
+  return <span className={`rounded-full px-2.5 py-1 font-semibold ${className}`}>{label}</span>;
+}
+
+function messageMetadata(message: OfOutboundMessage) {
+  const metadata = message.metadata && typeof message.metadata === "object" ? message.metadata : {};
+  return {
+    sourceRuleName: stringFromMeta(metadata, "source_rule_name") ?? "Direct script",
+    sourceScriptName: stringFromMeta(metadata, "source_script_name") ?? message.of_message_scripts?.name ?? message.script_id ?? "Unknown script",
+    approvalMode: stringFromMeta(metadata, "approval_mode") ?? stringFromMeta(metadata, "resolved_action_mode") ?? message.approval_status,
+  };
+}
+
+function policySummary(message: OfOutboundMessage) {
+  const metadata = message.metadata && typeof message.metadata === "object" ? message.metadata : {};
+  return stringFromMeta(metadata, "policy_summary");
+}
+
+function stringFromMeta(value: object, key: string) {
+  const record = value as Record<string, unknown>;
+  return typeof record[key] === "string" && record[key] ? String(record[key]) : null;
+}
+
+function currentDraft(message: OfOutboundMessage, draftEdits: Record<string, string>) {
+  return draftEdits[message.id] ?? message.draft_text ?? message.message_body;
+}
+
+function creatorLabel(message: OfOutboundMessage) {
+  return message.of_creators?.display_name ?? message.of_creators?.username ?? message.creator_id;
 }
 
 function date(value: string | null | undefined) {

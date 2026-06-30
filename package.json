@@ -6,12 +6,15 @@
     "apps/*",
     "packages/*"
   ],
-    "scripts": {
-        "dev:creator-cockpit": "npm --workspace @funkmyfans/creator-cockpit run dev",
-        "events:betterfans": "tsx scripts/betterfans-event-stream.ts",
-        "build": "npm run build --workspaces",
-        "typecheck": "npm run typecheck --workspaces"
-    },
+  "scripts": {
+    "dev:creator-cockpit": "npm --workspace @funkmyfans/creator-cockpit run dev",
+    "events:betterfans": "tsx scripts/betterfans-event-stream.ts",
+    "smoke:creator-cockpit": "tsx scripts/creator-cockpit-smoke.ts",
+    "smoke:creator-cockpit:local": "tsx scripts/creator-cockpit-smoke.ts http://127.0.0.1:8787",
+    "smoke:creator-cockpit:prod": "tsx scripts/creator-cockpit-smoke.ts",
+    "build": "npm run build --workspaces",
+    "typecheck": "npm run typecheck --workspaces"
+  },
   "dependencies": {
     "@betterfans/link-sdk": "file:sdk/betterfans-link-sdk-latest.tgz",
     "dotenv": "^17.4.2"

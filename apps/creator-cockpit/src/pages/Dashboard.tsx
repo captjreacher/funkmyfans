@@ -1,4 +1,4 @@
-import { AlertTriangle, ArrowUpRight, Bot, Clock3, ClipboardList, DollarSign, HeartPulse, Plus, Sparkles } from "lucide-react";
+import { Activity, AlertTriangle, ArrowUpRight, Bot, Clock3, ClipboardList, DollarSign, HeartPulse, MessageSquareReply, OctagonAlert, Plus, ShieldAlert, Sparkles, Workflow } from "lucide-react";
 import { MetricTile } from "../components/MetricTile";
 import type { DashboardData } from "../lib/api";
 
@@ -90,6 +90,15 @@ export function Dashboard({
             ))}
           </div>
         </div>
+      </section>
+
+      <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+        <OpsCard label="Drafts Needing Approval" value={String(data.dailyOperations.draftsNeedingApproval)} detail="Human review queue" icon={ShieldAlert} />
+        <OpsCard label="Failed Sends" value={String(data.dailyOperations.failedSends)} detail="Delivery and follow-up exceptions" icon={OctagonAlert} />
+        <OpsCard label="Fans Needing Reply" value={String(data.dailyOperations.fansNeedingReply)} detail="Conversations waiting on the agency" icon={MessageSquareReply} />
+        <OpsCard label="Automations Matched Today" value={String(data.dailyOperations.automationsMatchedToday)} detail="Runs that fired today" icon={Activity} />
+        <OpsCard label="Scripts Triggered Today" value={String(data.dailyOperations.scriptsTriggeredToday)} detail="Distinct scripts in motion" icon={Workflow} />
+        <OpsCard label="Revenue Opportunities / Tasks" value={String(data.dailyOperations.revenueOpportunities)} detail="High-value follow-up pressure" icon={DollarSign} />
       </section>
 
       <section className="grid gap-4 xl:grid-cols-[0.95fr_1.05fr_0.8fr]">
@@ -204,4 +213,21 @@ function subscriberPriorityScore(subscriber: DashboardData["relationships"][numb
 
 function isActiveTask(status: string) {
   return status === "open" || status === "in_progress" || status === "waiting";
+}
+
+function OpsCard({ label, value, detail, icon: Icon }: { label: string; value: string; detail: string; icon: typeof Sparkles }) {
+  return (
+    <div className="premium-card rounded-2xl p-4">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <div className="text-xs font-semibold uppercase tracking-[0.16em] text-cyan-200/80">{label}</div>
+          <div className="mt-2 text-3xl font-semibold text-white">{value}</div>
+        </div>
+        <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-cyan-400/10 text-cyan-300">
+          <Icon className="h-5 w-5" aria-hidden="true" />
+        </div>
+      </div>
+      <div className="mt-2 text-sm text-blue-100/62">{detail}</div>
+    </div>
+  );
 }

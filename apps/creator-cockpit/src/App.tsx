@@ -14,11 +14,14 @@ import {
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { ConnectCreatorModal } from "./components/ConnectCreatorModal";
+import { Automation } from "./pages/Automation";
 import { CreatorDetail } from "./pages/CreatorDetail";
 import { Creators } from "./pages/Creators";
 import { Dashboard } from "./pages/Dashboard";
 import { Events } from "./pages/Events";
 import { OutboundMessages } from "./pages/OutboundMessages";
+import { Scripts } from "./pages/Scripts";
+import { Settings } from "./pages/Settings";
 import { Subscribers } from "./pages/Subscribers";
 import { Tasks } from "./pages/Tasks";
 import { fetchDashboard, type DashboardData } from "./lib/api";
@@ -49,8 +52,8 @@ const secondaryNav: Array<{
   label: string;
   icon: typeof BarChart3;
 }> = [
-  { view: "scripts", label: "Scripts", icon: FileText },
-  { view: "automation", label: "Automation", icon: Cpu },
+  { view: "scripts", label: "Playbooks", icon: FileText },
+  { view: "automation", label: "Routing", icon: Cpu },
   { view: "settings", label: "Settings", icon: Cog },
 ];
 
@@ -254,22 +257,13 @@ export function App() {
                 ) : null}
                 {view === "outbound" ? <OutboundMessages /> : null}
                 {view === "scripts" ? (
-                  <Placeholder
-                    title="Scripts"
-                    description="Create and manage reusable message scripts for welcomes, renewals, reactivation, VIPs, and PPV offers."
-                  />
+                  <Scripts />
                 ) : null}
                 {view === "automation" ? (
-                  <Placeholder
-                    title="Automation"
-                    description="Build rules that turn creator events into tasks, draft messages, approvals, and outbound actions."
-                  />
+                  <Automation />
                 ) : null}
                 {view === "settings" ? (
-                  <Placeholder
-                    title="Settings"
-                    description="Manage agency defaults, creator preferences, AI modes, approval rules, and BetterFans connection health."
-                  />
+                  <Settings />
                 ) : null}
               </>
             )}

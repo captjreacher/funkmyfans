@@ -1,5 +1,15 @@
 import type {
   OfAutomationSimulation,
+  ConversationHealthAlert,
+  ConversationOperationsDetail,
+  ConversationOperationsExport,
+  ConversationOperationsMetrics,
+  ConversationOperationsSummary,
+  OfAutomationAuditTrailEntry,
+  OfAutomationRule,
+  AutomationRuleSimulationResult,
+  AutomationRegistryWorkspaceData,
+  AgencyDefaultsSettings,
   MessageScriptTemplate,
   OfAutomationRun,
   OfChat,
@@ -13,6 +23,9 @@ import type {
   OfMessageScript,
   OfOutboundMessage,
   OfRecommendation,
+  SettingsWorkspaceData,
+  CreatorPreferenceSettings,
+  CreatorAiSafetySettings,
   OfContextEvent,
   OfRelationshipTimelineItem,
   OfSimulatedSubscriber,
@@ -43,6 +56,14 @@ export interface DashboardData {
   contextEvents: OfContextEvent[];
   dailyFocusQueue: DailyFocusQueueCard[];
   morningBrief: MorningBrief;
+  dailyOperations: {
+    draftsNeedingApproval: number;
+    failedSends: number;
+    fansNeedingReply: number;
+    automationsMatchedToday: number;
+    scriptsTriggeredToday: number;
+    revenueOpportunities: number;
+  };
 }
 
 export interface CreatorDetailData {
@@ -64,6 +85,11 @@ export interface ConversationDetailData {
   history: OfConversationHistoryItem[];
 }
 
+export interface OperationsDashboardData {
+  summary: ConversationOperationsSummary;
+  conversations: OfConversationInstance[];
+}
+
 export interface SimulationDetailData {
   simulation: OfAutomationSimulation;
   conversation: OfConversationInstance | null;
@@ -75,6 +101,21 @@ export interface SubscribersData {
   creators: OfCreator[];
   subscribers: OfSubscriberRelationship[];
   tasks: OfTask[];
+}
+
+export interface ScriptsWorkspaceData {
+  creators: OfCreator[];
+  scripts: OfMessageScript[];
+}
+
+export interface AutomationWorkspaceData {
+  creators: OfCreator[];
+  scripts: OfMessageScript[];
+  rules: OfAutomationRule[];
+}
+
+export interface RegistryWorkspaceData {
+  registry: AutomationRegistryWorkspaceData;
 }
 
 export interface SubscriberDetailData {
@@ -243,6 +284,22 @@ export async function fetchCreatorScripts(creatorId: string): Promise<{ scripts:
   return apiJson<{ scripts: OfMessageScript[] }>(`/creators/${creatorId}/scripts`);
 }
 
+export async function fetchScriptsWorkspace(): Promise<ScriptsWorkspaceData> {
+  return apiJson<ScriptsWorkspaceData>("/scripts/workspace");
+}
+
+export async function fetchAutomationWorkspace(): Promise<AutomationWorkspaceData> {
+  return apiJson<AutomationWorkspaceData>("/automation/workspace");
+}
+
+export async function fetchAutomationRegistry(): Promise<AutomationRegistryWorkspaceData> {
+  return apiJson<AutomationRegistryWorkspaceData>("/automation/registry");
+}
+
+export async function fetchSettingsWorkspace(): Promise<SettingsWorkspaceData> {
+  return apiJson<SettingsWorkspaceData>("/settings/workspace");
+}
+
 export async function createCreatorScript(creatorId: string, template: MessageScriptTemplate): Promise<{ script: OfMessageScript }> {
   return apiJson<{ script: OfMessageScript }>(`/creators/${creatorId}/scripts`, jsonInit("POST", template));
 }
@@ -260,6 +317,73 @@ export async function saveScriptBuilder(scriptId: string, template: MessageScrip
 export async function duplicateScript(scriptId: string): Promise<{ script: OfMessageScript }> {
   assertUuid(scriptId, "script");
   return apiJson<{ script: OfMessageScript }>(`/scripts/${scriptId}/duplicate`, { method: "POST" });
+}
+
+export async function deleteScript(scriptId: string): Promise<{ ok: true }> {
+  assertUuid(scriptId, "script");
+  return apiJson<{ ok: true }>(`/scripts/${scriptId}`, { method: "DELETE" });
+}
+
+export async function createAutomationRule(payload: Partial<OfAutomationRule>): Promise<{ rule: OfAutomationRule }> {
+  return apiJson<{ rule: OfAutomationRule }>("/automation/rules", jsonInit("POST", payload));
+}
+
+export async function updateAutomationRule(ruleId: string, patch: Partial<OfAutomationRule>): Promise<{ rule: OfAutomationRule }> {
+  assertUuid(ruleId, "automation rule");
+  return apiJson<{ rule: OfAutomationRule }>(`/automation/rules/${ruleId}`, jsonInit("PATCH", patch));
+}
+
+export async function duplicateAutomationRule(ruleId: string): Promise<{ rule: OfAutomationRule }> {
+  assertUuid(ruleId, "automation rule");
+  return apiJson<{ rule: OfAutomationRule }>(`/automation/rules/${ruleId}/duplicate`, { method: "POST" });
+}
+
+export async function deleteAutomationRule(ruleId: string): Promise<{ ok: true }> {
+  assertUuid(ruleId, "automation rule");
+  return apiJson<{ ok: true }>(`/automation/rules/${ruleId}`, { method: "DELETE" });
+}
+
+export async function testAutomationRule(
+  ruleId: string,
+  payload: {
+    creatorId: string;
+    eventType: string;
+    subscriber: {
+      name: string;
+      username: string;
+      subscription_status: string;
+      renewal_state: string;
+      spend_level: string;
+      lifetime_value: number;
+      message_history_summary?: string;
+      custom_variables?: Record<string, unknown>;
+    };
+    relationship?: Record<string, unknown>;
+    eventPayload?: Record<string, unknown>;
+  }
+): Promise<AutomationRuleSimulationResult> {
+  assertUuid(ruleId, "automation rule");
+  return apiJson<AutomationRuleSimulationResult>(`/automation/rules/${ruleId}/test`, jsonInit("POST", payload));
+}
+
+export async function updateAgencySettings(patch: Partial<AgencyDefaultsSettings>): Promise<{ agency: AgencyDefaultsSettings }> {
+  return apiJson<{ agency: AgencyDefaultsSettings }>("/settings/agency", jsonInit("PATCH", patch));
+}
+
+export async function updateCreatorPreferences(
+  creatorId: string,
+  patch: Partial<CreatorPreferenceSettings>
+): Promise<{ preferences: CreatorPreferenceSettings }> {
+  assertUuid(creatorId, "creator");
+  return apiJson<{ preferences: CreatorPreferenceSettings }>(`/settings/creators/${creatorId}/preferences`, jsonInit("PATCH", patch));
+}
+
+export async function updateCreatorAiSafety(
+  creatorId: string,
+  patch: Partial<CreatorAiSafetySettings>
+): Promise<{ aiSafety: CreatorAiSafetySettings }> {
+  assertUuid(creatorId, "creator");
+  return apiJson<{ aiSafety: CreatorAiSafetySettings }>(`/settings/creators/${creatorId}/ai-safety`, jsonInit("PATCH", patch));
 }
 
 export async function runEventAutomations(eventId: string): Promise<AutomationRunSummary> {
@@ -362,6 +486,53 @@ export async function cancelConversation(conversationId: string, reason: string)
   return apiJson<{ conversation: OfConversationInstance }>(`/conversations/${conversationId}/cancel`, jsonInit("POST", { reason }));
 }
 
+export async function fetchOperationsDashboard(filters: Record<string, string> = {}): Promise<OperationsDashboardData> {
+  return apiJson<OperationsDashboardData>(`/operations/dashboard${queryString(filters)}`);
+}
+
+export async function fetchOperationsConversationDetail(conversationId: string): Promise<ConversationOperationsDetail> {
+  assertUuid(conversationId, "conversation");
+  return apiJson<ConversationOperationsDetail>(`/operations/conversations/${conversationId}`);
+}
+
+export async function retryOperationsConversation(conversationId: string): Promise<ConversationOperationsDetail> {
+  assertUuid(conversationId, "conversation");
+  return apiJson<ConversationOperationsDetail>(`/operations/conversations/${conversationId}/retry`, { method: "POST" });
+}
+
+export async function resumeOperationsConversation(conversationId: string): Promise<ConversationOperationsDetail> {
+  assertUuid(conversationId, "conversation");
+  return apiJson<ConversationOperationsDetail>(`/operations/conversations/${conversationId}/resume`, { method: "POST" });
+}
+
+export async function cancelOperationsConversation(conversationId: string, reason: string): Promise<ConversationOperationsDetail> {
+  assertUuid(conversationId, "conversation");
+  return apiJson<ConversationOperationsDetail>(`/operations/conversations/${conversationId}/cancel`, jsonInit("POST", { reason }));
+}
+
+export async function restartOperationsConversation(conversationId: string): Promise<ConversationOperationsDetail> {
+  assertUuid(conversationId, "conversation");
+  return apiJson<ConversationOperationsDetail>(`/operations/conversations/${conversationId}/restart`, { method: "POST" });
+}
+
+export async function duplicateConversationAsSimulation(conversationId: string): Promise<ConversationOperationsDetail> {
+  assertUuid(conversationId, "conversation");
+  return apiJson<ConversationOperationsDetail>(`/operations/conversations/${conversationId}/duplicate-as-simulation`, { method: "POST" });
+}
+
+export async function exportOperationsConversation(conversationId: string): Promise<ConversationOperationsExport> {
+  assertUuid(conversationId, "conversation");
+  return apiJson<ConversationOperationsExport>(`/operations/conversations/${conversationId}/export`);
+}
+
+export async function fetchOperationsMetrics(filters: Record<string, string> = {}): Promise<ConversationOperationsMetrics> {
+  return apiJson<ConversationOperationsMetrics>(`/operations/metrics${queryString(filters)}`);
+}
+
+export async function fetchOperationsAuditTrail(filters: Record<string, string> = {}): Promise<{ entries: OfAutomationAuditTrailEntry[] }> {
+  return apiJson<{ entries: OfAutomationAuditTrailEntry[] }>(`/operations/audit-trail${queryString(filters)}`);
+}
+
 export async function processDueConversations(): Promise<{ processed: number; errors: string[] }> {
   return apiJson<{ processed: number; errors: string[] }>("/conversations/process-due", { method: "POST" });
 }
@@ -381,7 +552,12 @@ export async function fetchOutboundMessages(): Promise<{ messages: OfOutboundMes
 
 export async function updateOutboundMessage(
   messageId: string,
-  patch: Partial<Pick<OfOutboundMessage, "draft_text" | "final_text" | "status" | "approval_status" | "approved_by">>
+  patch: Partial<Pick<OfOutboundMessage, "draft_text" | "final_text" | "status" | "approval_status" | "approved_by">> & {
+    edited_by?: string;
+    error_message?: string;
+    failure_reason?: string;
+    reason?: string;
+  }
 ): Promise<{ message: OfOutboundMessage }> {
   assertUuid(messageId, "outbound message");
   return apiJson<{ message: OfOutboundMessage }>(`/outbound-messages/${messageId}`, jsonInit("PATCH", patch));
@@ -430,6 +606,15 @@ async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
 
 function apiUrl(path: string) {
   return `${API_BASE}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
+function queryString(filters: Record<string, string>) {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(filters)) {
+    if (value && value !== "all") params.set(key, value);
+  }
+  const query = params.toString();
+  return query ? `?${query}` : "";
 }
 
 function jsonInit(method: "POST" | "PATCH" | "PUT", body: unknown): RequestInit {

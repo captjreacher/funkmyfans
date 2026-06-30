@@ -1,0 +1,38 @@
+name: Creator Cockpit Smoke
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      COCKPIT_BASE_URL: ${{ secrets.COCKPIT_BASE_URL || vars.COCKPIT_BASE_URL }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck Creator Cockpit
+        run: npm --workspace @funkmyfans/creator-cockpit run typecheck
+
+      - name: Build Creator Cockpit
+        run: npm --workspace @funkmyfans/creator-cockpit run build
+
+      - name: Smoke Creator Cockpit
+        if: env.COCKPIT_BASE_URL != ''
+        run: npm run smoke:creator-cockpit
+
+      - name: Skip smoke when URL missing
+        if: env.COCKPIT_BASE_URL == ''
+        run: echo "COCKPIT_BASE_URL is not set; skipping deployed smoke."
