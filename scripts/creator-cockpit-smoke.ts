@@ -56,6 +56,10 @@ async function main() {
     await validateBusinessFlow(dashboard, scriptsWorkspace, automationWorkspace, failures, notes);
   }
 
+  if (dashboard) {
+    await validateCop1QueueWorkspaceFlow(dashboard, failures, notes);
+  }
+
   if (outboundMessagesResponse) {
     validateOutboundApprovalQueue(outboundMessages, failures);
   }
@@ -438,6 +442,58 @@ async function validateBusinessFlow(
   await runAutomationSimulationTest(chosenRule, testInput, failures, notes);
 }
 
+async function validateCop1QueueWorkspaceFlow(dashboard: JsonRecord, failures: string[], notes: string[]) {
+  const creators = arrayOfObjects(dashboard.creators) as JsonRecord[];
+  const connectedCreator = pickConnectedCreator(creators);
+  if (!connectedCreator) {
+    failures.push("/api/dashboard: expected at least one connected creator to exercise COP-1 queue workspace smoke");
+    return;
+  }
+
+  const creatorId = stringValue(connectedCreator.id);
+  notes.push(`[queue] selected creator ${stringValue(connectedCreator.display_name ?? connectedCreator.username ?? connectedCreator.id)}`);
+
+  const queueWorkspace = await readJson(`/api/queue-workspace?creatorId=${encodeURIComponent(creatorId)}`, failures);
+  const operationsDashboard = await readJson(`/api/operations/dashboard?creatorId=${encodeURIComponent(creatorId)}`, failures);
+  if (!queueWorkspace || !operationsDashboard) return;
+
+  validateQueueWorkspaceShape(queueWorkspace, "/api/queue-workspace", failures);
+  validateQueueWorkspaceShape(operationsDashboard, "/api/operations/dashboard", failures);
+  validateCompatibilityAdapter(queueWorkspace, operationsDashboard, failures);
+
+  const selectedCreator = requireRecord(queueWorkspace, "selected_creator", "/api/queue-workspace", failures);
+  if (selectedCreator) {
+    requireString(selectedCreator, "id", "/api/queue-workspace.selected_creator", failures);
+    requireString(selectedCreator, "username", "/api/queue-workspace.selected_creator", failures);
+    if (stringValue(selectedCreator.id) !== creatorId) {
+      failures.push(`/api/queue-workspace.selected_creator: expected creator ${creatorId}, got ${describeValue(selectedCreator.id)}`);
+    }
+  }
+
+  const queues = arrayOfObjects(queueWorkspace.queues);
+  const items = arrayOfObjects(queueWorkspace.items);
+  if (!queues.length) {
+    failures.push("/api/queue-workspace: expected at least one queue to validate queue ownership behavior");
+    return;
+  }
+  if (!items.length) {
+    failures.push("/api/queue-workspace: expected at least one queue item to validate queue item lifecycle");
+    return;
+  }
+
+  for (const queue of queues.slice(0, 3)) {
+    validateQueueSummary(queue, failures, "/api/queue-workspace.queues[]");
+  }
+
+  validateQueueItemLifecycle(items[0], failures, "/api/queue-workspace.items[0]");
+
+  const selectedItem = items.find((item) => isRecord(item.conversation) && typeof item.conversation.id === "string") ?? items[0];
+  if (!selectedItem) return;
+
+  validateQueueItemLifecycle(selectedItem, failures, "/api/queue-workspace.selected_item");
+  await validateConversationLifecycle(selectedItem, failures, notes);
+}
+
 async function runAutomationSimulationTest(
   rule: JsonRecord,
   testInput: {
@@ -537,6 +593,209 @@ async function runAutomationSimulationTest(
     if (sentMessages.length) {
       failures.push(`${path}: simulation generated sent outbound messages, which is not allowed in smoke tests`);
     }
+  }
+}
+
+function validateQueueWorkspaceShape(body: JsonRecord, endpoint: string, failures: string[]) {
+  const selectedCreator = body.selected_creator;
+  const summary = requireRecord(body, "summary", endpoint, failures);
+  const queues = requireArray(body, "queues", endpoint, failures);
+  const items = requireArray(body, "items", endpoint, failures);
+  requireString(body, "selected_queue_id", endpoint, failures);
+  requireString(body, "selected_item_id", endpoint, failures);
+  const selectedItemContext = body.selected_item_context;
+
+  if (isRecord(selectedCreator)) {
+    requireString(selectedCreator, "id", `${endpoint}.selected_creator`, failures);
+    requireString(selectedCreator, "username", `${endpoint}.selected_creator`, failures);
+  } else if (selectedCreator !== null && typeof selectedCreator !== "undefined") {
+    failures.push(`${endpoint}: expected selected_creator to be an object or null, got ${describeValue(selectedCreator)}`);
+  }
+
+  if (summary) {
+    requireNumber(summary, "total_queues", `${endpoint}.summary`, failures);
+    requireNumber(summary, "total_items", `${endpoint}.summary`, failures);
+    requireNumber(summary, "visible_items", `${endpoint}.summary`, failures);
+    requireNumber(summary, "claimed_items", `${endpoint}.summary`, failures);
+    requireNumber(summary, "assigned_items", `${endpoint}.summary`, failures);
+    requireNumber(summary, "moved_items", `${endpoint}.summary`, failures);
+    requireNumber(summary, "resolved_items", `${endpoint}.summary`, failures);
+    requireNumber(summary, "overdue_items", `${endpoint}.summary`, failures);
+  }
+
+  validateSampleObjects(
+    endpoint,
+    [
+      [queues, (queue) => validateQueueSummary(queue, failures, `${endpoint}.queues[]`)],
+      [items, (item) => validateQueueItemLifecycle(item, failures, `${endpoint}.items[]`)]
+    ],
+    failures
+  );
+
+  if (isRecord(selectedItemContext)) {
+    validateQueueItemContext(selectedItemContext, failures, `${endpoint}.selected_item_context`);
+  } else if (selectedItemContext !== null && typeof selectedItemContext !== "undefined") {
+    failures.push(`${endpoint}: expected selected_item_context to be an object or null, got ${describeValue(selectedItemContext)}`);
+  }
+
+  if (summary) {
+    const totalQueues = numberValue(summary.total_queues);
+    const totalItems = numberValue(summary.total_items);
+    if (totalQueues !== queues.length) {
+      failures.push(`${endpoint}.summary: total_queues should match queues length (${queues.length}), got ${totalQueues}`);
+    }
+    if (totalItems !== items.length) {
+      failures.push(`${endpoint}.summary: total_items should match items length (${items.length}), got ${totalItems}`);
+    }
+    const countedItems =
+      numberValue(summary.visible_items) +
+      numberValue(summary.claimed_items) +
+      numberValue(summary.assigned_items) +
+      numberValue(summary.moved_items) +
+      numberValue(summary.resolved_items);
+    if (countedItems !== totalItems) {
+      failures.push(`${endpoint}.summary: lifecycle counts should sum to total_items (${totalItems}), got ${countedItems}`);
+    }
+  }
+}
+
+function validateQueueSummary(queue: JsonRecord, failures: string[], endpoint: string) {
+  requireString(queue, "id", endpoint, failures);
+  requireString(queue, "creator_id", endpoint, failures);
+  requireString(queue, "name", endpoint, failures);
+  requireString(queue, "label", endpoint, failures);
+  requireString(queue, "operational_status", endpoint, failures);
+  requireString(queue, "visibility_state", endpoint, failures);
+  requireString(queue, "priority", endpoint, failures);
+  requireNumber(queue, "item_count", endpoint, failures);
+  requireNumber(queue, "active_item_count", endpoint, failures);
+  requireNumber(queue, "resolved_item_count", endpoint, failures);
+
+  const itemCount = numberValue(queue.item_count);
+  const activeItemCount = numberValue(queue.active_item_count);
+  const resolvedItemCount = numberValue(queue.resolved_item_count);
+  if (activeItemCount + resolvedItemCount !== itemCount) {
+    failures.push(`${endpoint}: active_item_count plus resolved_item_count should equal item_count (${itemCount}), got ${activeItemCount + resolvedItemCount}`);
+  }
+}
+
+function validateQueueItemLifecycle(item: JsonRecord, failures: string[], endpoint: string) {
+  requireString(item, "id", endpoint, failures);
+  requireString(item, "queue_id", endpoint, failures);
+  requireString(item, "priority", endpoint, failures);
+  requireString(item, "status", endpoint, failures);
+  requireString(item, "title", endpoint, failures);
+  requireString(item, "queue_name", endpoint, failures);
+  requireString(item, "queue_label", endpoint, failures);
+  requireString(item, "status_label", endpoint, failures);
+  requireNumber(item, "priority_score", endpoint, failures);
+  requireString(item, "created_at", endpoint, failures);
+  requireString(item, "updated_at", endpoint, failures);
+
+  const allowedStatuses = new Set(["visible", "claimed", "assigned", "moved", "resolved"]);
+  if (!allowedStatuses.has(stringValue(item.status))) {
+    failures.push(`${endpoint}: expected queue item lifecycle status from ${Array.from(allowedStatuses).join(", ")}, got ${describeValue(item.status)}`);
+  }
+
+  if (stringValue(item.status) === "resolved") {
+    requireString(item, "resolved_at", endpoint, failures);
+  }
+
+  if (item.conversation !== null && typeof item.conversation !== "undefined") {
+    validateQueueConversationSummary(item.conversation, failures, `${endpoint}.conversation`);
+  }
+
+  if (item.subscriber !== null && typeof item.subscriber !== "undefined") {
+    validateQueueSubscriberSummary(item.subscriber, failures, `${endpoint}.subscriber`);
+  }
+}
+
+function validateQueueConversationSummary(conversation: unknown, failures: string[], endpoint: string) {
+  if (!isRecord(conversation)) {
+    failures.push(`${endpoint}: expected conversation summary object, got ${describeValue(conversation)}`);
+    return;
+  }
+
+  requireString(conversation, "id", endpoint, failures);
+  requireString(conversation, "lifecycle_state", endpoint, failures);
+  requireString(conversation, "status", endpoint, failures);
+  requireString(conversation, "execution_mode", endpoint, failures);
+  requireString(conversation, "updated_at", endpoint, failures);
+
+  const lifecycleStates = new Set(["new", "open", "waiting", "escalated", "completed", "archived"]);
+  if (!lifecycleStates.has(stringValue(conversation.lifecycle_state))) {
+    failures.push(`${endpoint}: expected conversation lifecycle state from ${Array.from(lifecycleStates).join(", ")}, got ${describeValue(conversation.lifecycle_state)}`);
+  }
+}
+
+function validateQueueSubscriberSummary(subscriber: unknown, failures: string[], endpoint: string) {
+  if (!isRecord(subscriber)) {
+    failures.push(`${endpoint}: expected subscriber summary object, got ${describeValue(subscriber)}`);
+    return;
+  }
+
+  if (subscriber.id !== null && typeof subscriber.id !== "string") {
+    failures.push(`${endpoint}: expected subscriber id to be string or null, got ${describeValue(subscriber.id)}`);
+  }
+  if (subscriber.display_name !== null && typeof subscriber.display_name !== "string") {
+    failures.push(`${endpoint}: expected subscriber display_name to be string or null, got ${describeValue(subscriber.display_name)}`);
+  }
+  if (subscriber.username !== null && typeof subscriber.username !== "string") {
+    failures.push(`${endpoint}: expected subscriber username to be string or null, got ${describeValue(subscriber.username)}`);
+  }
+}
+
+async function validateConversationLifecycle(item: JsonRecord, failures: string[], notes: string[]) {
+  const conversation = item.conversation;
+  if (!isRecord(conversation) || typeof conversation.id !== "string") return;
+
+  notes.push(`[conversation] validating lifecycle for ${conversation.id}`);
+  const detail = await readJson(`/api/operations/conversations/${encodeURIComponent(conversation.id)}`, failures);
+  if (!detail) return;
+
+  const detailConversation = requireRecord(detail, "conversation", "/api/operations/conversations/:id", failures);
+  if (!detailConversation) return;
+
+  requireString(detailConversation, "id", "/api/operations/conversations/:id.conversation", failures);
+  requireString(detailConversation, "status", "/api/operations/conversations/:id.conversation", failures);
+  requireString(detailConversation, "lifecycle_state", "/api/operations/conversations/:id.conversation", failures);
+  requireString(detailConversation, "updated_at", "/api/operations/conversations/:id.conversation", failures);
+
+  const lifecycleStates = new Set(["new", "open", "waiting", "escalated", "completed", "archived"]);
+  if (!lifecycleStates.has(stringValue(detailConversation.lifecycle_state))) {
+    failures.push(`/api/operations/conversations/:id.conversation: unexpected lifecycle state ${describeValue(detailConversation.lifecycle_state)}`);
+  }
+}
+
+function validateQueueItemContext(context: JsonRecord, failures: string[], endpoint: string) {
+  const conversation = context.conversation;
+  const subscriber = context.subscriber;
+  const recentEvents = requireArray(context, "recent_events", endpoint, failures);
+
+  if (conversation !== null && typeof conversation !== "undefined") {
+    validateQueueConversationSummary(conversation, failures, `${endpoint}.conversation`);
+  }
+  if (subscriber !== null && typeof subscriber !== "undefined") {
+    validateQueueSubscriberSummary(subscriber, failures, `${endpoint}.subscriber`);
+  }
+
+  validateSampleObjects(
+    endpoint,
+    [[recentEvents, (event) => {
+      requireString(event, "id", `${endpoint}.recent_events[]`, failures);
+      requireString(event, "event_type", `${endpoint}.recent_events[]`, failures);
+      requireString(event, "title", `${endpoint}.recent_events[]`, failures);
+      requireString(event, "occurred_at", `${endpoint}.recent_events[]`, failures);
+    }]],
+    failures
+  );
+}
+
+function validateCompatibilityAdapter(left: JsonRecord, right: JsonRecord, failures: string[]) {
+  const leftJson = JSON.stringify(left);
+  const rightJson = JSON.stringify(right);
+  if (leftJson !== rightJson) {
+    failures.push("/api/operations/dashboard: transitional adapter no longer matches /api/queue-workspace response exactly");
   }
 }
 
@@ -645,6 +904,10 @@ function requireNumber(body: JsonRecord, key: string, endpoint: string, failures
     return null;
   }
   return value;
+}
+
+function numberValue(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
 function requireBoolean(body: JsonRecord, key: string, endpoint: string, failures: string[]) {

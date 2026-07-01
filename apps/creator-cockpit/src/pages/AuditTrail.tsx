@@ -20,8 +20,8 @@ export function AuditTrail() {
     <main className="space-y-6 animate-in-soft">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h2 className="text-2xl font-semibold text-white">Audit Trail</h2>
-          <p className="mt-1 text-sm text-blue-100/58">Operator interventions and runtime auditability for automation actions.</p>
+          <h2 className="text-2xl font-semibold text-white">Audit</h2>
+          <p className="mt-1 text-sm text-blue-100/58">Operator interventions and auditability for governed product actions.</p>
         </div>
         <div className="flex gap-3">
           <select

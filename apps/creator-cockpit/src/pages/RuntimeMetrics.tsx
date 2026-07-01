@@ -20,7 +20,7 @@ export function RuntimeMetrics() {
     <main className="space-y-6 animate-in-soft">
       <div className="flex items-center justify-between gap-3">
         <div>
-          <h2 className="text-2xl font-semibold text-white">Runtime Metrics</h2>
+          <h2 className="text-2xl font-semibold text-white">Monitoring</h2>
           <p className="mt-1 text-sm text-blue-100/58">Aggregated operational telemetry for throughput, bottlenecks, and health.</p>
         </div>
         <button type="button" onClick={() => void refresh()} className="inline-flex items-center gap-2 rounded-xl bg-cyan-400 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-cyan-300">

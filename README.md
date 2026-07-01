@@ -4,7 +4,7 @@
 
 Use the Creator Cockpit smoke suite to verify deploy-safe surface area before release. It checks:
 
-- API shape for `Dashboard`, `Scripts`, `Automation`, `Settings`, and `Outbound`
+- API shape for `Dashboard`, `Playbooks`, `Conversation Interpretation`, `Administration`, and `Outbound Review`
 - A simulation-only business flow through a connected creator and automation rule test path when available
 - Outbound approval queue visibility, including needs-approval, approved/sending, sent, and failed buckets
 

@@ -708,7 +708,7 @@ export function Scripts() {
         <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
           <div>
             <div className="text-sm font-semibold uppercase tracking-[0.26em] text-cyan-300/85">Conversation Automation Platform</div>
-            <h2 className="mt-2 text-3xl font-semibold text-white">Build customer journeys, not scripts</h2>
+            <h2 className="mt-2 text-3xl font-semibold text-white">Build playbooks, not ad hoc scripts</h2>
             <p className="mt-2 max-w-4xl text-sm leading-6 text-blue-100/72">
               The underlying event engine stays deterministic. This front end now leads with goals, conversation style, AI enrichment, and review, while technical rules live behind the scenes.
             </p>
@@ -733,7 +733,7 @@ export function Scripts() {
         <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
           <MetricCard icon={FileText} label="Playbooks" value={String(stats.total)} detail={`${stats.active} active / ${stats.archived} archived`} />
           <MetricCard icon={Sparkles} label="Revenue Plays" value={String(stats.revenue)} detail="PPV, customs, and high-value follow-ups" />
-          <MetricCard icon={Clock3} label="Manual Journeys" value={String(stats.manualOnly)} detail="Operator-led journeys and campaigns" />
+          <MetricCard icon={Clock3} label="Manual Playbooks" value={String(stats.manualOnly)} detail="Operator-led playbooks and campaigns" />
           <MetricCard icon={Gift} label="Seed Templates" value={String(stats.seeded)} detail="Ready-made starting points for teams" />
         </div>
       </div>
@@ -745,7 +745,7 @@ export function Scripts() {
           <div className="flex items-center justify-between gap-3 px-2">
             <div>
               <div className="text-lg font-semibold text-white">Playbook Library</div>
-              <div className="text-sm text-blue-100/62">Browse by creator, status, or journey name.</div>
+              <div className="text-sm text-blue-100/62">Browse by creator, status, or playbook name.</div>
             </div>
             <span className="rounded-full border border-cyan-300/20 bg-cyan-400/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-cyan-200">
               {visibleScripts.length}
@@ -819,7 +819,7 @@ export function Scripts() {
 
             {!visibleScripts.length ? (
               <div className="premium-card rounded-[24px] p-5 text-sm leading-6 text-blue-100/70">
-                No playbooks match this filter yet. Switch creators or create a new journey.
+                No playbooks match this filter yet. Switch creators or create a new playbook.
               </div>
             ) : null}
           </div>
@@ -827,7 +827,7 @@ export function Scripts() {
 
         <div className="space-y-5">
           {!draft ? (
-            <div className="glass-panel rounded-[28px] p-6 text-blue-100/72">Select a playbook from the left to open the journey wizard.</div>
+            <div className="glass-panel rounded-[28px] p-6 text-blue-100/72">Select a playbook from the left to open the wizard.</div>
           ) : (
             <>
               <div className="glass-panel rounded-[28px] p-5">

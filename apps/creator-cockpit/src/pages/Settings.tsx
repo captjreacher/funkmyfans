@@ -135,8 +135,8 @@ export function Settings() {
       <div className="glass-panel rounded-[28px] p-5">
         <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
           <div>
-            <div className="text-sm font-semibold uppercase tracking-[0.26em] text-cyan-300/85">Settings Workspace</div>
-            <h2 className="mt-2 text-3xl font-semibold text-white">Agency control panel for approvals, AI guardrails, runtime health, and creator preferences</h2>
+            <div className="text-sm font-semibold uppercase tracking-[0.26em] text-cyan-300/85">Administration</div>
+            <h2 className="mt-2 text-3xl font-semibold text-white">Governance control panel for approvals, AI guardrails, runtime health, and creator preferences</h2>
             <p className="mt-2 max-w-4xl text-sm leading-6 text-blue-100/72">
               Keep the system human-in-the-loop by default, make auto-send opt-in only, and tune each creator’s automation posture without exposing any secrets.
             </p>

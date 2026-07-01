@@ -31,6 +31,8 @@ export type AutomationRunStatus = "running" | "completed" | "failed" | "skipped"
 export type OutboundMessageStatus = "pending_approval" | "queued" | "sending" | "sent" | "failed" | "rejected";
 export type OutboundApprovalStatus = "not_required" | "pending" | "approved" | "rejected";
 export type ConversationRuntimeStatus = "running" | "waiting_delay" | "waiting_reply" | "waiting_approval" | "completed" | "cancelled" | "failed";
+export type ConversationLifecycleState = "new" | "open" | "waiting" | "escalated" | "completed" | "archived";
+export type ConversationParticipantRole = "creator" | "subscriber" | "operator" | "system";
 export type AutomationExecutionMode = "production" | "simulation";
 export type AutomationSimulationStatus = "draft" | "running" | "paused" | "completed" | "cancelled" | "failed";
 export type AutomationRegistryKind =
@@ -602,6 +604,111 @@ export interface OfTaskTimelineItem {
   created_at: string;
 }
 
+export type QueueOperationalStatus = "active" | "paused" | "archived";
+export type QueueItemLifecycleStatus = "visible" | "claimed" | "assigned" | "moved" | "resolved";
+
+export interface Queue {
+  id: string;
+  creator_id: string;
+  name: string;
+  label: string;
+  description: string | null;
+  operational_status: QueueOperationalStatus;
+  visibility_state: "visible" | "hidden";
+  priority: TaskPriority;
+  assigned_operator_id: string | null;
+  created_at: string;
+  updated_at: string;
+  metadata: Record<string, unknown>;
+}
+
+export interface QueueItem {
+  id: string;
+  queue_id: string;
+  conversation_id: string | null;
+  assigned_operator_id: string | null;
+  priority: TaskPriority;
+  status: QueueItemLifecycleStatus;
+  created_at: string;
+  updated_at: string;
+  moved_at: string | null;
+  resolved_at: string | null;
+  metadata: Record<string, unknown>;
+}
+
+export interface QueueWorkspaceViewModel {
+  selected_creator: Pick<OfCreator, "id" | "username" | "display_name"> | null;
+  summary: QueueWorkspaceSummary;
+  queues: QueueWorkspaceQueueSummary[];
+  items: QueueWorkspaceItemSummary[];
+  selected_queue_id: string | null;
+  selected_item_id: string | null;
+  selected_item_context: QueueWorkspaceItemContext | null;
+}
+
+export interface QueueWorkspaceSummary {
+  total_queues: number;
+  total_items: number;
+  visible_items: number;
+  claimed_items: number;
+  assigned_items: number;
+  moved_items: number;
+  resolved_items: number;
+  overdue_items: number;
+}
+
+export interface QueueWorkspaceQueueSummary extends Queue {
+  item_count: number;
+  active_item_count: number;
+  resolved_item_count: number;
+}
+
+export interface QueueWorkspaceConversationSummary {
+  id: string | null;
+  lifecycle_state: ConversationLifecycleState | null;
+  status: ConversationRuntimeStatus | null;
+  execution_mode: AutomationExecutionMode | null;
+  script_name: string | null;
+  creator: Pick<OfCreator, "id" | "username" | "display_name"> | null;
+  updated_at: string | null;
+}
+
+export interface QueueWorkspaceSubscriberSummary {
+  id: string | null;
+  display_name: string | null;
+  username: string | null;
+  relationship_state: string | null;
+  subscription_status: string | null;
+  lifetime_spend: number | null;
+  urgency_score: number | null;
+}
+
+export interface QueueWorkspaceRecentEvent {
+  id: string;
+  event_type: string;
+  title: string;
+  detail: string | null;
+  occurred_at: string;
+}
+
+export interface QueueWorkspaceItemSummary extends QueueItem {
+  title: string;
+  queue_name: string;
+  queue_label: string;
+  assignment_label: string | null;
+  priority_score: number;
+  priority_reason: string | null;
+  status_label: string;
+  conversation: QueueWorkspaceConversationSummary | null;
+  subscriber: QueueWorkspaceSubscriberSummary | null;
+}
+
+export interface QueueWorkspaceItemContext {
+  conversation: QueueWorkspaceConversationSummary | null;
+  subscriber: QueueWorkspaceSubscriberSummary | null;
+  recent_events: QueueWorkspaceRecentEvent[];
+}
+
 export interface OfRecommendation {
   id: string;
   creator_id: string;
@@ -984,6 +1091,49 @@ export interface OfConversationHistoryItem {
   created_at: string;
 }
 
+export interface ConversationOwnership {
+  owner_type: "creator" | "agency" | "shared" | "unassigned";
+  owner_id: string | null;
+  owner_label: string | null;
+  creator_id: string;
+  subscriber_id: string | null;
+  relationship_id: string | null;
+}
+
+export interface ConversationParticipant {
+  id: string | null;
+  role: ConversationParticipantRole;
+  label: string;
+  username: string | null;
+  is_primary: boolean;
+  metadata: Record<string, unknown>;
+}
+
+export interface ConversationHistoryEntry {
+  id: string;
+  occurred_at: string;
+  event_type: string;
+  from_state: ConversationLifecycleState | null;
+  to_state: ConversationLifecycleState | null;
+  detail: string | null;
+  payload: Record<string, unknown>;
+}
+
+export interface ConversationRelatedEvent {
+  id: string;
+  event_type: string;
+  title: string;
+  received_at: string;
+}
+
+export interface Conversation extends OfConversationInstance {
+  lifecycle_state: ConversationLifecycleState;
+  ownership: ConversationOwnership;
+  participants: ConversationParticipant[];
+  history: ConversationHistoryEntry[];
+  related_events: ConversationRelatedEvent[];
+}
+
 export type ConversationStatusGroup = "active" | "waiting" | "terminal";
 export type AutomationAuditActorType = "system" | "operator";
 export type AutomationAuditEntityType = "conversation" | "simulation" | "outbound_message" | "runtime";
@@ -1038,7 +1188,7 @@ export interface ConversationOperationsSummary {
 }
 
 export interface ConversationOperationsDetail {
-  conversation: OfConversationInstance;
+  conversation: Conversation;
   history: OfConversationHistoryItem[];
   outboundMessages: OfOutboundMessage[];
   auditTrail: OfAutomationAuditTrailEntry[];
@@ -1046,6 +1196,12 @@ export interface ConversationOperationsDetail {
   subscriber: Record<string, unknown> | null;
   relationship: Record<string, unknown> | null;
   creator: Pick<OfCreator, "id" | "username" | "display_name"> | null;
+}
+
+export interface ConversationWorkspaceViewModel {
+  selected_creator: Pick<OfCreator, "id" | "username" | "display_name"> | null;
+  summary: ConversationOperationsSummary;
+  conversations: Conversation[];
 }
 
 export interface ConversationOperationsMetrics {
@@ -1188,4 +1344,211 @@ export function summarizeEventType(eventType: string): string {
   if (eventType === "subscriber_expired") return "Subscriber expired";
   if (eventType === "transaction_created") return "Transaction received";
   return "BetterFans event received";
+}
+
+export function mapConversationRuntimeStatusToLifecycleState(
+  status: ConversationRuntimeStatus,
+  input?: {
+    historyCount?: number;
+    waitingUntil?: string | null;
+    waitingReason?: string | null;
+    cancellationReason?: string | null;
+    completionReason?: string | null;
+    failedAt?: string | null;
+    cancelledAt?: string | null;
+  }
+): ConversationLifecycleState {
+  if (status === "completed") return "completed";
+  if (status === "failed") return "escalated";
+  if (status === "cancelled") return "archived";
+  if (status === "waiting_delay" || status === "waiting_reply" || status === "waiting_approval") return "waiting";
+  if ((input?.historyCount ?? 0) === 0 && status === "running") return "new";
+  if ((input?.waitingReason ?? "").toLowerCase().includes("escalat")) return "escalated";
+  if ((input?.cancellationReason ?? "").toLowerCase().includes("archive")) return "archived";
+  return "open";
+}
+
+export function mapConversationInstanceToConversation(
+  conversation: OfConversationInstance & {
+    of_creators?: Pick<OfCreator, "id" | "username" | "display_name"> | Record<string, unknown> | null;
+    of_subscribers?: Record<string, unknown> | null;
+    of_relationships?: Record<string, unknown> | null;
+    source_event?: Pick<OfEvent, "id" | "event_type" | "received_at"> | null;
+    current_step?: Pick<OfMessageScriptStep, "id" | "step_order" | "step_type" | "message_body"> | null;
+    next_step?: Pick<OfMessageScriptStep, "id" | "step_order" | "step_type" | "message_body"> | null;
+  },
+  options?: {
+    history?: OfConversationHistoryItem[];
+    relatedEvents?: Array<Pick<OfEvent, "id" | "event_type" | "received_at">>;
+    subscriber?: Record<string, unknown> | null;
+    relationship?: Record<string, unknown> | null;
+  }
+): Conversation {
+  const history = (options?.history ?? []).map((item) => ({
+    id: item.id,
+    occurred_at: item.created_at,
+    event_type: item.event_type,
+    from_state: mapConversationRuntimeStatusToLifecycleState(toRuntimeStatus(item.from_status), {
+      historyCount: options?.history?.length ?? 0
+    }),
+    to_state: mapConversationRuntimeStatusToLifecycleState(toRuntimeStatus(item.to_status), {
+      historyCount: options?.history?.length ?? 0
+    }),
+    detail: item.detail,
+    payload: item.payload
+  }));
+  const creatorRecord = isPlainRecord(conversation.of_creators) ? conversation.of_creators : null;
+  const creatorId = conversation.creator_id;
+  const creatorLabel = creatorRecord ? firstString(creatorRecord, ["display_name", "username"]) ?? creatorId : creatorId;
+  const subscriberId = conversation.subscriber_id;
+  const subscriberRecord = isPlainRecord(options?.subscriber) ? options?.subscriber : isPlainRecord(conversation.of_subscribers) ? conversation.of_subscribers : null;
+  const subscriberLabel = subscriberRecord ? firstString(subscriberRecord, ["display_name", "username"]) ?? subscriberId ?? "Subscriber" : "Subscriber";
+  const relationshipRecord = isPlainRecord(options?.relationship) ? options?.relationship : isPlainRecord(conversation.of_relationships) ? conversation.of_relationships : null;
+  const ownerType: ConversationOwnership["owner_type"] = creatorId ? "creator" : "unassigned";
+  const ownerLabel = ownerType === "creator" ? creatorLabel : null;
+  const relatedEventSource = options?.relatedEvents ?? (conversation.source_event ? [conversation.source_event] : []);
+  const participants: ConversationParticipant[] = [
+    {
+      id: creatorId,
+      role: "creator",
+      label: creatorLabel,
+      username: creatorRecord ? firstString(creatorRecord, ["username"]) : null,
+      is_primary: true,
+      metadata: {}
+    },
+    {
+      id: subscriberId,
+      role: "subscriber",
+      label: subscriberLabel,
+      username: subscriberRecord ? firstString(subscriberRecord, ["username"]) : null,
+      is_primary: false,
+      metadata: relationshipRecord ? { relationship_id: conversation.relationship_id } : {}
+    }
+  ];
+
+  return {
+    ...conversation,
+    lifecycle_state: mapConversationRuntimeStatusToLifecycleState(conversation.status, {
+      historyCount: history.length,
+      waitingUntil: conversation.waiting_until,
+      waitingReason: conversation.waiting_reason,
+      cancellationReason: conversation.cancellation_reason,
+      completionReason: conversation.completion_reason,
+      failedAt: conversation.failed_at,
+      cancelledAt: conversation.cancelled_at
+    }),
+    ownership: {
+      owner_type: ownerType,
+      owner_id: ownerType === "creator" ? creatorId : null,
+      owner_label: ownerLabel,
+      creator_id: creatorId,
+      subscriber_id: subscriberId,
+      relationship_id: conversation.relationship_id
+    },
+    participants,
+    history,
+    related_events: relatedEventSource.map((event) => ({
+      id: event.id,
+      event_type: event.event_type,
+      title: summarizeEventType(event.event_type),
+      received_at: event.received_at
+    }))
+  };
+}
+
+function toRuntimeStatus(value: string | null | undefined): ConversationRuntimeStatus {
+  if (value === "running" || value === "waiting_delay" || value === "waiting_reply" || value === "waiting_approval" || value === "completed" || value === "cancelled" || value === "failed") {
+    return value;
+  }
+  return "running";
+}
+
+function firstString(record: Record<string, unknown>, keys: string[]) {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return null;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+export function mapTaskStatusToQueueItemStatus(status: TaskStatus): QueueItemLifecycleStatus {
+  if (status === "open") return "visible";
+  if (status === "in_progress") return "claimed";
+  if (status === "waiting") return "assigned";
+  return "resolved";
+}
+
+export function mapTaskToQueueItem(task: OfTask): QueueItem {
+  const queueId = queueIdFromTask(task);
+  return {
+    id: task.id,
+    queue_id: queueId,
+    conversation_id: conversationIdFromTask(task),
+    assigned_operator_id: task.assigned_to,
+    priority: task.priority,
+    status: mapTaskStatusToQueueItemStatus(task.status),
+    created_at: task.created_at,
+    updated_at: task.updated_at,
+    moved_at: task.updated_at,
+    resolved_at: task.completed_at ?? task.cancelled_at ?? task.archived_at,
+    metadata: {
+      source_type: task.source_type,
+      source_id: task.source_id,
+      source_event_id: task.source_event_id,
+      subscriber_id: task.subscriber_id,
+      chat_id: task.chat_id,
+      task_type: task.task_type,
+      rule_name: task.rule_name,
+      rule_version: task.rule_version,
+      priority_score: task.priority_score
+    }
+  };
+}
+
+export function mapTaskToQueue(task: OfTask): Queue {
+  return {
+    id: queueIdFromTask(task),
+    creator_id: task.creator_id,
+    name: task.rule_name,
+    label: humanizeIdentifier(task.rule_name),
+    description: task.description,
+    operational_status: task.status === "archived" ? "archived" : "active",
+    visibility_state: task.status === "archived" ? "hidden" : "visible",
+    priority: task.priority,
+    assigned_operator_id: task.assigned_to,
+    created_at: task.created_at,
+    updated_at: task.updated_at,
+    metadata: {
+      task_type: task.task_type,
+      source_type: task.source_type
+    }
+  };
+}
+
+export interface QueueWorkspaceCompatibilityViewModel {
+  queue: Queue;
+  items: QueueItem[];
+}
+
+function queueIdFromTask(task: OfTask) {
+  return `queue:${task.creator_id}:${task.rule_name}`;
+}
+
+function conversationIdFromTask(task: OfTask) {
+  if (typeof task.source_type === "string" && /conversation/i.test(task.source_type) && typeof task.source_id === "string") {
+    return task.source_id;
+  }
+  return null;
+}
+
+function humanizeIdentifier(value: string) {
+  return value
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (char) => char.toUpperCase());
 }

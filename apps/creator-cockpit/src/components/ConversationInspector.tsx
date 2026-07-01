@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import type { ConversationOperationsDetail, OfAutomationAuditTrailEntry, OfConversationHistoryItem, OfOutboundMessage } from "@funkmyfans/of-types";
+import type { ConversationHistoryEntry, ConversationOperationsDetail, OfAutomationAuditTrailEntry, OfOutboundMessage } from "@funkmyfans/of-types";
 
 function formatDate(value: string | null | undefined) {
   if (!value) return "n/a";
@@ -60,6 +60,7 @@ export function ConversationInspector({
       <div className="grid gap-5 p-5 xl:grid-cols-[0.95fr_1.05fr]">
         <section className="space-y-5">
           <Panel title="Metadata">
+            <InfoRow label="Lifecycle" value={conversation.lifecycle_state} />
             <InfoRow label="Status" value={conversation.status} />
             <InfoRow label="Mode" value={conversation.execution_mode} />
             <InfoRow label="Current step" value={conversation.current_step?.step_type ?? "n/a"} />
@@ -67,6 +68,27 @@ export function ConversationInspector({
             <InfoRow label="Waiting until" value={formatDate(conversation.waiting_until)} />
             <InfoRow label="Last error" value={conversation.last_error ?? "n/a"} />
             <InfoRow label="Retries" value={String(conversation.retry_count ?? 0)} />
+          </Panel>
+
+          <Panel title="Ownership">
+            <InfoRow label="Owner" value={conversation.ownership.owner_label ?? conversation.ownership.owner_type} />
+            <InfoRow label="Creator" value={conversation.ownership.creator_id} />
+            <InfoRow label="Subscriber" value={conversation.ownership.subscriber_id ?? "n/a"} />
+            <InfoRow label="Relationship" value={conversation.ownership.relationship_id ?? "n/a"} />
+          </Panel>
+
+          <Panel title="Participants">
+            <div className="space-y-2">
+              {conversation.participants.map((participant) => (
+                <div key={`${participant.role}:${participant.id ?? participant.label}`} className="rounded-2xl border border-blue-500/15 bg-[#0D1B2A]/65 p-3">
+                  <div className="flex items-center justify-between gap-3 text-sm font-medium text-white">
+                    <span>{participant.label}</span>
+                    <span className="text-xs uppercase tracking-[0.18em] text-blue-100/58">{participant.role}</span>
+                  </div>
+                  <div className="mt-1 text-xs text-blue-100/54">{participant.username ?? "No username"}</div>
+                </div>
+              ))}
+            </div>
           </Panel>
 
           <Panel title="Variables">
@@ -95,15 +117,15 @@ export function ConversationInspector({
         <section className="space-y-5">
           <Panel title="Timeline">
             <div className="space-y-3">
-              {detail.history.map((item: OfConversationHistoryItem) => (
+              {conversation.history.map((item: ConversationHistoryEntry) => (
                 <div key={item.id} className="rounded-2xl border border-blue-500/15 bg-[#0D1B2A]/65 p-3">
                   <div className="flex items-center justify-between gap-3 text-xs text-blue-100/58">
                     <span>{item.event_type}</span>
-                    <span>{formatDate(item.created_at)}</span>
+                    <span>{formatDate(item.occurred_at)}</span>
                   </div>
                   <div className="mt-2 text-sm font-medium text-white">{item.detail ?? "No detail recorded."}</div>
                   <div className="mt-1 text-xs text-blue-100/54">
-                    {item.from_status ?? "start"} to {item.to_status ?? "current"}
+                    {item.from_state ?? "start"} to {item.to_state ?? "current"}
                   </div>
                 </div>
               ))}

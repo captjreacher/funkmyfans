@@ -5,6 +5,8 @@ import type {
   ConversationOperationsExport,
   ConversationOperationsMetrics,
   ConversationOperationsSummary,
+  ConversationWorkspaceViewModel,
+  QueueWorkspaceViewModel,
   OfAutomationAuditTrailEntry,
   OfAutomationRule,
   AutomationRuleSimulationResult,
@@ -80,15 +82,11 @@ export interface CreatorDetailData {
   contextEvents: OfContextEvent[];
 }
 
-export interface ConversationDetailData {
-  conversation: OfConversationInstance;
-  history: OfConversationHistoryItem[];
-}
+export interface ConversationDetailData extends ConversationOperationsDetail {}
 
-export interface OperationsDashboardData {
-  summary: ConversationOperationsSummary;
-  conversations: OfConversationInstance[];
-}
+export interface QueueWorkspaceData extends QueueWorkspaceViewModel {}
+
+export interface OperationsDashboardData extends QueueWorkspaceViewModel {}
 
 export interface SimulationDetailData {
   simulation: OfAutomationSimulation;
@@ -487,7 +485,12 @@ export async function cancelConversation(conversationId: string, reason: string)
 }
 
 export async function fetchOperationsDashboard(filters: Record<string, string> = {}): Promise<OperationsDashboardData> {
+  // Legacy compatibility alias for callers still using the dashboard-shaped operations endpoint.
   return apiJson<OperationsDashboardData>(`/operations/dashboard${queryString(filters)}`);
+}
+
+export async function fetchQueueWorkspace(filters: Record<string, string> = {}): Promise<QueueWorkspaceData> {
+  return apiJson<QueueWorkspaceData>(`/queue-workspace${queryString(filters)}`);
 }
 
 export async function fetchOperationsConversationDetail(conversationId: string): Promise<ConversationOperationsDetail> {

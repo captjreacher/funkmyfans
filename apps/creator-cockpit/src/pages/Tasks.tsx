@@ -99,7 +99,7 @@ export function Tasks({
       <section className="command-card grid gap-3 rounded-2xl p-3 lg:grid-cols-[1fr_180px_180px_180px]">
         <label className="flex min-h-11 items-center gap-2 rounded-xl border border-blue-500/20 bg-[#0D1B2A]/72 px-3">
           <Search className="h-4 w-4 text-cyan-300" aria-hidden="true" />
-          <input value={query} onChange={(event) => setQuery(event.target.value)} className="w-full bg-transparent text-sm outline-none" placeholder="Search tasks, creators, subscribers" />
+          <input value={query} onChange={(event) => setQuery(event.target.value)} className="w-full bg-transparent text-sm outline-none" placeholder="Search queues, creators, subscribers" />
         </label>
         <select value={creator} onChange={(event) => setCreator(event.target.value)} className="rounded-xl border border-blue-500/20 bg-[#0D1B2A]/72 px-3 py-2 text-sm">
           <option value="all">All creators</option>
@@ -124,9 +124,9 @@ export function Tasks({
       <section className="glass-panel grid min-h-[680px] overflow-hidden rounded-2xl xl:grid-cols-[440px_1fr]">
         <div className="border-b border-blue-500/20 xl:border-b-0 xl:border-r">
           <div className="flex items-center justify-between border-b border-blue-500/20 px-4 py-4">
-            <div>
-              <h2 className="text-base font-semibold text-white">Task Inbox</h2>
-              <p className="mt-1 text-sm text-blue-100/58">Prioritized by AI confidence and due time.</p>
+          <div>
+              <h2 className="text-base font-semibold text-white">Queue Inbox</h2>
+              <p className="mt-1 text-sm text-blue-100/58">Prioritized by operational urgency and due time.</p>
             </div>
             <span className="rounded-full bg-cyan-300/10 px-3 py-1 text-sm font-semibold text-cyan-200">{visibleTasks.length}</span>
           </div>
@@ -145,7 +145,7 @@ export function Tasks({
                 onStatus={(nextStatus) => void setTaskStatus(task, nextStatus)}
               />
             ))}
-            {!visibleTasks.length ? <div className="p-6 text-sm text-blue-100/58">No tasks match the current filters.</div> : null}
+            {!visibleTasks.length ? <div className="p-6 text-sm text-blue-100/58">No queue items match the current filters.</div> : null}
           </div>
         </div>
 
@@ -158,7 +158,7 @@ export function Tasks({
             onStatus={(nextStatus) => void setTaskStatus(selectedTask, nextStatus)}
           />
         ) : (
-          <div className="flex items-center justify-center p-8 text-sm text-blue-100/58">Select a task.</div>
+          <div className="flex items-center justify-center p-8 text-sm text-blue-100/58">Select a queue item.</div>
         )}
       </section>
     </main>

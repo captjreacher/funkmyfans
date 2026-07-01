@@ -166,14 +166,14 @@ export function Dashboard({
             <ClipboardList className="h-5 w-5 text-cyan-300" aria-hidden="true" />
           </div>
           <div className="mt-5 grid gap-3">
-            <MetricTile label="Open Tasks" value={String(openTasks)} icon={ClipboardList} />
+            <MetricTile label="Open Queue Items" value={String(openTasks)} icon={ClipboardList} />
             <MetricTile label="Urgent Tasks" value={String(urgentTasks)} icon={AlertTriangle} />
             <MetricTile label="Overdue Tasks" value={String(overdueTasks)} icon={Clock3} />
           </div>
           <div className="mt-4 rounded-2xl border border-blue-500/15 bg-[#0D1B2A]/60 p-4">
-            <div className="text-sm font-semibold text-white">Active Task Pulse</div>
+            <div className="text-sm font-semibold text-white">Active Queue Pulse</div>
             <div className="mt-1 text-sm text-blue-100/58">
-              {openTasks} active tasks across {data.creators.length} creators. The focus queue should guide the next move.
+              {openTasks} active queue items across {data.creators.length} creators. The focus queue should guide the next move.
             </div>
           </div>
         </div>

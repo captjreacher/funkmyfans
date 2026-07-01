@@ -134,7 +134,7 @@ export function Subscribers({
         <Metric label="Subscribers" value={data.subscribers.length} icon={UserRound} />
         <Metric label="VIP" value={data.subscribers.filter((item) => item.vip_score >= 75).length} icon={Sparkles} />
         <Metric label="At Risk" value={data.subscribers.filter((item) => item.churn_risk >= 70).length} icon={ShieldAlert} />
-        <Metric label="Open Tasks" value={data.tasks.filter((task) => isActiveTask(task.status)).length} icon={ClipboardList} />
+        <Metric label="Open Queue Items" value={data.tasks.filter((task) => isActiveTask(task.status)).length} icon={ClipboardList} />
         <Metric label="Total LTV" value={money(data.subscribers.reduce((sum, item) => sum + item.lifetime_spend, 0))} icon={CheckCircle2} />
       </section>
 
@@ -328,7 +328,7 @@ function SubscriberDetail({
           </div>
           <div className="flex flex-wrap gap-2">
             <QuickButton label="Open Chat" icon={MessageSquare} onClick={() => window.alert("Chat workspace is not connected yet.")} />
-            <QuickButton label="Open Tasks" icon={ClipboardList} onClick={onOpenTasks} />
+            <QuickButton label="Open Queue Items" icon={ClipboardList} onClick={onOpenTasks} />
             <QuickButton label={subscriber.automation_paused ? "Resume Automation" : "Pause Automation"} icon={PauseCircle} onClick={() => void onRelationshipPatch({ automation_paused: !subscriber.automation_paused })} />
           </div>
         </div>
@@ -420,7 +420,7 @@ function SubscriberDetail({
           </Panel>
 
           <Panel title="Tasks">
-            <TaskSection title="Open Tasks" tasks={openTasks} onStatus={onTaskStatus} />
+            <TaskSection title="Open Queue Items" tasks={openTasks} onStatus={onTaskStatus} />
             <TaskSection title="Completed / Ignored / Cancelled" tasks={closedTasks} onStatus={onTaskStatus} />
           </Panel>
 

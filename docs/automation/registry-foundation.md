@@ -1,10 +1,10 @@
-# Automation Registry Foundation
+# Conversation Operations Registry Foundation
 
-This document describes the first backend registry layer for the Conversation Automation Platform.
+This document describes the first backend registry layer for the Conversation Operations Platform.
 
 ## Purpose
 
-The registry layer moves product copy and UI taxonomy out of hardcoded frontend arrays and into a shared backend source of truth. It lets Playbooks and Routing render the same supported options from API data while keeping execution behavior unchanged.
+The registry layer moves product copy and UI taxonomy out of hardcoded frontend arrays and into a shared backend source of truth. It lets Playbooks, Routing, and Conversation Interpretation render the same supported options from API data while keeping execution behavior unchanged.
 
 ## Registry Table Shape
 
@@ -70,4 +70,3 @@ Each `RegistryEntry` includes the table fields above plus `id`, `createdAt`, and
 - Creator-specific overrides for tenant-level customization
 - Analytics for option usage, conversion, and routing outcomes
 - Versioned registry metadata for safe migration of new UI/runtime behavior
-

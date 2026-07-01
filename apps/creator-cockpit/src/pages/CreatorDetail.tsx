@@ -19,7 +19,7 @@ import {
   type TaskGenerationSummary
 } from "../lib/api";
 
-const tabs = ["Profile", "Relationships", "Subscribers", "Chats", "Tasks", "Scripts", "Timeline"] as const;
+const tabs = ["Profile", "Relationships", "Subscribers", "Chats", "Queues", "Scripts", "Timeline"] as const;
 type Tab = (typeof tabs)[number];
 const syncButtons: Array<{ type: SyncType; label: string }> = [
   { type: "profile", label: "Sync Creator" },
@@ -87,7 +87,7 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
     setTaskGeneration(result);
     setData(detail);
     setGeneratingTasks(false);
-    setTab("Tasks");
+    setTab("Queues");
   }
 
   async function handleTaskStatus(taskId: string, status: "in_progress" | "waiting" | "completed" | "ignored") {
@@ -191,7 +191,7 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
           className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md bg-teal-700 px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-stone-400"
         >
           <RefreshCw className={`h-4 w-4 ${generatingTasks ? "animate-spin" : ""}`} aria-hidden="true" />
-          {generatingTasks ? "Generating" : "Generate Tasks"}
+          {generatingTasks ? "Generating" : "Generate Queue Items"}
         </button>
       </section>
 
@@ -228,7 +228,7 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
       {tab === "Relationships" ? <RelationshipsPanel data={data} /> : null}
       {tab === "Subscribers" ? <SubscribersPanel data={data} /> : null}
       {tab === "Chats" ? <ChatsPanel data={data} /> : null}
-      {tab === "Tasks" ? <TasksPanel data={data} onStatus={handleTaskStatus} /> : null}
+      {tab === "Queues" ? <TasksPanel data={data} onStatus={handleTaskStatus} /> : null}
       {tab === "Scripts" ? (
         <ScriptsPanel
           creatorId={creatorId}
@@ -370,10 +370,10 @@ function ChatsPanel({ data }: { data: CreatorDetailData }) {
 function TasksPanel({ data, onStatus }: { data: CreatorDetailData; onStatus: (taskId: string, status: "in_progress" | "waiting" | "completed" | "ignored") => void }) {
   return (
     <section className="grid gap-4 xl:grid-cols-2">
-      <TaskGroup title="Open Tasks" tasks={data.tasks.filter((task) => task.status === "open")} onStatus={onStatus} />
-      <TaskGroup title="In Progress Tasks" tasks={data.tasks.filter((task) => task.status === "in_progress")} onStatus={onStatus} />
-      <TaskGroup title="Waiting Tasks" tasks={data.tasks.filter((task) => task.status === "waiting")} onStatus={onStatus} />
-      <TaskGroup title="Completed Tasks" tasks={data.tasks.filter((task) => task.status === "completed")} onStatus={onStatus} />
+      <TaskGroup title="Open Queue Items" tasks={data.tasks.filter((task) => task.status === "open")} onStatus={onStatus} />
+      <TaskGroup title="In Progress Queue Items" tasks={data.tasks.filter((task) => task.status === "in_progress")} onStatus={onStatus} />
+      <TaskGroup title="Waiting Queue Items" tasks={data.tasks.filter((task) => task.status === "waiting")} onStatus={onStatus} />
+      <TaskGroup title="Completed Queue Items" tasks={data.tasks.filter((task) => task.status === "completed")} onStatus={onStatus} />
     </section>
   );
 }

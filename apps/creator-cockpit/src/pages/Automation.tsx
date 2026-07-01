@@ -350,7 +350,7 @@ export function Automation() {
     return (
       <div className="glass-panel rounded-3xl p-6">
         <div className="mb-4 h-5 w-64 rounded-full shimmer" />
-        <div className="text-sm text-blue-100/70">Loading routing workspace...</div>
+        <div className="text-sm text-blue-100/70">Loading conversation interpretation workspace...</div>
       </div>
     );
   }
@@ -360,7 +360,7 @@ export function Automation() {
       <div className="glass-panel rounded-[28px] p-5">
         <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
           <div>
-            <div className="text-sm font-semibold uppercase tracking-[0.26em] text-cyan-300/85">Deterministic Routing Workspace</div>
+            <div className="text-sm font-semibold uppercase tracking-[0.26em] text-cyan-300/85">Conversation Interpretation</div>
             <h2 className="mt-2 text-3xl font-semibold text-white">Classify first. Route deterministically. Let playbooks own the conversation.</h2>
             <p className="mt-2 max-w-4xl text-sm leading-6 text-blue-100/72">
               Event classification happens before automation. No LLM decides routing. The UI now shows the event registry, classification layer, and queue map before exposing the underlying rule editor.
@@ -459,7 +459,7 @@ export function Automation() {
         </aside>
 
         {!draft ? (
-          <div className="glass-panel rounded-[28px] p-6 text-blue-100/72">Select a rule from the left to inspect the deterministic routing pipeline.</div>
+          <div className="glass-panel rounded-[28px] p-6 text-blue-100/72">Select a rule from the left to inspect the deterministic interpretation pipeline.</div>
         ) : (
           <div className="space-y-5">
             <div className="glass-panel rounded-[28px] p-5">

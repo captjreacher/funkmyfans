@@ -173,7 +173,7 @@ export function ConnectCreatorModal({
               <Sparkles className="h-4 w-4" aria-hidden="true" />
               Connect Creator
             </div>
-            <h2 className="mt-1 text-xl font-semibold text-white">Onboard a creator into the Command Centre</h2>
+            <h2 className="mt-1 text-xl font-semibold text-white">Onboard a creator into the Conversation Operations Platform</h2>
           </div>
           <button type="button" onClick={onClose} className="rounded-xl border border-blue-500/20 bg-white/5 px-3 py-2 text-sm font-semibold text-blue-100/72 hover:bg-white/10">
             Close
@@ -472,7 +472,7 @@ function SuccessPanel({
           icon={UserRoundPlus}
           label="Open Creator"
         />
-        <ActionButton onClick={onGenerateTasks} icon={SquareCheckBig} label="Generate Tasks" />
+        <ActionButton onClick={onGenerateTasks} icon={SquareCheckBig} label="Generate Queue Items" />
       </div>
 
       <div className="flex items-center justify-between gap-3 border-t border-blue-500/15 pt-4">

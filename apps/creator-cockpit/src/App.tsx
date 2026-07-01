@@ -15,13 +15,16 @@ import {
 import { useEffect, useState } from "react";
 import { ConnectCreatorModal } from "./components/ConnectCreatorModal";
 import { Automation } from "./pages/Automation";
+import { AuditTrail } from "./pages/AuditTrail";
 import { CreatorDetail } from "./pages/CreatorDetail";
 import { Creators } from "./pages/Creators";
 import { Dashboard } from "./pages/Dashboard";
 import { Events } from "./pages/Events";
 import { OutboundMessages } from "./pages/OutboundMessages";
+import { Operations } from "./pages/Operations";
 import { Scripts } from "./pages/Scripts";
 import { Settings } from "./pages/Settings";
+import { RuntimeMetrics } from "./pages/RuntimeMetrics";
 import { Subscribers } from "./pages/Subscribers";
 import { Tasks } from "./pages/Tasks";
 import { fetchDashboard, type DashboardData } from "./lib/api";
@@ -30,21 +33,24 @@ type View =
   | "dashboard"
   | "creators"
   | "creator"
+  | "conversations"
+  | "queues"
   | "subscribers"
-  | "tasks"
   | "events"
   | "outbound"
-  | "scripts"
-  | "automation"
-  | "settings";
+  | "playbooks"
+  | "interpretation"
+  | "monitoring"
+  | "audit"
+  | "administration";
 
 const navItems: Array<{ view: View; label: string; icon: typeof BarChart3 }> = [
   { view: "dashboard", label: "Dashboard", icon: BarChart3 },
   { view: "creators", label: "Creators", icon: Users },
+  { view: "conversations", label: "Queue Workspace", icon: Send },
+  { view: "queues", label: "Queues", icon: ClipboardList },
   { view: "subscribers", label: "Subscribers", icon: UserRound },
-  { view: "tasks", label: "Tasks", icon: ClipboardList },
   { view: "events", label: "Events", icon: Radio },
-  { view: "outbound", label: "Outbound", icon: Send },
 ];
 
 const secondaryNav: Array<{
@@ -52,9 +58,12 @@ const secondaryNav: Array<{
   label: string;
   icon: typeof BarChart3;
 }> = [
-  { view: "scripts", label: "Playbooks", icon: FileText },
-  { view: "automation", label: "Routing", icon: Cpu },
-  { view: "settings", label: "Settings", icon: Cog },
+  { view: "playbooks", label: "Playbooks", icon: FileText },
+  { view: "interpretation", label: "Conversation Interpretation", icon: Cpu },
+  { view: "monitoring", label: "Monitoring", icon: Sparkles },
+  { view: "audit", label: "Audit", icon: ClipboardList },
+  { view: "administration", label: "Administration", icon: Cog },
+  { view: "outbound", label: "Outbound Review", icon: Send },
 ];
 
 export function App() {
@@ -105,12 +114,8 @@ export function App() {
                 />
               </div>
               <div>
-                <div className="text-lg font-semibold text-white">
-                  OF-Pilot // Command Centre
-                </div>
-                <div className="text-sm text-blue-200/70">
-                  Run creators like an AI-powered agency.
-                </div>
+                <div className="text-lg font-semibold text-white">Conversation Operations Platform</div>
+                <div className="text-sm text-blue-200/70">Run creator conversations, queues, and playbooks with governed operations.</div>
               </div>
             </div>
           </div>
@@ -170,18 +175,18 @@ export function App() {
           <header className="shrink-0 border-b border-blue-500/20 bg-[#071423]/78 backdrop-blur-2xl">
             <div className="flex min-h-20 flex-col gap-3 px-4 py-3 md:flex-row md:items-center md:justify-between md:px-6">
               <div>
-                <div className="text-sm font-semibold text-cyan-300">
-                  Agency Command Centre
+              <div className="text-sm font-semibold text-cyan-300">
+                  Conversation Operations Platform
                 </div>
                 <h1 className="text-2xl font-semibold text-white">
-                  What should your agency do first today?
+                  What should your team do first today?
                 </h1>
               </div>
               <label className="command-card flex min-h-12 w-full max-w-2xl items-center gap-3 rounded-2xl px-4">
                 <Search className="h-5 w-5 text-cyan-300" aria-hidden="true" />
                 <input
                   className="w-full bg-transparent text-sm outline-none"
-                  placeholder="Search creators, subscribers, conversations, tasks..."
+                  placeholder="Search creators, subscribers, conversations, queues..."
                 />
                 <span className="hidden rounded-lg border border-blue-400/20 px-2 py-1 text-xs font-semibold text-blue-100/60 sm:inline">
                   Ctrl K
@@ -233,20 +238,21 @@ export function App() {
                 {view === "creator" && selectedCreatorId ? (
                   <CreatorDetail creatorId={selectedCreatorId} />
                 ) : null}
+                {view === "conversations" ? <Operations /> : null}
+                {view === "queues" ? (
+                  <Tasks
+                    creators={data.creators}
+                    relationships={data.relationships}
+                    initialTasks={data.tasks}
+                  />
+                ) : null}
                 {view === "subscribers" ? (
                   <Subscribers
                     initialCreators={data.creators}
                     initialSubscribers={data.relationships}
                     initialTasks={data.tasks}
-                    onOpenTasks={() => setView("tasks")}
+                    onOpenTasks={() => setView("queues")}
                     initialFilters={subscriberFilters}
-                  />
-                ) : null}
-                {view === "tasks" ? (
-                  <Tasks
-                    creators={data.creators}
-                    relationships={data.relationships}
-                    initialTasks={data.tasks}
                   />
                 ) : null}
                 {view === "events" ? (
@@ -256,13 +262,15 @@ export function App() {
                   />
                 ) : null}
                 {view === "outbound" ? <OutboundMessages /> : null}
-                {view === "scripts" ? (
+                {view === "playbooks" ? (
                   <Scripts />
                 ) : null}
-                {view === "automation" ? (
+                {view === "interpretation" ? (
                   <Automation />
                 ) : null}
-                {view === "settings" ? (
+                {view === "monitoring" ? <RuntimeMetrics /> : null}
+                {view === "audit" ? <AuditTrail /> : null}
+                {view === "administration" ? (
                   <Settings />
                 ) : null}
               </>
@@ -276,25 +284,6 @@ export function App() {
         onOpenCreator={openCreator}
         onRefresh={refreshDashboard}
       />
-    </div>
-  );
-}
-
-function Placeholder({
-  title,
-  description,
-}: {
-  title: string;
-  description: string;
-}) {
-  return (
-    <div className="glass-panel rounded-2xl p-6 text-blue-100/72">
-      <h2 className="text-2xl font-semibold text-white">{title}</h2>
-      <p className="mt-2 max-w-3xl text-sm leading-6">{description}</p>
-      <div className="mt-5 rounded-2xl border border-blue-500/20 bg-[#071423]/60 p-4 text-sm text-blue-100/65">
-        This workspace is now connected. Replace this placeholder with the full{" "}
-        {title.toLowerCase()} page when ready.
-      </div>
     </div>
   );
 }
