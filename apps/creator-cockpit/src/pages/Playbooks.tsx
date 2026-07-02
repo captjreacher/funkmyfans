@@ -1,24 +1,50 @@
 import { Archive, CheckCircle2, ChevronLeft, FileText, Layers3, Plus, RefreshCw, Sparkles } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
 import type { OfMessageScript } from "@funkmyfans/of-types";
-import { createCreatorScript, fetchScriptsWorkspace, type ScriptsWorkspaceData } from "../lib/api";
+import { createCreatorScript, fetchScriptsWorkspace, updateScript, type ScriptsWorkspaceData } from "../lib/api";
 
 const libraryTabs = ["Template Library", "Drafts", "Active", "Archived"] as const;
 type LibraryTab = (typeof libraryTabs)[number];
 
 const wizardStages = ["Goal", "Template", "Components", "Variables", "Branches", "Review", "Activate"] as const;
 
+type WizardDraft = {
+  name: string;
+  description: string;
+  category: string;
+  folderName: string;
+  triggerEventType: string;
+  actionMode: string;
+};
+
 export function Playbooks() {
   const [workspace, setWorkspace] = useState<ScriptsWorkspaceData | null>(null);
   const [tab, setTab] = useState<LibraryTab>("Template Library");
   const [wizardScript, setWizardScript] = useState<OfMessageScript | null>(null);
   const [wizardStage, setWizardStage] = useState(0);
+  const [wizardDraft, setWizardDraft] = useState<WizardDraft | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     void loadWorkspace();
   }, []);
+
+  useEffect(() => {
+    if (!wizardScript) {
+      setWizardDraft(null);
+      return;
+    }
+    setWizardDraft({
+      name: wizardScript.name,
+      description: wizardScript.description ?? "",
+      category: wizardScript.category ?? "General",
+      folderName: wizardScript.folder_name ?? "Journey Library",
+      triggerEventType: wizardScript.trigger_event_type,
+      actionMode: wizardScript.action_mode
+    });
+  }, [wizardScript]);
 
   const scripts = workspace?.scripts ?? [];
   const filteredScripts = useMemo(() => {
@@ -42,8 +68,8 @@ export function Playbooks() {
     }
   }
 
-  async function createPlaybook() {
-    const creatorId = workspace?.creators[0]?.id;
+  async function createPlaybook(template?: OfMessageScript) {
+    const creatorId = template?.creator_id ?? workspace?.creators[0]?.id;
     if (!creatorId) {
       setError("Connect a creator before creating a playbook.");
       return;
@@ -51,23 +77,73 @@ export function Playbooks() {
     setBusy(true);
     try {
       const response = await createCreatorScript(creatorId, {
-        name: "New Playbook",
-        description: "Draft automation builder shell.",
-        triggerEventType: "manual",
+        name: template ? `${template.name} Draft` : "New Playbook",
+        description: template?.description ?? "Draft automation builder shell.",
+        triggerEventType: template?.trigger_event_type ?? "manual",
         autoSendEnabled: false,
         requiresApproval: true,
-        actionMode: "draft_for_approval",
-        cooldownHours: 24,
-        maxSendsPerFan: 1,
-        folderName: "Journey Library",
-        category: "General",
-        tags: ["playbook"],
-        steps: [{ order: 0, type: "message", body: "Hey {{subscriber_name}}, I wanted to reach out personally." }]
+        actionMode: template?.action_mode ?? "draft_for_approval",
+        cooldownHours: template?.cooldown_hours ?? 24,
+        maxSendsPerFan: template?.max_sends_per_fan ?? 1,
+        folderName: template?.folder_name ?? "Journey Library",
+        category: template?.category ?? "General",
+        tags: template?.tags?.length ? template.tags : ["playbook"],
+        steps: template?.steps?.length
+          ? template.steps.map((step, index) => ({
+              order: index,
+              type: step.step_type,
+              body: step.message_body ?? undefined,
+              delayMinutes: step.delay_minutes ?? undefined
+            }))
+          : [{ order: 0, type: "message", body: "Hey {{subscriber_name}}, I wanted to reach out personally." }]
       });
       setWizardStage(0);
       await loadWorkspace(response.script.id);
     } catch (createError) {
       setError(createError instanceof Error ? createError.message : "Unable to create playbook");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveWizardDraft() {
+    if (!wizardScript || !wizardDraft) return;
+    if (!isUuid(wizardScript.id)) {
+      await createPlaybook(wizardScript);
+      return;
+    }
+    setBusy(true);
+    try {
+      const result = await updateScript(wizardScript.id, {
+        name: wizardDraft.name,
+        description: wizardDraft.description,
+        category: wizardDraft.category,
+        folder_name: wizardDraft.folderName,
+        trigger_event_type: wizardDraft.triggerEventType,
+        action_mode: wizardDraft.actionMode as OfMessageScript["action_mode"]
+      });
+      setWizardScript(result.script);
+      await loadWorkspace(result.script.id);
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "Unable to customise playbook");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function setPlaybookStatus(status: OfMessageScript["status"]) {
+    if (!wizardScript) return;
+    if (!isUuid(wizardScript.id)) {
+      await createPlaybook(wizardScript);
+      return;
+    }
+    setBusy(true);
+    try {
+      const result = await updateScript(wizardScript.id, { status });
+      setWizardScript(result.script);
+      await loadWorkspace(result.script.id);
+    } catch (statusError) {
+      setError(statusError instanceof Error ? statusError.message : "Unable to update playbook status");
     } finally {
       setBusy(false);
     }
@@ -110,7 +186,17 @@ export function Playbooks() {
               <Sparkles className="h-5 w-5 text-cyan-300" aria-hidden="true" />
               <h3 className="text-xl font-semibold text-white">{wizardStages[wizardStage]}</h3>
             </div>
-            <WizardStage script={wizardScript} stage={wizardStages[wizardStage]} />
+            <WizardStage
+              script={wizardScript}
+              stage={wizardStages[wizardStage]}
+              draft={wizardDraft}
+              busy={busy}
+              onDraftChange={setWizardDraft}
+              onSave={() => void saveWizardDraft()}
+              onCreateDraft={() => void createPlaybook(wizardScript)}
+              onActivate={() => void setPlaybookStatus("active")}
+              onDeactivate={() => void setPlaybookStatus("inactive")}
+            />
             <div className="mt-6 flex justify-between gap-3">
               <button type="button" onClick={() => setWizardStage((current) => Math.max(0, current - 1))} className="rounded-lg border border-blue-400/20 bg-[#102338]/72 px-4 py-2.5 text-sm font-semibold text-blue-50">Back</button>
               <button type="button" onClick={() => setWizardStage((current) => Math.min(wizardStages.length - 1, current + 1))} className="rounded-lg bg-cyan-400 px-4 py-2.5 text-sm font-semibold text-slate-950">Next</button>
@@ -135,7 +221,7 @@ export function Playbooks() {
           </button>
           <button type="button" onClick={() => void createPlaybook()} disabled={busy} className="inline-flex items-center gap-2 rounded-lg bg-cyan-400 px-4 py-2 text-sm font-semibold text-slate-950 disabled:opacity-45">
             <Plus className="h-4 w-4" aria-hidden="true" />
-            Create Playbook
+            {tab === "Template Library" ? "Create from Template" : "Create Playbook"}
           </button>
         </div>
       </div>
@@ -168,7 +254,7 @@ export function Playbooks() {
               <div className="truncate text-blue-100/68">{creatorLabel(workspace, script.creator_id)}</div>
               <div className="truncate text-blue-100/68">{script.trigger_event_type}</div>
               <div><span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${statusTone(script)}`}>{script.builder_config?.workspace?.archivedAt ? "archived" : script.status}</span></div>
-              <div className="text-right text-cyan-200">Wizard</div>
+              <div className="text-right text-cyan-200">{isUuid(script.id) ? "Wizard" : "Template"}</div>
             </button>
           ))}
           {!filteredScripts.length ? <div className="px-4 py-8 text-sm text-blue-100/58">No playbooks in this view.</div> : null}
@@ -178,14 +264,110 @@ export function Playbooks() {
   );
 }
 
-function WizardStage({ script, stage }: { script: OfMessageScript; stage: (typeof wizardStages)[number] }) {
-  if (stage === "Goal") return <StageBody icon={FileText} title={script.category || "General"} detail={script.description ?? "Define the commercial or relationship outcome this playbook serves."} />;
-  if (stage === "Template") return <StageBody icon={Layers3} title={script.folder_name ?? "Journey Library"} detail="Choose the reusable pattern and creator context before editing details." />;
+function WizardStage({
+  script,
+  stage,
+  draft,
+  busy,
+  onDraftChange,
+  onSave,
+  onCreateDraft,
+  onActivate,
+  onDeactivate
+}: {
+  script: OfMessageScript;
+  stage: (typeof wizardStages)[number];
+  draft: WizardDraft | null;
+  busy: boolean;
+  onDraftChange: (draft: WizardDraft) => void;
+  onSave: () => void;
+  onCreateDraft: () => void;
+  onActivate: () => void;
+  onDeactivate: () => void;
+}) {
+  if (!isUuid(script.id)) {
+    return (
+      <div className="mt-5 rounded-lg border border-blue-500/15 bg-[#0D1B2A]/65 p-5">
+        <FileText className="h-6 w-6 text-cyan-300" aria-hidden="true" />
+        <div className="mt-4 text-lg font-semibold text-white">Template</div>
+        <p className="mt-2 max-w-2xl text-sm leading-6 text-blue-100/66">Create an editable draft from this template before customising or activating it.</p>
+        <button type="button" onClick={onCreateDraft} disabled={busy} className="mt-4 rounded-lg bg-cyan-400 px-4 py-2.5 text-sm font-semibold text-slate-950 disabled:opacity-45">
+          {busy ? "Creating..." : "Create from Template"}
+        </button>
+      </div>
+    );
+  }
+  if ((stage === "Goal" || stage === "Template") && draft) {
+    return <CustomiseStage draft={draft} busy={busy} onDraftChange={onDraftChange} onSave={onSave} />;
+  }
   if (stage === "Components") return <StageBody icon={Layers3} title={`${script.steps?.length ?? 0} components`} detail="Review messages, waits, questions, and actions as automation components." />;
   if (stage === "Variables") return <StageBody icon={Sparkles} title="Variables" detail="Map creator, subscriber, and offer variables before activation." />;
   if (stage === "Branches") return <StageBody icon={Archive} title="Branches" detail="Confirm conditional paths and fallback handling." />;
   if (stage === "Review") return <StageBody icon={CheckCircle2} title="Review" detail="Check approval mode, cooldowns, limits, and expected operator handoffs." />;
-  return <StageBody icon={CheckCircle2} title="Activate" detail="Activation happens after review. Runtime execution remains unchanged." />;
+  return (
+    <div className="mt-5 rounded-lg border border-blue-500/15 bg-[#0D1B2A]/65 p-5">
+      <CheckCircle2 className="h-6 w-6 text-cyan-300" aria-hidden="true" />
+      <div className="mt-4 text-lg font-semibold text-white">Activate</div>
+      <p className="mt-2 max-w-2xl text-sm leading-6 text-blue-100/66">Activation changes playbook status only. Runtime execution is not changed in this sprint.</p>
+      <div className="mt-4 flex flex-wrap gap-2">
+        <button type="button" onClick={onActivate} disabled={busy || script.status === "active"} className="rounded-lg bg-cyan-400 px-4 py-2.5 text-sm font-semibold text-slate-950 disabled:opacity-45">Activate</button>
+        <button type="button" onClick={onDeactivate} disabled={busy || script.status !== "active"} className="rounded-lg border border-blue-400/20 bg-[#102338]/72 px-4 py-2.5 text-sm font-semibold text-blue-50 disabled:opacity-45">Deactivate</button>
+      </div>
+    </div>
+  );
+}
+
+function CustomiseStage({
+  draft,
+  busy,
+  onDraftChange,
+  onSave
+}: {
+  draft: WizardDraft;
+  busy: boolean;
+  onDraftChange: (draft: WizardDraft) => void;
+  onSave: () => void;
+}) {
+  return (
+    <div className="mt-5 grid gap-4 rounded-lg border border-blue-500/15 bg-[#0D1B2A]/65 p-5 md:grid-cols-2">
+      <Field label="Name">
+        <input value={draft.name} onChange={(event) => onDraftChange({ ...draft, name: event.target.value })} className="command-card w-full rounded-lg px-3 py-2 text-sm" />
+      </Field>
+      <Field label="Goal">
+        <input value={draft.category} onChange={(event) => onDraftChange({ ...draft, category: event.target.value })} className="command-card w-full rounded-lg px-3 py-2 text-sm" />
+      </Field>
+      <Field label="Template">
+        <input value={draft.folderName} onChange={(event) => onDraftChange({ ...draft, folderName: event.target.value })} className="command-card w-full rounded-lg px-3 py-2 text-sm" />
+      </Field>
+      <Field label="Trigger">
+        <input value={draft.triggerEventType} onChange={(event) => onDraftChange({ ...draft, triggerEventType: event.target.value })} className="command-card w-full rounded-lg px-3 py-2 text-sm" />
+      </Field>
+      <Field label="Mode">
+        <select value={draft.actionMode} onChange={(event) => onDraftChange({ ...draft, actionMode: event.target.value })} className="command-card w-full rounded-lg px-3 py-2 text-sm">
+          <option value="task_only">Task only</option>
+          <option value="draft_for_approval">Draft for approval</option>
+          <option value="auto_send">Auto send</option>
+        </select>
+      </Field>
+      <Field label="Description">
+        <textarea value={draft.description} onChange={(event) => onDraftChange({ ...draft, description: event.target.value })} rows={3} className="command-card w-full rounded-lg px-3 py-2 text-sm" />
+      </Field>
+      <div className="md:col-span-2">
+        <button type="button" onClick={onSave} disabled={busy || !draft.name.trim() || !draft.triggerEventType.trim()} className="rounded-lg bg-cyan-400 px-4 py-2.5 text-sm font-semibold text-slate-950 disabled:opacity-45">
+          {busy ? "Saving..." : "Customise"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function Field({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <label className="block">
+      <div className="mb-2 text-sm font-medium text-blue-100/62">{label}</div>
+      {children}
+    </label>
+  );
 }
 
 function StageBody({ icon: Icon, title, detail }: { icon: typeof Sparkles; title: string; detail: string }) {
@@ -216,4 +398,8 @@ function statusTone(script: OfMessageScript) {
   if (script.builder_config?.workspace?.archivedAt) return "bg-amber-500/14 text-amber-200";
   if (script.status === "active") return "bg-emerald-500/14 text-emerald-200";
   return "bg-blue-400/12 text-blue-100";
+}
+
+function isUuid(value: string) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{12}$/i.test(value);
 }

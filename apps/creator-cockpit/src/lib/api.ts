@@ -190,6 +190,8 @@ export async function fetchCreatorDetail(creatorId: string): Promise<CreatorDeta
   return apiJson<CreatorDetailData>(`/creators/${creatorId}`);
 }
 
+export type QueueItemAction = "approve_ai" | "respond" | "assign" | "ignore" | "pause";
+
 export async function createCreator(payload: CreatorCreatePayload): Promise<{ creator: OfCreator }> {
   return apiJson<{ creator: OfCreator }>("/creators", jsonInit("POST", payload));
 }
@@ -493,6 +495,17 @@ export async function fetchOperationsDashboard(filters: Record<string, string> =
 
 export async function fetchQueueWorkspace(filters: Record<string, string> = {}): Promise<QueueWorkspaceData> {
   return apiJson<QueueWorkspaceData>(`/queue-workspace${queryString(filters)}`);
+}
+
+export async function applyQueueItemAction(
+  queueItemId: string,
+  action: QueueItemAction,
+  payload: { actor?: string; note?: string; responseText?: string } = {}
+): Promise<{ action: QueueItemAction; item: QueueWorkspaceData["items"][number] | null; task: OfTask | null }> {
+  return apiJson<{ action: QueueItemAction; item: QueueWorkspaceData["items"][number] | null; task: OfTask | null }>(
+    `/queue-items/${queueItemId}/action`,
+    jsonInit("POST", { ...payload, action })
+  );
 }
 
 export async function fetchOperationsConversationDetail(conversationId: string): Promise<ConversationOperationsDetail> {

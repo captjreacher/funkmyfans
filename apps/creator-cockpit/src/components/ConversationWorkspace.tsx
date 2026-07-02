@@ -1,16 +1,20 @@
 import { ChevronLeft, HandCoins, LoaderCircle, PauseCircle, Reply, Send, Slash, UserRound, Wand2 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { fetchConversationWorkspace, type ConversationWorkspaceData } from "../lib/api";
+import { applyQueueItemAction, fetchConversationWorkspace, type ConversationWorkspaceData, type QueueItemAction } from "../lib/api";
 
-type QueueAction = "approve_ai" | "respond" | "assign" | "ignore" | "pause";
+type QueueAction = QueueItemAction;
 
 export function ConversationWorkspace({
   conversationId,
-  onBack
+  queueItemId,
+  onBack,
+  onResolved
 }: {
   conversationId: string | null;
+  queueItemId?: string | null;
   onBack?: () => void;
+  onResolved?: () => void;
 }) {
   const [data, setData] = useState<ConversationWorkspaceData | null>(null);
   const [busy, setBusy] = useState(false);
@@ -41,9 +45,14 @@ export function ConversationWorkspace({
   }
 
   async function handleDecision(nextDecision: QueueAction) {
+    const targetQueueItemId = queueItemId ?? data?.current_queue_item?.id ?? null;
+    if (!targetQueueItemId) return;
     setBusy(true);
     try {
+      await applyQueueItemAction(targetQueueItemId, nextDecision, { actor: "operator" });
       setDecision(nextDecision);
+      await refreshWorkspace();
+      if (nextDecision !== "assign") onResolved?.();
     } finally {
       setBusy(false);
     }
@@ -51,6 +60,7 @@ export function ConversationWorkspace({
 
   const conversation = data?.detail.conversation ?? null;
   const queueItem = data?.current_queue_item ?? null;
+  const actionQueueItemId = queueItemId ?? queueItem?.id ?? null;
   const waitingReason = firstNonEmpty(
     queueItem?.priority_reason,
     conversation?.waiting_reason,
@@ -146,15 +156,15 @@ export function ConversationWorkspace({
             <p className="mt-3 text-sm leading-6 text-blue-100/68">{waitingReason}</p>
 
             <div className="mt-4 grid gap-2">
-              <ActionButton label="Approve AI" icon={HandCoins} active={decision === "approve_ai"} onClick={() => void handleDecision("approve_ai")} />
-              <ActionButton label="Respond" icon={Reply} active={decision === "respond"} onClick={() => void handleDecision("respond")} />
-              <ActionButton label="Assign" icon={UserRound} active={decision === "assign"} onClick={() => void handleDecision("assign")} />
-              <ActionButton label="Ignore" icon={Slash} active={decision === "ignore"} onClick={() => void handleDecision("ignore")} />
-              <ActionButton label="Pause" icon={PauseCircle} active={decision === "pause"} onClick={() => void handleDecision("pause")} />
+              <ActionButton label="Approve AI" icon={HandCoins} active={decision === "approve_ai"} disabled={busy || !actionQueueItemId} onClick={() => void handleDecision("approve_ai")} />
+              <ActionButton label="Respond" icon={Reply} active={decision === "respond"} disabled={busy || !actionQueueItemId} onClick={() => void handleDecision("respond")} />
+              <ActionButton label="Assign" icon={UserRound} active={decision === "assign"} disabled={busy || !actionQueueItemId} onClick={() => void handleDecision("assign")} />
+              <ActionButton label="Ignore" icon={Slash} active={decision === "ignore"} disabled={busy || !actionQueueItemId} onClick={() => void handleDecision("ignore")} />
+              <ActionButton label="Pause" icon={PauseCircle} active={decision === "pause"} disabled={busy || !actionQueueItemId} onClick={() => void handleDecision("pause")} />
             </div>
 
             <div className="mt-4 rounded-2xl border border-blue-500/15 bg-[#0D1B2A]/60 p-4 text-sm text-blue-100/68">
-              {decision ? `Decision recorded locally as ${labelize(decision)}.` : "Choose one decision and move on."}
+              {decision ? `Decision recorded as ${labelize(decision)}.` : actionQueueItemId ? "Choose one decision and move on." : "This workspace has no queue item action attached."}
             </div>
           </div>
 
@@ -211,21 +221,24 @@ function ActionButton({
   label,
   icon: Icon,
   active,
+  disabled,
   onClick
 }: {
   label: string;
   icon: LucideIcon;
   active: boolean;
+  disabled?: boolean;
   onClick: () => void;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
+      disabled={disabled}
       className={`flex items-center justify-between gap-3 rounded-2xl border px-4 py-3 text-sm font-semibold ${
         active
           ? "selected-glow text-white"
-          : "border-blue-500/20 bg-[#0D1B2A]/72 text-blue-50 hover:border-cyan-300/40 hover:bg-[#1A3655]/70"
+          : "border-blue-500/20 bg-[#0D1B2A]/72 text-blue-50 hover:border-cyan-300/40 hover:bg-[#1A3655]/70 disabled:cursor-not-allowed disabled:opacity-45"
       }`}
     >
       <span className="inline-flex items-center gap-2">

@@ -675,6 +675,13 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     return Response.json(workspace, { headers: jsonHeaders });
   }
 
+  const queueItemActionMatch = url.pathname.match(/^\/api\/queue-items\/([^/]+)\/action$/);
+  if (request.method === "POST" && queueItemActionMatch) {
+    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const result = await applyQueueItemAction(supabase, queueItemActionMatch[1], body);
+    return Response.json(result, { headers: jsonHeaders });
+  }
+
   if (request.method === "GET" && url.pathname === "/api/operations/dashboard") {
     // Transitional adapter: preserve the legacy dashboard endpoint while the queue workspace contract is adopted.
     const workspace = await getQueueWorkspace(supabase, url);
@@ -1838,6 +1845,105 @@ async function updateTask(supabase: SupabaseClient, taskId: string, body: Record
     );
   }
   return result.data;
+}
+
+async function applyQueueItemAction(supabase: SupabaseClient, queueItemId: string, body: Record<string, unknown>) {
+  const action = parseQueueOperatorAction(body.action);
+  const actor = typeof body.actor === "string" && body.actor.trim() ? body.actor.trim() : "operator";
+  const now = new Date().toISOString();
+
+  const current = await supabase
+    .from("of_queue_items")
+    .select("id, queue_id, legacy_task_id, conversation_id, assigned_operator_id, priority, status, created_at, updated_at, moved_at, resolved_at, metadata")
+    .eq("id", queueItemId)
+    .maybeSingle();
+
+  if (current.error && isMissingSchemaCacheRelationError(current.error, "of_queue_items")) {
+    const task = await applyLegacyQueueAction(supabase, queueItemId, action, actor, body);
+    return { action, item: null, task };
+  }
+
+  assertNoError(current.error);
+
+  if (!current.data) {
+    const task = await applyLegacyQueueAction(supabase, queueItemId, action, actor, body);
+    return { action, item: null, task };
+  }
+
+  const row = current.data as CanonicalQueueWorkspaceItemRow;
+  const patch: Record<string, unknown> = {
+    metadata: {
+      ...(isRecord(row.metadata) ? row.metadata : {}),
+      last_operator_action: action,
+      last_operator_actor: actor,
+      last_operator_action_at: now
+    }
+  };
+
+  if (action === "assign") {
+    patch.status = "assigned";
+    patch.assigned_operator_id = actor;
+    patch.moved_at = now;
+    patch.resolved_at = null;
+  } else {
+    patch.status = "resolved";
+    patch.resolved_at = now;
+    patch.moved_at = row.moved_at ?? now;
+  }
+
+  const updated = await supabase.from("of_queue_items").update(patch).eq("id", queueItemId).select("*").single();
+  assertNoError(updated.error);
+
+  const task = row.legacy_task_id ? await updateTask(supabase, row.legacy_task_id, queueActionTaskPatch(action, actor, body)) : null;
+
+  if (action === "approve_ai" && row.conversation_id) {
+    await approvePendingConversationOutbound(supabase, row.conversation_id, actor);
+  }
+
+  return { action, item: updated.data, task };
+}
+
+async function applyLegacyQueueAction(
+  supabase: SupabaseClient,
+  taskId: string,
+  action: QueueOperatorAction,
+  actor: string,
+  body: Record<string, unknown>
+) {
+  return updateTask(supabase, taskId, queueActionTaskPatch(action, actor, body));
+}
+
+type QueueOperatorAction = "approve_ai" | "respond" | "assign" | "ignore" | "pause";
+
+function parseQueueOperatorAction(value: unknown): QueueOperatorAction {
+  if (value === "approve_ai" || value === "respond" || value === "assign" || value === "ignore" || value === "pause") return value;
+  throw new Error("Invalid queue item action");
+}
+
+function queueActionTaskPatch(action: QueueOperatorAction, actor: string, body: Record<string, unknown>) {
+  const responseText = typeof body.responseText === "string" && body.responseText.trim() ? body.responseText.trim() : null;
+  const note = typeof body.note === "string" && body.note.trim() ? body.note.trim() : null;
+  if (action === "assign") return { status: "in_progress", assigned_to: actor, actor };
+  if (action === "ignore") return { status: "ignored", ignore_reason: note ?? "Ignored from queue item workspace", actor };
+  if (action === "pause") return { status: "archived", resolution_note: note ?? "Paused from queue item workspace", actor };
+  if (action === "respond") return { status: "completed", resolution_note: responseText ?? note ?? "Operator chose Respond from queue item workspace", actor };
+  return { status: "completed", resolution_note: note ?? "AI reply approved from queue item workspace", actor };
+}
+
+async function approvePendingConversationOutbound(supabase: SupabaseClient, conversationId: string, actor: string) {
+  const result = await supabase
+    .from("of_outbound_messages")
+    .update({ approval_status: "approved", approved_by: actor })
+    .eq("conversation_instance_id", conversationId)
+    .eq("approval_status", "pending");
+
+  if (result.error && (
+    isMissingSchemaCacheRelationError(result.error, "of_outbound_messages") ||
+    isMissingSchemaCacheColumnError(result.error, "of_outbound_messages", "conversation_instance_id")
+  )) {
+    return;
+  }
+  assertNoError(result.error);
 }
 
 async function generateCreatorTasks(supabase: SupabaseClient, creatorId: string) {
