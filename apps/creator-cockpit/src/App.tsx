@@ -27,6 +27,7 @@ import { Settings } from "./pages/Settings";
 import { RuntimeMetrics } from "./pages/RuntimeMetrics";
 import { Subscribers } from "./pages/Subscribers";
 import { Tasks } from "./pages/Tasks";
+import { ConversationWorkspace } from "./components/ConversationWorkspace";
 import { fetchDashboard, type DashboardData } from "./lib/api";
 
 type View =
@@ -34,6 +35,7 @@ type View =
   | "creators"
   | "creator"
   | "conversations"
+  | "conversation-workspace"
   | "queues"
   | "subscribers"
   | "events"
@@ -48,7 +50,7 @@ const navItems: Array<{ view: View; label: string; icon: typeof BarChart3 }> = [
   { view: "dashboard", label: "Dashboard", icon: BarChart3 },
   { view: "creators", label: "Creators", icon: Users },
   { view: "conversations", label: "Queue Workspace", icon: Send },
-  { view: "queues", label: "Queues", icon: ClipboardList },
+  { view: "queues", label: "Legacy Tasks", icon: ClipboardList },
   { view: "subscribers", label: "Subscribers", icon: UserRound },
   { view: "events", label: "Events", icon: Radio },
 ];
@@ -71,6 +73,7 @@ export function App() {
   const [selectedCreatorId, setSelectedCreatorId] = useState<string | null>(
     null,
   );
+  const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
   const [subscriberFilters, setSubscriberFilters] = useState<Record<
     string,
     string
@@ -90,6 +93,11 @@ export function App() {
   function openCreator(id: string) {
     setSelectedCreatorId(id);
     setView("creator");
+  }
+
+  function openConversationWorkspace(conversationId: string) {
+    setSelectedConversationId(conversationId);
+    setView("conversation-workspace");
   }
 
   function openSubscribers(filters: Record<string, string>) {
@@ -175,22 +183,22 @@ export function App() {
           <header className="shrink-0 border-b border-blue-500/20 bg-[#071423]/78 backdrop-blur-2xl">
             <div className="flex min-h-20 flex-col gap-3 px-4 py-3 md:flex-row md:items-center md:justify-between md:px-6">
               <div>
-              <div className="text-sm font-semibold text-cyan-300">
+                <div className="text-sm font-semibold text-cyan-300">
                   Conversation Operations Platform
                 </div>
                 <h1 className="text-2xl font-semibold text-white">
                   What should your team do first today?
                 </h1>
+                <div className="mt-1 text-sm text-blue-200/70">
+                  Run creator conversations and queues with governed operations.
+                </div>
               </div>
               <label className="command-card flex min-h-12 w-full max-w-2xl items-center gap-3 rounded-2xl px-4">
                 <Search className="h-5 w-5 text-cyan-300" aria-hidden="true" />
                 <input
-                  className="w-full bg-transparent text-sm outline-none"
+                  className="w-full bg-transparent text-sm outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/80 focus-visible:ring-offset-2 focus-visible:ring-offset-[#071423]"
                   placeholder="Search creators, subscribers, conversations, queues..."
                 />
-                <span className="hidden rounded-lg border border-blue-400/20 px-2 py-1 text-xs font-semibold text-blue-100/60 sm:inline">
-                  Ctrl K
-                </span>
               </label>
             </div>
 
@@ -238,7 +246,10 @@ export function App() {
                 {view === "creator" && selectedCreatorId ? (
                   <CreatorDetail creatorId={selectedCreatorId} />
                 ) : null}
-                {view === "conversations" ? <Operations /> : null}
+                {view === "conversations" ? <Operations onOpenConversationWorkspace={openConversationWorkspace} /> : null}
+                {view === "conversation-workspace" ? (
+                  <ConversationWorkspace conversationId={selectedConversationId} onBack={() => setView("conversations")} />
+                ) : null}
                 {view === "queues" ? (
                   <Tasks
                     creators={data.creators}

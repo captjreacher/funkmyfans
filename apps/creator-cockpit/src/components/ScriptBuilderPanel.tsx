@@ -1,5 +1,5 @@
 import { AlertTriangle, ArrowDown, ArrowUp, Copy, FastForward, GitBranch, PauseCircle, Play, Plus, RotateCcw, Save, Search, ToggleLeft, ToggleRight, Trash2, Variable, Workflow } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { Dispatch, ReactNode, SetStateAction } from "react";
 import type {
   OfAutomationSimulation,
@@ -184,6 +184,7 @@ export function ScriptBuilderPanel({
   const selectedConversation = conversations.find((item) => item.id === selectedConversationId) ?? null;
   const currentSimulationSubscriber = simulatedSubscribers.find((item) => item.id === selectedSimulationSubscriberId) ?? null;
   const selectedSimulation = simulations.find((item) => item.id === selectedSimulationId) ?? null;
+  const validation = useMemo(() => validateDraft(draft), [draft]);
   const conversationBuckets = {
     running: conversations.filter((item) => item.status === "running"),
     waiting: conversations.filter((item) => item.status === "waiting_delay" || item.status === "waiting_reply" || item.status === "waiting_approval"),
@@ -367,6 +368,10 @@ export function ScriptBuilderPanel({
 
   async function handleSaveScript() {
     if (!draft) return;
+    if (validation.errors.length) {
+      setLocalError(validation.errors.join(" "));
+      return;
+    }
     setSaving(true);
     setLocalError(null);
     try {
@@ -523,6 +528,12 @@ export function ScriptBuilderPanel({
     <section className="space-y-4">
       {error ? <div className="rounded-md bg-rose-50 px-3 py-2 text-sm font-medium text-rose-800">{error}</div> : null}
       {localError ? <div className="rounded-md bg-amber-50 px-3 py-2 text-sm font-medium text-amber-900">{localError}</div> : null}
+      {validation.errors.length || validation.warnings.length ? (
+        <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-950">
+          {validation.errors.length ? <div className="font-semibold">{validation.errors.join(" ")}</div> : null}
+          {validation.warnings.length ? <div className={validation.errors.length ? "mt-1" : ""}>{validation.warnings.join(" ")}</div> : null}
+        </div>
+      ) : null}
 
       <div className="grid gap-4 xl:grid-cols-[320px_1fr]">
         <aside className="rounded-md border border-stone-200 bg-white">
@@ -539,7 +550,7 @@ export function ScriptBuilderPanel({
             </div>
             <label className="mt-4 flex items-center gap-2 rounded-md border border-stone-200 px-3 py-2 text-sm text-stone-500">
               <Search className="h-4 w-4" aria-hidden="true" />
-              <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search scripts, tags, categories..." className="w-full bg-transparent outline-none" />
+              <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search scripts, tags, categories..." className="w-full bg-transparent outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/80 focus-visible:ring-offset-2 focus-visible:ring-offset-white" />
             </label>
             <div className="mt-3 flex flex-wrap gap-2">
               {folders.map((folder) => (
@@ -616,7 +627,7 @@ export function ScriptBuilderPanel({
                   <Play className="mr-2 inline h-4 w-4" aria-hidden="true" />
                   Test Trigger
                 </button>
-                <button type="button" onClick={() => void handleSaveScript()} disabled={saving} className="rounded-md bg-stone-950 px-3 py-2 text-sm font-semibold text-white disabled:bg-stone-400">
+                <button type="button" onClick={() => void handleSaveScript()} disabled={saving || validation.errors.length > 0} className="rounded-md bg-stone-950 px-3 py-2 text-sm font-semibold text-white disabled:bg-stone-400">
                   <Save className="mr-2 inline h-4 w-4" aria-hidden="true" />
                   {saving ? "Saving" : "Save Builder"}
                 </button>
@@ -829,9 +840,9 @@ export function ScriptBuilderPanel({
 
                     <div className="mt-4 grid gap-3 xl:grid-cols-2">
                       <Field label="Step Type">
-                        <select value={step.type} onChange={(event) => updateStep(step.id, { type: event.target.value as MessageScriptStepType, metadata: defaultMetadataForType(event.target.value as MessageScriptStepType, step.metadata) })} className="w-full rounded-md border border-stone-200 px-3 py-2 text-sm">
+                        <select value={step.type} onChange={(event) => updateStep(step.id, { type: event.target.value as MessageScriptStepType, metadata: defaultMetadataForType(event.target.value as MessageScriptStepType, step.metadata) })} className="w-full rounded-md border border-stone-200 px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/80 focus-visible:ring-offset-2 focus-visible:ring-offset-white">
                           <option value="message">Send Message</option>
-                          <option value="follow_up">Send Message (Legacy Follow-up)</option>
+                          <option value="follow_up">Legacy Follow-up</option>
                           <option value="wait">Wait</option>
                           <option value="question">Ask Question</option>
                           <option value="branch">Branch</option>
@@ -840,7 +851,7 @@ export function ScriptBuilderPanel({
                         </select>
                       </Field>
                       <Field label="Step Label">
-                        <input value={step.metadata.label ?? ""} onChange={(event) => updateStepMetadata(step.id, { label: event.target.value })} placeholder="Warm welcome" className="w-full rounded-md border border-stone-200 px-3 py-2 text-sm" />
+                        <input value={step.metadata.label ?? ""} onChange={(event) => updateStepMetadata(step.id, { label: event.target.value })} placeholder="Warm welcome" className="w-full rounded-md border border-stone-200 px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/80 focus-visible:ring-offset-2 focus-visible:ring-offset-white" />
                       </Field>
                     </div>
 
@@ -1323,6 +1334,60 @@ function InspectorRow({ label, value }: { label: string; value: string }) {
       <div className="mt-1 text-sm text-stone-800">{value}</div>
     </div>
   );
+}
+
+function validateDraft(draft: BuilderDraft | null) {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  if (!draft) return { errors, warnings };
+
+  const seenIds = new Set<string>();
+  const stepIds = new Set(draft.steps.map((step) => step.id));
+  if (!draft.steps.length) errors.push("At least one step is required.");
+
+  draft.steps.forEach((step, index) => {
+    const label = step.metadata.label?.trim() || humanizeStepType(step.type, index);
+    if (step.id) {
+      if (seenIds.has(step.id)) errors.push(`Duplicate step id detected for ${label}.`);
+      seenIds.add(step.id);
+    }
+    if (requiresBody(step.type) && !step.body.trim()) {
+      errors.push(`${label} requires message text.`);
+    }
+
+    if (step.nextStepId.trim() && !stepIds.has(step.nextStepId)) {
+      errors.push(`${label} points to a missing next step.`);
+    }
+    if (step.type !== "branch" && step.fallbackStepId.trim() && !stepIds.has(step.fallbackStepId)) {
+      errors.push(`${label} points to a missing fallback step.`);
+    }
+
+    if (step.type === "branch") {
+      const branchRules = step.metadata.branchRules ?? [];
+      if (!branchRules.length) {
+        warnings.push(`${label} has no branch rules; it will fall through to the fallback or next step.`);
+      }
+      branchRules.forEach((rule, ruleIndex) => {
+        const ruleLabel = rule.label?.trim() || `Branch ${ruleIndex + 1}`;
+        const hasCondition = rule.condition.key.trim().length > 0;
+        const hasTarget = Boolean(rule.nextStepId?.trim());
+        if (!hasCondition && !hasTarget) {
+          errors.push(`${label} contains a blank branch rule (${ruleLabel}).`);
+        }
+        if (hasCondition && !hasTarget) {
+          errors.push(`${label} branch rule ${ruleLabel} needs a target step.`);
+        }
+        if (rule.nextStepId?.trim() && !stepIds.has(rule.nextStepId)) {
+          errors.push(`${label} branch rule ${ruleLabel} points to a missing target step.`);
+        }
+      });
+      if (step.fallbackStepId.trim() && !stepIds.has(step.fallbackStepId)) {
+        errors.push(`${label} points to a missing fallback step.`);
+      }
+    }
+  });
+
+  return { errors, warnings };
 }
 
 function toDraft(script: OfMessageScript): BuilderDraft {

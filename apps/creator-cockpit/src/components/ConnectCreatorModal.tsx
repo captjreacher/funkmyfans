@@ -251,16 +251,16 @@ export function ConnectCreatorModal({
                   {step === 0 ? (
                     <div className="grid gap-4 md:grid-cols-2">
                       <Field label="Display name">
-                        <input value={form.display_name} onChange={(event) => setForm({ ...form, display_name: event.target.value })} className="w-full rounded-xl border border-blue-500/20 bg-[#0D1B2A] px-3 py-2.5 text-sm outline-none" placeholder="Creator name" />
+                        <input value={form.display_name} onChange={(event) => setForm({ ...form, display_name: event.target.value })} className="w-full rounded-xl border border-blue-500/20 bg-[#0D1B2A] px-3 py-2.5 text-sm outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/80 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0D1B2A]" placeholder="Creator name" />
                       </Field>
                       <Field label="Username / handle">
-                        <input value={form.username} onChange={(event) => setForm({ ...form, username: event.target.value })} className="w-full rounded-xl border border-blue-500/20 bg-[#0D1B2A] px-3 py-2.5 text-sm outline-none" placeholder="@handle" />
+                        <input value={form.username} onChange={(event) => setForm({ ...form, username: event.target.value })} className="w-full rounded-xl border border-blue-500/20 bg-[#0D1B2A] px-3 py-2.5 text-sm outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/80 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0D1B2A]" placeholder="@handle" />
                       </Field>
                       <Field label="Location">
-                        <input value={form.location} onChange={(event) => setForm({ ...form, location: event.target.value })} className="w-full rounded-xl border border-blue-500/20 bg-[#0D1B2A] px-3 py-2.5 text-sm outline-none" placeholder="City, country" />
+                        <input value={form.location} onChange={(event) => setForm({ ...form, location: event.target.value })} className="w-full rounded-xl border border-blue-500/20 bg-[#0D1B2A] px-3 py-2.5 text-sm outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/80 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0D1B2A]" placeholder="City, country" />
                       </Field>
                       <Field label="Status">
-                        <select value={form.status} onChange={(event) => setForm({ ...form, status: event.target.value })} className="w-full rounded-xl border border-blue-500/20 bg-[#0D1B2A] px-3 py-2.5 text-sm outline-none">
+                        <select value={form.status} onChange={(event) => setForm({ ...form, status: event.target.value })} className="w-full rounded-xl border border-blue-500/20 bg-[#0D1B2A] px-3 py-2.5 text-sm outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/80 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0D1B2A]">
                           <option value="pending">Pending</option>
                           <option value="connected">Connected</option>
                           <option value="attention">Needs attention</option>
@@ -269,7 +269,7 @@ export function ConnectCreatorModal({
                         </select>
                       </Field>
                       <Field label="Onboarding status">
-                        <select value={form.onboarding_status} onChange={(event) => setForm({ ...form, onboarding_status: event.target.value })} className="w-full rounded-xl border border-blue-500/20 bg-[#0D1B2A] px-3 py-2.5 text-sm outline-none">
+                        <select value={form.onboarding_status} onChange={(event) => setForm({ ...form, onboarding_status: event.target.value })} className="w-full rounded-xl border border-blue-500/20 bg-[#0D1B2A] px-3 py-2.5 text-sm outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/80 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0D1B2A]">
                           <option value="draft">Draft</option>
                           <option value="pending">Pending</option>
                           <option value="connected">Connected</option>
@@ -284,13 +284,13 @@ export function ConnectCreatorModal({
                   {step === 1 ? (
                     <div className="grid gap-4 md:grid-cols-2">
                       <Field label="Platform provider">
-                        <select value={form.platform_provider} onChange={(event) => setForm({ ...form, platform_provider: event.target.value })} className="w-full rounded-xl border border-blue-500/20 bg-[#0D1B2A] px-3 py-2.5 text-sm outline-none">
+                        <select value={form.platform_provider} onChange={(event) => setForm({ ...form, platform_provider: event.target.value })} className="w-full rounded-xl border border-blue-500/20 bg-[#0D1B2A] px-3 py-2.5 text-sm outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/80 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0D1B2A]">
                           <option value="betterfans">BetterFans</option>
                         </select>
                       </Field>
                       <Field label="BetterFans account ID">
                         <div className="flex gap-2">
-                          <input value={form.betterfans_account_id} onChange={(event) => setForm({ ...form, betterfans_account_id: event.target.value })} className="min-w-0 flex-1 rounded-xl border border-blue-500/20 bg-[#0D1B2A] px-3 py-2.5 text-sm outline-none" placeholder="account id" />
+                          <input value={form.betterfans_account_id} onChange={(event) => setForm({ ...form, betterfans_account_id: event.target.value })} className="min-w-0 flex-1 rounded-xl border border-blue-500/20 bg-[#0D1B2A] px-3 py-2.5 text-sm outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/80 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0D1B2A]" placeholder="account id" />
                           <button type="button" onClick={handleValidate} disabled={!form.betterfans_account_id.trim() || validation.kind === "validating"} className="inline-flex items-center gap-2 rounded-xl border border-cyan-400/20 bg-cyan-400/10 px-3 py-2.5 text-sm font-semibold text-cyan-200 disabled:cursor-not-allowed disabled:opacity-50">
                             {validation.kind === "validating" ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <TestTube2 className="h-4 w-4" aria-hidden="true" />}
                             Test connection
@@ -298,7 +298,7 @@ export function ConnectCreatorModal({
                         </div>
                       </Field>
                       <Field label="Notes" className="md:col-span-2">
-                        <textarea value={form.notes} onChange={(event) => setForm({ ...form, notes: event.target.value })} rows={6} className="w-full rounded-xl border border-blue-500/20 bg-[#0D1B2A] px-3 py-2.5 text-sm outline-none" placeholder="Optional onboarding notes, constraints, or context" />
+                        <textarea value={form.notes} onChange={(event) => setForm({ ...form, notes: event.target.value })} rows={6} className="w-full rounded-xl border border-blue-500/20 bg-[#0D1B2A] px-3 py-2.5 text-sm outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/80 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0D1B2A]" placeholder="Optional onboarding notes, constraints, or context" />
                       </Field>
                     </div>
                   ) : null}

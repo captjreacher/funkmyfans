@@ -1,18 +1,6 @@
 import { AlertTriangle, ChevronRight, ClipboardCheck, LoaderCircle, RefreshCw, Search, ShieldAlert, Sparkles } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
-import type { ConversationOperationsDetail } from "@funkmyfans/of-types";
-import { ConversationInspector } from "../components/ConversationInspector";
-import {
-  cancelOperationsConversation,
-  duplicateConversationAsSimulation,
-  exportOperationsConversation,
-  fetchOperationsConversationDetail,
-  fetchQueueWorkspace,
-  restartOperationsConversation,
-  resumeOperationsConversation,
-  retryOperationsConversation,
-  type QueueWorkspaceData
-} from "../lib/api";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { fetchQueueWorkspace, type QueueWorkspaceData } from "../lib/api";
 
 type QueueWorkspaceItemSummary = QueueWorkspaceData["items"][number];
 type QueueWorkspaceQueueSummary = QueueWorkspaceData["queues"][number];
@@ -26,11 +14,13 @@ const defaultFilters = {
   search: ""
 };
 
-export function Operations() {
+export function Operations({
+  onOpenConversationWorkspace
+}: {
+  onOpenConversationWorkspace: (conversationId: string) => void;
+}) {
   const [filters, setFilters] = useState(defaultFilters);
   const [data, setData] = useState<QueueWorkspaceData | null>(null);
-  const [detail, setDetail] = useState<ConversationOperationsDetail | null>(null);
-  const [busy, setBusy] = useState(false);
   const [loadingWorkspace, setLoadingWorkspace] = useState(false);
 
   useEffect(() => {
@@ -52,57 +42,17 @@ export function Operations() {
     try {
       const next = await fetchQueueWorkspace(filters);
       setData(next);
-      if (detail && next.selected_item_context?.conversation?.id && detail.conversation.id !== next.selected_item_context.conversation.id) {
-        setDetail(null);
-      }
     } finally {
       setLoadingWorkspace(false);
     }
   }
 
-  async function openConversationDetail(conversationId: string) {
-    setBusy(true);
-    try {
-      const next = await fetchOperationsConversationDetail(conversationId);
-      setDetail(next);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function runAction(action: () => Promise<ConversationOperationsDetail>) {
-    if (!detail) return;
-    setBusy(true);
-    try {
-      const next = await action();
-      setDetail(next);
-      await refreshWorkspace();
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function handleExport() {
-    if (!detail) return;
-    setBusy(true);
-    try {
-      const exported = await exportOperationsConversation(detail.conversation.id);
-      await navigator.clipboard.writeText(JSON.stringify(exported, null, 2));
-    } finally {
-      setBusy(false);
-    }
-  }
-
   function selectQueue(queueId: string) {
     setFilters((current) => ({ ...current, queueId, itemId: "" }));
-    setDetail(null);
   }
 
   function selectItem(item: QueueWorkspaceItemSummary) {
     setFilters((current) => ({ ...current, itemId: item.id }));
-    if (item.conversation?.id && detail?.conversation.id !== item.conversation.id) {
-      setDetail(null);
-    }
   }
 
   const summary = data?.summary;
@@ -113,7 +63,7 @@ export function Operations() {
         <div>
           <h2 className="text-2xl font-semibold text-white">Queue Workspace</h2>
           <p className="mt-1 text-sm text-blue-100/58">
-            Work from queue counts first, keep conversation detail separate, and only drill in when the item deserves a deeper look.
+            Work from queue counts first, keep the conversation workspace separate, and only open it when the item deserves a deeper look.
           </p>
         </div>
         <button
@@ -142,21 +92,21 @@ export function Operations() {
             <input
               value={filters.search}
               onChange={(event) => setFilters((current) => ({ ...current, search: event.target.value }))}
-              className="w-full bg-transparent text-sm outline-none placeholder:text-blue-100/38"
-              placeholder="Search queue items, scripts, subscribers, or assignments"
+              className="w-full bg-transparent text-sm outline-none placeholder:text-blue-100/38 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/80 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0D1B2A]"
+              placeholder="Search queue items, conversations, subscribers, or assignments"
             />
           </label>
           <select
             value={filters.creatorId}
             onChange={(event) => setFilters((current) => ({ ...current, creatorId: event.target.value }))}
-            className="rounded-xl border border-blue-500/20 bg-[#0D1B2A] px-4 py-3 text-sm text-white outline-none"
+            className="rounded-xl border border-blue-500/20 bg-[#0D1B2A] px-4 py-3 text-sm text-white outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/80 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0D1B2A]"
           >
             <option value="all">All creators</option>
           </select>
           <select
             value={filters.status}
             onChange={(event) => setFilters((current) => ({ ...current, status: event.target.value }))}
-            className="rounded-xl border border-blue-500/20 bg-[#0D1B2A] px-4 py-3 text-sm text-white outline-none"
+            className="rounded-xl border border-blue-500/20 bg-[#0D1B2A] px-4 py-3 text-sm text-white outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/80 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0D1B2A]"
           >
             <option value="all">All queue statuses</option>
             <option value="open">Open</option>
@@ -170,7 +120,7 @@ export function Operations() {
           <select
             value={filters.priority}
             onChange={(event) => setFilters((current) => ({ ...current, priority: event.target.value }))}
-            className="rounded-xl border border-blue-500/20 bg-[#0D1B2A] px-4 py-3 text-sm text-white outline-none"
+            className="rounded-xl border border-blue-500/20 bg-[#0D1B2A] px-4 py-3 text-sm text-white outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/80 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0D1B2A]"
           >
             <option value="all">All priorities</option>
             <option value="urgent">Urgent</option>
@@ -201,7 +151,7 @@ export function Operations() {
               <div>
                 <div className="text-base font-semibold text-white">Queue Items</div>
                 <div className="mt-1 text-sm text-blue-100/58">
-                  {selectedQueue ? `${selectedQueue.label} - ${selectedQueue.item_count} items` : "Select a queue to inspect its items."}
+                  {selectedQueue ? `${selectedQueue.label} - ${selectedQueue.item_count} items` : "Select a queue to review its items."}
                 </div>
               </div>
               <span className="rounded-full bg-cyan-300/10 px-3 py-1 text-sm font-semibold text-cyan-200">{data?.items.length ?? 0}</span>
@@ -233,7 +183,7 @@ export function Operations() {
             ) : null}
           </section>
 
-          <SummaryPanel title="Conversation Summary">
+          <SummaryPanel title="Conversation Lifecycle">
             {data?.selected_item_context?.conversation ? (
               <div className="space-y-2">
                 <ContextField label="Lifecycle" value={data.selected_item_context.conversation.lifecycle_state ?? "unknown"} />
@@ -255,7 +205,7 @@ export function Operations() {
             )}
           </SummaryPanel>
 
-          <SummaryPanel title="Subscriber Summary">
+          <SummaryPanel title="Subscriber Context">
             {data?.selected_item_context?.subscriber ? (
               <div className="space-y-2">
                 <ContextField
@@ -298,72 +248,13 @@ export function Operations() {
           <button
             type="button"
             disabled={!selectedItem?.conversation?.id}
-            onClick={() => (selectedItem?.conversation?.id ? void openConversationDetail(selectedItem.conversation.id) : undefined)}
+            onClick={() => (selectedItem?.conversation?.id ? onOpenConversationWorkspace(selectedItem.conversation.id) : undefined)}
             className="inline-flex w-full items-center justify-center gap-2 rounded-2xl border border-cyan-300/24 bg-cyan-300/10 px-4 py-3 text-sm font-semibold text-cyan-100 hover:border-cyan-300/48 disabled:cursor-not-allowed disabled:opacity-45"
           >
-            Open full conversation detail
+            Open Conversation Workspace
           </button>
         </div>
       </section>
-
-      {detail ? (
-        <section className="premium-card rounded-2xl">
-          <div className="border-b border-blue-500/20 px-5 py-4">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <div className="text-xs font-semibold uppercase tracking-[0.24em] text-cyan-300">Conversation Drill-Down</div>
-                <div className="mt-2 text-lg font-semibold text-white">{detail.conversation.of_message_scripts?.name ?? "Untitled script"}</div>
-                <div className="mt-1 text-sm text-blue-100/58">{detail.conversation.id}</div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setDetail(null)}
-                className="rounded-xl border border-blue-500/20 bg-[#0D1B2A]/72 px-3 py-2 text-sm font-semibold text-blue-50 hover:border-cyan-300/40"
-              >
-                Close detail
-              </button>
-            </div>
-          </div>
-
-          <div className="border-b border-blue-500/20 px-5 py-4">
-            <div className="flex flex-wrap gap-2">
-              <ActionButton label="Retry" disabled={busy || detail.conversation.status !== "failed"} onClick={() => void runAction(() => retryOperationsConversation(detail.conversation.id))} />
-              <ActionButton
-                label="Resume"
-                disabled={busy || !(detail.conversation.status === "waiting_delay" || detail.conversation.status === "waiting_reply" || detail.conversation.status === "waiting_approval")}
-                onClick={() => void runAction(() => resumeOperationsConversation(detail.conversation.id))}
-              />
-              <ActionButton
-                label="Cancel"
-                disabled={busy}
-                onClick={() => {
-                  const reason = window.prompt("Cancellation reason", "Cancelled by operator");
-                  if (!reason) return;
-                  void runAction(() => cancelOperationsConversation(detail.conversation.id, reason));
-                }}
-              />
-              <ActionButton label="Restart" disabled={busy} onClick={() => void runAction(() => restartOperationsConversation(detail.conversation.id))} />
-              <ActionButton label="Sim Copy" disabled={busy} onClick={() => void runAction(() => duplicateConversationAsSimulation(detail.conversation.id))} />
-              <ActionButton label="Export" disabled={busy} onClick={() => void handleExport()} />
-            </div>
-          </div>
-
-          <ConversationInspector
-            detail={detail}
-            busy={busy}
-            onRetry={() => void runAction(() => retryOperationsConversation(detail.conversation.id))}
-            onResume={() => void runAction(() => resumeOperationsConversation(detail.conversation.id))}
-            onCancel={() => {
-              const reason = window.prompt("Cancellation reason", "Cancelled by operator");
-              if (!reason) return;
-              void runAction(() => cancelOperationsConversation(detail.conversation.id, reason));
-            }}
-            onRestart={() => void runAction(() => restartOperationsConversation(detail.conversation.id))}
-            onDuplicateAsSimulation={() => void runAction(() => duplicateConversationAsSimulation(detail.conversation.id))}
-            onExport={() => void handleExport()}
-          />
-        </section>
-      ) : null}
     </main>
   );
 }
@@ -437,7 +328,7 @@ function QueueItemRow({
   );
 }
 
-function SummaryPanel({ title, children }: { title: string; children: React.ReactNode }) {
+function SummaryPanel({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section className="premium-card rounded-2xl p-5">
       <div className="mb-3 text-sm font-semibold uppercase text-blue-100/58">{title}</div>
@@ -466,27 +357,6 @@ function MetricCard({ label, value, icon: Icon }: { label: string; value: string
         <Icon className="h-5 w-5 text-cyan-300" aria-hidden="true" />
       </div>
     </div>
-  );
-}
-
-function ActionButton({
-  label,
-  disabled,
-  onClick
-}: {
-  label: string;
-  disabled?: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      className="rounded-xl border border-cyan-300/20 bg-cyan-400/10 px-3 py-2 text-xs font-semibold text-cyan-100 disabled:cursor-not-allowed disabled:opacity-40"
-    >
-      {label}
-    </button>
   );
 }
 

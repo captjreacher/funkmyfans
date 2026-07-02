@@ -3,6 +3,7 @@ import type { OfOutboundMessage } from "@funkmyfans/of-types";
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { fetchOutboundMessages, updateOutboundMessage } from "../lib/api";
+import { buildOutboundBuckets } from "../lib/outboundBuckets";
 
 export function OutboundMessages() {
   const [messages, setMessages] = useState<OfOutboundMessage[]>([]);
@@ -15,15 +16,15 @@ export function OutboundMessages() {
   }, []);
 
   const queues = useMemo(() => {
-    const needsApproval = messages.filter(
-      (message) => message.status === "pending_approval" || (message.approval_status === "pending" && message.status !== "failed" && message.status !== "rejected"),
-    );
-    const approvedSending = messages.filter(
-      (message) => message.status === "queued" || message.status === "sending" || (message.approval_status === "approved" && message.status !== "sent"),
-    );
-    const sent = messages.filter((message) => message.status === "sent");
-    const failed = messages.filter((message) => message.status === "failed" || message.status === "rejected");
-    return { needsApproval, approvedSending, sent, failed };
+    const buckets = buildOutboundBuckets(messages);
+    return {
+      needsApproval: buckets.needsApproval,
+      humanReview: buckets.humanReview,
+      readyToSend: buckets.readyToSend,
+      sending: buckets.sending,
+      sent: buckets.sent,
+      failed: buckets.failed
+    };
   }, [messages]);
 
   async function refreshMessages() {
@@ -110,11 +111,13 @@ export function OutboundMessages() {
 
       {error ? <div className="rounded-2xl border border-rose-400/25 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">{error}</div> : null}
 
-      <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+      <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-6">
         <CountCard label="Needs Approval" value={queues.needsApproval.length} icon={Clock3} />
-        <CountCard label="Approved / Sending" value={queues.approvedSending.length} icon={Send} />
+        <CountCard label="Human Review" value={queues.humanReview.length} icon={ShieldAlert} />
+        <CountCard label="Ready to Send" value={queues.readyToSend.length} icon={Send} />
+        <CountCard label="Sending" value={queues.sending.length} icon={Send} />
         <CountCard label="Sent" value={queues.sent.length} icon={CheckCircle2} />
-        <CountCard label="Failed / Follow-up" value={queues.failed.length} icon={AlertCircle} />
+        <CountCard label="Failed" value={queues.failed.length} icon={AlertCircle} />
       </section>
 
       <QueueSection
@@ -188,19 +191,27 @@ export function OutboundMessages() {
       </QueueSection>
 
       <MessageGroup
-        title="Approved / Sending"
-        subtitle="Messages that have cleared review and are moving through delivery."
+        title="Ready to Send"
+        subtitle="Messages that have cleared review and are ready for dispatch."
         icon={Send}
-        tone="sending"
-        messages={queues.approvedSending}
+        tone="ready"
+        messages={queues.readyToSend}
       />
+      <MessageGroup title="Sending" subtitle="Messages currently moving through delivery." icon={Send} tone="sending" messages={queues.sending} />
       <MessageGroup title="Sent" subtitle="Delivered outbound history for quick spot checks." icon={CheckCircle2} tone="sent" messages={queues.sent} />
       <MessageGroup
         title="Failed"
-        subtitle="Messages that failed delivery, were rejected, or were intentionally diverted to human follow-up."
+        subtitle="Messages that failed delivery or were rejected after review."
         icon={XCircle}
         tone="failed"
         messages={queues.failed}
+      />
+      <MessageGroup
+        title="Human Review"
+        subtitle="Messages that need operator judgment before any further action."
+        icon={ShieldAlert}
+        tone="review"
+        messages={queues.humanReview}
       />
     </main>
   );
@@ -216,7 +227,7 @@ function MessageGroup({
   title: string;
   subtitle: string;
   icon: typeof Send;
-  tone: "sending" | "sent" | "failed";
+  tone: "ready" | "sending" | "sent" | "failed" | "review";
   messages: OfOutboundMessage[];
 }) {
   return (
@@ -255,17 +266,21 @@ function QueueSection({
   title: string;
   subtitle: string;
   icon: typeof Send;
-  tone: "approval" | "sending" | "sent" | "failed";
+  tone: "approval" | "ready" | "sending" | "sent" | "failed" | "review";
   children: ReactNode;
 }) {
   const toneClass =
     tone === "approval"
       ? "text-amber-200"
+      : tone === "ready"
+        ? "text-cyan-200"
       : tone === "sending"
         ? "text-cyan-200"
         : tone === "sent"
           ? "text-emerald-200"
-          : "text-rose-200";
+          : tone === "review"
+            ? "text-violet-200"
+            : "text-rose-200";
   return (
     <section className="glass-panel rounded-[28px] p-5">
       <div className="flex items-start gap-3">
@@ -325,13 +340,17 @@ function EmptyState({ copy }: { copy: string }) {
   return <div className="rounded-[24px] border border-blue-400/15 bg-[#091827]/55 px-4 py-6 text-sm text-blue-100/60">{copy}</div>;
 }
 
-function StatusPill({ label, tone }: { label: string; tone: "sending" | "sent" | "failed" }) {
+function StatusPill({ label, tone }: { label: string; tone: "ready" | "sending" | "sent" | "failed" | "review" }) {
   const className =
-    tone === "sending"
+    tone === "ready"
+      ? "bg-cyan-400/12 text-cyan-200"
+      : tone === "sending"
       ? "bg-cyan-400/12 text-cyan-200"
       : tone === "sent"
         ? "bg-emerald-500/12 text-emerald-200"
-        : "bg-rose-500/12 text-rose-200";
+        : tone === "failed"
+          ? "bg-rose-500/12 text-rose-200"
+          : "bg-violet-500/12 text-violet-200";
   return <span className={`rounded-full px-2.5 py-1 font-semibold ${className}`}>{label}</span>;
 }
 

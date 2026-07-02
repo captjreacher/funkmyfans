@@ -757,7 +757,7 @@ export function Scripts() {
             <input
               value={search}
               onChange={(event) => setSearch(event.target.value)}
-              className="w-full bg-transparent outline-none"
+              className="w-full bg-transparent outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/80 focus-visible:ring-offset-2 focus-visible:ring-offset-[#091827]"
               placeholder="Search welcome, VIP, recovery..."
             />
           </label>
@@ -2274,6 +2274,7 @@ function humanizeApprovalMode(value?: ScriptApprovalMode) {
 }
 
 function humanizeStepType(value: DraftStep["type"]) {
+  if (value === "follow_up") return "legacy follow up";
   return value.replaceAll("_", " ");
 }
 
