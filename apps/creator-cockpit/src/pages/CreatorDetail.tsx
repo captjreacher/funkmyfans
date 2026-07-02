@@ -234,6 +234,11 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
     }
   }
 
+  function openScriptInBuilder(scriptId: string) {
+    setSelectedPreviewScriptId(scriptId);
+    setTab("Scripts");
+  }
+
   async function handleApproveMessage(message: OfOutboundMessage) {
     await updatePreviewOutbound(message.id, {
       draft_text: message.draft_text ?? message.message_body,
@@ -266,13 +271,13 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
   }
 
   return (
-    <main className="space-y-5 animate-in-soft">
-      <section className="premium-card rounded-2xl p-4 md:p-5">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+    <main className="space-y-4 animate-in-soft">
+      <section className="premium-card rounded-2xl p-3.5 md:p-4">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <div className="min-w-0">
-            <div className="text-xs font-semibold uppercase tracking-[0.24em] text-cyan-300/80">Creator Cockpit</div>
-            <h1 className="mt-2 text-2xl font-semibold text-white">{data.creator.display_name || data.creator.username}</h1>
-            <div className="mt-1 text-sm text-blue-100/62">@{data.creator.username} / {data.creator.status}</div>
+            <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-cyan-300/80">Creator Cockpit</div>
+            <h1 className="mt-1.5 text-xl font-semibold text-white">{data.creator.display_name || data.creator.username}</h1>
+            <div className="mt-1 text-xs text-blue-100/62">@{data.creator.username} / {data.creator.status}</div>
           </div>
           <div className="flex flex-wrap gap-2">
             {syncButtons.map((button) => (
@@ -281,7 +286,7 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
                 type="button"
                 onClick={() => void handleSync(button.type)}
                 disabled={runningSync !== null}
-                className="inline-flex min-h-10 items-center justify-center gap-2 rounded-xl border border-blue-400/20 bg-[#102338]/72 px-3 py-2 text-sm font-semibold text-blue-50 disabled:cursor-not-allowed disabled:opacity-45"
+                className="inline-flex min-h-9 items-center justify-center gap-2 rounded-xl border border-blue-400/20 bg-[#102338]/72 px-3 py-2 text-sm font-semibold text-blue-50 disabled:cursor-not-allowed disabled:opacity-45"
                 title={button.label}
               >
                 <RefreshCw className={`h-4 w-4 ${runningSync === button.type ? "animate-spin" : ""}`} aria-hidden="true" />
@@ -292,7 +297,7 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
         </div>
       </section>
 
-      <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      <section className="grid gap-2.5 sm:grid-cols-2 xl:grid-cols-4">
         <MetricTile label="Pending Approval" value={String(queueCounts.needsApproval)} trend={`${queueCounts.readyToSend} ready`} icon={ShieldAlert} />
         <MetricTile label="Ready to Send" value={String(queueCounts.readyToSend)} trend={`${queueCounts.sending} sending`} icon={Send} />
         <MetricTile label="Failed" value={String(queueCounts.failed)} trend={`${queueCounts.humanReview} human review`} icon={AlertTriangle} />
@@ -303,10 +308,10 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
       {scriptError ? <div className="rounded-2xl border border-amber-400/25 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">{scriptError}</div> : null}
       {previewError ? <div className="rounded-2xl border border-amber-400/25 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">{previewError}</div> : null}
 
-      <section className="grid gap-5 xl:grid-cols-[300px_1fr]">
-        <aside className="space-y-4 xl:sticky xl:top-4 xl:self-start">
+      <section className="grid gap-4 xl:grid-cols-[290px_1fr]">
+        <aside className="space-y-3 xl:sticky xl:top-4 xl:self-start">
           <SummaryPanel title="Creator Side Panel">
-            <div className="space-y-2">
+            <div className="space-y-1.5">
               <ContextField label="Status" value={data.creator.status} />
               <ContextField label="Last Sync" value={date(latestSync?.completed_at ?? latestSync?.started_at ?? data.creator.last_sync_at)} />
               <ContextField label="Subscribers" value={String(latest?.subscribers_count ?? data.subscribers.length)} />
@@ -317,16 +322,19 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
           </SummaryPanel>
 
           <SummaryPanel title="Active Queues">
-            <div className="space-y-2">
+            <div className="space-y-1.5">
               {activeQueues.map((queue) => (
-                <div key={queue.id} className="rounded-2xl border border-blue-500/15 bg-[#0D1B2A]/72 p-3">
+                <div key={queue.id} className="cursor-default rounded-2xl border border-blue-500/15 bg-[#0D1B2A]/58 p-2.5">
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
                       <div className="truncate text-sm font-semibold text-white">{queue.label}</div>
                       <div className="mt-1 text-xs text-blue-100/54">{queue.description ?? queue.name}</div>
                     </div>
                     <div className="text-right text-xs text-blue-100/58">
-                      <div className="font-semibold text-white">{queue.active_item_count}</div>
+                      <div className="rounded-full bg-slate-400/12 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-100">
+                        Read only
+                      </div>
+                      <div className="mt-1.5 font-semibold text-white">{queue.active_item_count}</div>
                       <div>{queue.resolved_item_count} done</div>
                     </div>
                   </div>
@@ -337,36 +345,41 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
           </SummaryPanel>
 
           <SummaryPanel title="Attached Scripts">
-            <div className="space-y-2">
+            <div className="space-y-1.5">
               {scripts.slice(0, 5).map((script) => (
-                <button
+                <div
                   key={script.id}
-                  type="button"
-                  onClick={() => {
-                    setSelectedPreviewScriptId(script.id);
-                    setTab("Chat Ops");
-                  }}
-                  className={`w-full rounded-2xl border px-3 py-3 text-left ${script.id === selectedPreviewScriptId ? "border-cyan-300/40 bg-cyan-300/10" : "border-blue-500/15 bg-[#0D1B2A]/72"}`}
+                  className={`rounded-2xl border px-3 py-3 text-left ${
+                    script.id === selectedPreviewScriptId ? "border-cyan-300/40 bg-cyan-300/10" : "border-blue-500/15 bg-[#0D1B2A]/58"
+                  }`}
                 >
                   <div className="flex items-center justify-between gap-3">
                     <div className="min-w-0">
                       <div className="truncate text-sm font-semibold text-white">{script.name}</div>
                       <div className="mt-1 truncate text-xs text-blue-100/54">{script.trigger_event_type} / {script.action_mode}</div>
                     </div>
-                    <span className={`rounded-full px-2 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] ${script.status === "active" ? "bg-emerald-400/16 text-emerald-200" : "bg-slate-400/14 text-slate-200"}`}>
-                      {script.status}
-                    </span>
+                    <span className={`rounded-full px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] ${script.status === "active" ? "bg-emerald-400/16 text-emerald-200" : "bg-slate-400/14 text-slate-200"}`}>{script.status}</span>
                   </div>
-                </button>
+                  <div className="mt-3 flex items-center justify-between gap-3">
+                    <span className="text-xs text-blue-100/54">{script.status === "active" ? "Ready in builder" : "Inactive script"}</span>
+                    <button
+                      type="button"
+                      onClick={() => openScriptInBuilder(script.id)}
+                      className="inline-flex items-center rounded-lg border border-cyan-300/20 bg-cyan-300/10 px-2.5 py-1.5 text-xs font-semibold text-cyan-100 hover:border-cyan-300/40 hover:bg-cyan-300/15"
+                    >
+                      View script
+                    </button>
+                  </div>
+                </div>
               ))}
               {!scripts.length ? <div className="text-sm text-blue-100/58">No scripts attached yet.</div> : null}
             </div>
           </SummaryPanel>
 
           <SummaryPanel title="Subscriber / Chat Links">
-            <div className="space-y-2">
+            <div className="space-y-1.5">
               {data.subscribers.slice(0, 4).map((subscriber) => (
-                <div key={subscriber.id} className="rounded-2xl border border-blue-500/15 bg-[#0D1B2A]/72 p-3">
+                <div key={subscriber.id} className="rounded-2xl border border-blue-500/15 bg-[#0D1B2A]/72 p-2.5">
                   <div className="text-sm font-semibold text-white">{subscriber.display_name || subscriber.username || subscriber.betterfans_subscriber_id}</div>
                   <div className="mt-1 text-xs text-blue-100/54">{subscriber.subscription_status ?? subscriber.status ?? "unknown"} / {subscriber.total_spend != null ? `$${subscriber.total_spend.toLocaleString()}` : "unknown"}</div>
                 </div>
@@ -376,7 +389,7 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
                   key={chat.id}
                   type="button"
                   onClick={() => setSelectedPreviewChatId(chat.id)}
-                  className={`w-full rounded-2xl border px-3 py-3 text-left ${chat.id === selectedPreviewChatId ? "border-cyan-300/40 bg-cyan-300/10" : "border-blue-500/15 bg-[#0D1B2A]/72"}`}
+                  className={`w-full rounded-2xl border px-3 py-2.5 text-left ${chat.id === selectedPreviewChatId ? "border-cyan-300/40 bg-cyan-300/10" : "border-blue-500/15 bg-[#0D1B2A]/72"}`}
                 >
                   <div className="flex items-center justify-between gap-3">
                     <div className="min-w-0">
@@ -392,7 +405,7 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
           </SummaryPanel>
 
           <SummaryPanel title="Pending Outbound">
-            <div className="space-y-2">
+            <div className="space-y-1.5">
               {queueBuckets.needsApproval.slice(0, 3).map((message) => (
                 <OutboundCard
                   key={message.id}
@@ -408,25 +421,25 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
           </SummaryPanel>
         </aside>
 
-        <section className="space-y-5">
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+        <section className="space-y-4">
+          <div className="grid gap-2.5 md:grid-cols-2 xl:grid-cols-3">
             <MetricTile label="Subscribers" value={String(latest?.subscribers_count ?? 0)} trend={`${latest?.active_subscribers ?? 0} active`} icon={UserRoundCheck} />
             <MetricTile label="Revenue" value={`$${Number(latest?.revenue ?? 0).toLocaleString()}`} trend="latest snapshot" icon={Sparkles} />
             <MetricTile label="Risk" value={riskLabel(data.relationships, latest?.expired_subscribers ?? 0)} trend={`${data.relationships.filter((item) => item.churn_risk >= 70).length} at risk`} icon={ShieldAlert} />
           </div>
 
-          <section className="premium-card rounded-2xl p-4">
-            <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <section className="premium-card rounded-2xl p-3.5">
+            <div className="flex flex-col gap-2.5 lg:flex-row lg:items-center lg:justify-between">
               <div>
-                <div className="text-sm font-semibold uppercase tracking-[0.22em] text-cyan-300">Test Preview</div>
-                <div className="mt-1 text-sm text-blue-100/62">Simulate a script against the selected creator, chat, or subscriber. The result stays inside the approval flow.</div>
+                <div className="text-xs font-semibold uppercase tracking-[0.22em] text-cyan-300">Test Preview</div>
+                <div className="mt-1 text-xs text-blue-100/62">Simulate a script against the selected creator, chat, or subscriber.</div>
               </div>
               <div className="flex flex-wrap gap-2">
                 <button
                   type="button"
                   onClick={() => void handlePreviewSimulation()}
                   disabled={!selectedScript || previewBusy}
-                  className="inline-flex items-center gap-2 rounded-xl bg-cyan-400 px-4 py-2.5 text-sm font-semibold text-slate-950 disabled:cursor-not-allowed disabled:opacity-45"
+                  className="inline-flex items-center gap-2 rounded-xl bg-cyan-400 px-4 py-2 text-sm font-semibold text-slate-950 disabled:cursor-not-allowed disabled:opacity-45"
                 >
                   <RefreshCw className={`h-4 w-4 ${previewBusy ? "animate-spin" : ""}`} aria-hidden="true" />
                   {previewBusy ? "Running Preview" : "Run Safe Preview"}
@@ -434,33 +447,33 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
                 <button
                   type="button"
                   onClick={() => setTab("Scripts")}
-                  className="inline-flex items-center gap-2 rounded-xl border border-blue-400/20 bg-[#102338]/72 px-4 py-2.5 text-sm font-semibold text-blue-50"
+                  className="inline-flex items-center gap-2 rounded-xl border border-blue-400/20 bg-[#102338]/72 px-4 py-2 text-sm font-semibold text-blue-50"
                 >
                   Open Script Builder
                 </button>
               </div>
             </div>
 
-            <div className="mt-4 grid gap-3 xl:grid-cols-[1fr_1fr_1fr]">
-              <select value={selectedPreviewScriptId ?? ""} onChange={(event) => setSelectedPreviewScriptId(event.target.value || null)} className="rounded-xl border border-blue-500/20 bg-[#0D1B2A] px-4 py-3 text-sm text-white outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/80 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0D1B2A]">
+            <div className="mt-3 grid gap-2.5 xl:grid-cols-[1fr_1fr_1fr]">
+              <select value={selectedPreviewScriptId ?? ""} onChange={(event) => setSelectedPreviewScriptId(event.target.value || null)} className="rounded-xl border border-blue-500/20 bg-[#0D1B2A] px-4 py-2.5 text-sm text-white outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/80 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0D1B2A]">
                 <option value="">Select a script</option>
                 {scripts.map((script) => <option key={script.id} value={script.id}>{script.name}</option>)}
               </select>
-              <select value={selectedPreviewSubscriberId ?? ""} onChange={(event) => setSelectedPreviewSubscriberId(event.target.value || null)} className="rounded-xl border border-blue-500/20 bg-[#0D1B2A] px-4 py-3 text-sm text-white outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/80 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0D1B2A]">
+              <select value={selectedPreviewSubscriberId ?? ""} onChange={(event) => setSelectedPreviewSubscriberId(event.target.value || null)} className="rounded-xl border border-blue-500/20 bg-[#0D1B2A] px-4 py-2.5 text-sm text-white outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/80 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0D1B2A]">
                 <option value="">Selected subscriber</option>
                 {data.subscribers.map((subscriber) => <option key={subscriber.id} value={subscriber.id}>{subscriber.display_name || subscriber.username || subscriber.betterfans_subscriber_id}</option>)}
               </select>
-              <select value={selectedPreviewChatId ?? ""} onChange={(event) => setSelectedPreviewChatId(event.target.value || null)} className="rounded-xl border border-blue-500/20 bg-[#0D1B2A] px-4 py-3 text-sm text-white outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/80 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0D1B2A]">
+              <select value={selectedPreviewChatId ?? ""} onChange={(event) => setSelectedPreviewChatId(event.target.value || null)} className="rounded-xl border border-blue-500/20 bg-[#0D1B2A] px-4 py-2.5 text-sm text-white outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/80 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0D1B2A]">
                 <option value="">Selected chat</option>
                 {data.chats.map((chat) => <option key={chat.id} value={chat.id}>{chat.fan_display_name || chat.fan_username || chat.platform_chat_id}</option>)}
               </select>
             </div>
 
             {simulationPreview ? (
-              <div className="mt-4 grid gap-3 xl:grid-cols-[0.9fr_1.1fr]">
-                <div className="rounded-2xl border border-blue-500/15 bg-[#0D1B2A]/72 p-4">
+              <div className="mt-3 grid gap-2.5 xl:grid-cols-[0.9fr_1.1fr]">
+                <div className="rounded-2xl border border-blue-500/15 bg-[#0D1B2A]/72 p-3.5">
                   <div className="text-sm font-semibold text-white">Preview Result</div>
-                  <div className="mt-2 grid gap-2">
+                  <div className="mt-2 grid gap-1.5">
                     <ContextField label="Simulation Status" value={simulationPreview.simulation.status} />
                     <ContextField label="Script" value={simulationPreview.simulation.script?.name ?? "Unknown"} />
                     <ContextField label="Event Type" value={simulationPreview.simulation.event_type} />
@@ -469,14 +482,14 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
                   <button
                     type="button"
                     onClick={() => setTab("Chat Ops")}
-                    className="mt-4 inline-flex items-center gap-2 rounded-xl border border-cyan-300/24 bg-cyan-300/10 px-4 py-2 text-sm font-semibold text-cyan-100"
+                    className="mt-3 inline-flex items-center gap-2 rounded-xl border border-cyan-300/24 bg-cyan-300/10 px-4 py-2 text-sm font-semibold text-cyan-100"
                   >
                     Review in Chat Ops
                   </button>
                 </div>
-                <div className="space-y-3">
+                <div className="space-y-2.5">
                   {simulationPreview.outboundMessages.map((message) => (
-                    <article key={message.id} className="rounded-2xl border border-blue-500/15 bg-[#0D1B2A]/72 p-4">
+                    <article key={message.id} className="rounded-2xl border border-blue-500/15 bg-[#0D1B2A]/72 p-3.5">
                       <div className="flex items-center justify-between gap-3 text-xs text-blue-100/58">
                         <span>{message.status}</span>
                         <span>{message.approval_status}</span>
@@ -715,9 +728,9 @@ function ChatOpsQueuePanel({
 
   return (
     <section className="space-y-5 animate-in-soft">
-      <section className="grid gap-4 xl:grid-cols-[1.1fr_0.9fr]">
+      <section className="grid gap-3.5 xl:grid-cols-[1.1fr_0.9fr]">
         <SummaryPanel title="Queue Snapshot">
-          <div className="grid gap-2 sm:grid-cols-2">
+          <div className="grid gap-1.5 sm:grid-cols-2">
             <ContextField label="Selected Creator" value={selectedCreator?.display_name ?? selectedCreator?.username ?? data.creator.username} />
             <ContextField label="Active Queues" value={String(queueCounts.activeQueues)} />
             <ContextField label="Pending Approval" value={String(queueCounts.needsApproval)} />
@@ -728,7 +741,7 @@ function ChatOpsQueuePanel({
         </SummaryPanel>
 
         <SummaryPanel title="Preview Context">
-          <div className="space-y-2">
+          <div className="space-y-1.5">
             <ContextField label="Selected Script" value={selectedScript?.name ?? "No script selected"} />
             <ContextField
               label="Subscriber"
