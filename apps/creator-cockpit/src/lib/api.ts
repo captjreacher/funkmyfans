@@ -88,6 +88,8 @@ export interface QueueWorkspaceData extends QueueWorkspaceViewModel {}
 
 export interface OperationsDashboardData extends QueueWorkspaceViewModel {}
 
+export interface ConversationWorkspaceData extends ConversationWorkspaceViewModel {}
+
 export interface SimulationDetailData {
   simulation: OfAutomationSimulation;
   conversation: OfConversationInstance | null;
@@ -496,6 +498,11 @@ export async function fetchQueueWorkspace(filters: Record<string, string> = {}):
 export async function fetchOperationsConversationDetail(conversationId: string): Promise<ConversationOperationsDetail> {
   assertUuid(conversationId, "conversation");
   return apiJson<ConversationOperationsDetail>(`/operations/conversations/${conversationId}`);
+}
+
+export async function fetchConversationWorkspace(conversationId: string): Promise<ConversationWorkspaceData> {
+  assertUuid(conversationId, "conversation");
+  return apiJson<ConversationWorkspaceData>(`/conversation-workspace/${conversationId}`);
 }
 
 export async function retryOperationsConversation(conversationId: string): Promise<ConversationOperationsDetail> {

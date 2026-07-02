@@ -665,6 +665,8 @@ export interface QueueWorkspaceQueueSummary extends Queue {
 
 export interface QueueWorkspaceConversationSummary {
   id: string | null;
+  subscriber_id: string | null;
+  relationship_id: string | null;
   lifecycle_state: ConversationLifecycleState | null;
   status: ConversationRuntimeStatus | null;
   execution_mode: AutomationExecutionMode | null;
@@ -707,6 +709,15 @@ export interface QueueWorkspaceItemContext {
   conversation: QueueWorkspaceConversationSummary | null;
   subscriber: QueueWorkspaceSubscriberSummary | null;
   recent_events: QueueWorkspaceRecentEvent[];
+}
+
+export interface ConversationWorkspaceAttachment {
+  id: string;
+  name: string;
+  kind: string;
+  url: string | null;
+  created_at: string | null;
+  metadata: Record<string, unknown>;
 }
 
 export interface OfRecommendation {
@@ -1200,8 +1211,12 @@ export interface ConversationOperationsDetail {
 
 export interface ConversationWorkspaceViewModel {
   selected_creator: Pick<OfCreator, "id" | "username" | "display_name"> | null;
-  summary: ConversationOperationsSummary;
-  conversations: Conversation[];
+  detail: ConversationOperationsDetail;
+  current_queue: Queue | null;
+  current_queue_item: QueueWorkspaceItemSummary | null;
+  subscriber_context: QueueWorkspaceSubscriberSummary | null;
+  recent_events: QueueWorkspaceRecentEvent[];
+  attachments: ConversationWorkspaceAttachment[];
 }
 
 export interface ConversationOperationsMetrics {

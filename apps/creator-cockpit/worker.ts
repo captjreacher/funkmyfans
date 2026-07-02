@@ -681,6 +681,12 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     return Response.json(workspace, { headers: jsonHeaders });
   }
 
+  const conversationWorkspaceMatch = url.pathname.match(/^\/api\/conversation-workspace\/([^/]+)$/);
+  if (request.method === "GET" && conversationWorkspaceMatch) {
+    const workspace = await getConversationWorkspace(supabase, conversationWorkspaceMatch[1]);
+    return Response.json(workspace, { headers: jsonHeaders });
+  }
+
   const conversationMatch = url.pathname.match(/^\/api\/conversations\/([^/]+)$/);
   if (request.method === "GET" && conversationMatch) {
     const conversation = await getConversationDetail(supabase, conversationMatch[1]);
@@ -6181,6 +6187,67 @@ function fallbackConversationDetail(conversationId: string): ConversationOperati
 }
 
 async function getQueueWorkspace(supabase: SupabaseClient, url: URL): Promise<QueueWorkspaceViewModel> {
+  const canonical = await getCanonicalQueueWorkspace(supabase, url);
+  if (canonical) return canonical;
+  return getLegacyQueueWorkspace(supabase, url);
+}
+
+async function getCanonicalQueueWorkspace(supabase: SupabaseClient, url: URL): Promise<QueueWorkspaceViewModel | null> {
+  const rows = await listCanonicalQueueWorkspaceItems(supabase, url);
+  if (!rows) return null;
+
+  const queueIds = [...new Set(rows.map((row) => row.queue_id))];
+  const taskIds = [...new Set(rows.map((row) => row.legacy_task_id).filter((value): value is string => Boolean(value)))];
+  const queueMap = await loadQueueWorkspaceQueues(supabase, queueIds);
+  const taskMap = await loadQueueWorkspaceLegacyTasks(supabase, taskIds);
+  const creatorMap = await loadQueueWorkspaceCreators(supabase, [...new Set([...queueMap.values()].map((queue) => queue.creator_id))]);
+  const selectedCreatorId = url.searchParams.get("creatorId") ?? url.searchParams.get("creator");
+
+  const visibleRows = rows.filter((row) => {
+    const queue = queueMap.get(row.queue_id);
+    const task = row.legacy_task_id ? taskMap.get(row.legacy_task_id) ?? null : null;
+    if (selectedCreatorId && selectedCreatorId !== "all" && queue?.creator_id !== selectedCreatorId && task?.creator_id !== selectedCreatorId) return false;
+    if (!searchMatchesQueueWorkspaceRow(row, queue, task, url)) return false;
+    return true;
+  });
+
+  const queues = buildCanonicalQueueWorkspaceQueues(visibleRows, queueMap, taskMap);
+  const selectedQueueId = resolveSelectedQueueId(url, queues);
+  const visibleRowsForSelectedQueue = selectedQueueId ? visibleRows.filter((row) => row.queue_id === selectedQueueId) : visibleRows;
+  const conversationIds = [
+    ...new Set(
+      visibleRowsForSelectedQueue
+        .map((row) => {
+          if (row.conversation_id) return row.conversation_id;
+          if (!row.legacy_task_id) return null;
+          const task = taskMap.get(row.legacy_task_id) ?? null;
+          return task ? conversationIdFromTask(task) : null;
+        })
+        .filter((value): value is string => Boolean(value))
+    )
+  ];
+  const { conversations, relationshipIds } = await loadQueueWorkspaceConversationSummariesByIds(supabase, conversationIds);
+  const subscribers = await loadQueueWorkspaceSubscriberSummariesByIds(supabase, relationshipIds);
+  const items = buildCanonicalQueueWorkspaceItems(visibleRowsForSelectedQueue, queueMap, taskMap, conversations, subscribers);
+  const summary = buildQueueWorkspaceSummary(queues, items);
+  const selectedItemId = resolveSelectedItemId(url, items);
+  const selectedItemContext = selectedItemId
+    ? await loadQueueWorkspaceItemContext(supabase, selectedItemId, items, conversations, subscribers)
+    : null;
+  const selectedCreator = resolveSelectedCreatorFromQueues(url, creatorMap, queues);
+
+  return {
+    selected_creator: selectedCreator,
+    summary,
+    queues,
+    items,
+    selected_queue_id: selectedQueueId,
+    selected_item_id: selectedItemId,
+    selected_item_context: selectedItemContext
+  };
+}
+
+async function getLegacyQueueWorkspace(supabase: SupabaseClient, url: URL): Promise<QueueWorkspaceViewModel> {
   const tasks = await listQueueWorkspaceTasks(supabase, url);
   const queues = buildQueueWorkspaceQueues(tasks);
   const selectedQueueId = resolveSelectedQueueId(url, queues);
@@ -6204,6 +6271,367 @@ async function getQueueWorkspace(supabase: SupabaseClient, url: URL): Promise<Qu
     selected_item_id: selectedItemId,
     selected_item_context: selectedItemContext
   };
+}
+
+type CanonicalQueueWorkspaceItemRow = QueueItem & {
+  legacy_task_id: string | null;
+};
+
+type CanonicalQueueWorkspaceQueueRow = Pick<
+  Queue,
+  "id" | "creator_id" | "name" | "label" | "description" | "operational_status" | "visibility_state" | "priority" | "assigned_operator_id" | "created_at" | "updated_at" | "metadata"
+>;
+
+type CanonicalQueueWorkspaceTaskRow = Pick<
+  OfTask,
+  | "id"
+  | "creator_id"
+  | "title"
+  | "description"
+  | "reason"
+  | "priority_score"
+  | "priority_reason"
+  | "status"
+  | "assigned_to"
+  | "source_type"
+  | "source_id"
+  | "source_event_id"
+  | "subscriber_id"
+  | "task_type"
+  | "rule_name"
+  | "rule_version"
+  | "priority"
+  | "due_at"
+  | "completed_at"
+  | "cancelled_at"
+  | "archived_at"
+  | "created_at"
+  | "updated_at"
+  | "ignore_reason"
+  | "resolution_note"
+> & {
+  of_creators?: Pick<OfCreator, "username" | "display_name"> | null;
+};
+
+type CanonicalQueueWorkspaceConversationRow = {
+  id: string;
+  creator_id: string;
+  subscriber_id: string | null;
+  relationship_id: string | null;
+  status: ConversationRuntimeStatus;
+  execution_mode: AutomationExecutionMode;
+  updated_at: string;
+  waiting_until: string | null;
+  waiting_reason: string | null;
+  cancellation_reason: string | null;
+  completion_reason: string | null;
+  failed_at: string | null;
+  cancelled_at: string | null;
+  of_message_scripts?: Array<{ name?: string | null }> | { name?: string | null } | null;
+  of_creators?: Array<Pick<OfCreator, "id" | "username" | "display_name">> | Pick<OfCreator, "id" | "username" | "display_name"> | null;
+};
+
+type CanonicalQueueWorkspaceConversationBundle = {
+  conversations: Map<string, QueueWorkspaceConversationSummary>;
+  relationshipIds: string[];
+};
+
+async function listCanonicalQueueWorkspaceItems(supabase: SupabaseClient, url: URL): Promise<CanonicalQueueWorkspaceItemRow[] | null> {
+  let query = supabase
+    .from("of_queue_items")
+    .select("id, queue_id, legacy_task_id, conversation_id, assigned_operator_id, priority, status, created_at, updated_at, moved_at, resolved_at, metadata")
+    .order("updated_at", { ascending: false });
+
+  const queueId = url.searchParams.get("queueId") ?? url.searchParams.get("queue");
+  const status = url.searchParams.get("status");
+  const priority = url.searchParams.get("priority");
+  const limit = Math.max(1, Math.min(Number(url.searchParams.get("limit") ?? "200"), 500));
+
+  if (queueId && queueId !== "all") query = query.eq("queue_id", queueId);
+  if (status && status !== "all") query = query.eq("status", status);
+  if (priority && priority !== "all") query = query.eq("priority", priority);
+
+  const result = await query.limit(limit);
+  if (result.error && isMissingSchemaCacheRelationError(result.error, "of_queue_items")) {
+    return null;
+  }
+  assertNoError(result.error);
+  return ((result.data ?? []) as CanonicalQueueWorkspaceItemRow[]).slice();
+}
+
+async function loadQueueWorkspaceQueues(supabase: SupabaseClient, queueIds: string[]) {
+  if (!queueIds.length) return new Map<string, CanonicalQueueWorkspaceQueueRow>();
+
+  const result = await supabase
+    .from("of_queues")
+    .select("id, creator_id, name, label, description, operational_status, visibility_state, priority, assigned_operator_id, created_at, updated_at, metadata")
+    .in("id", queueIds);
+  assertNoError(result.error);
+
+  const queues = (result.data ?? []) as CanonicalQueueWorkspaceQueueRow[];
+  return new Map(queues.map((queue) => [queue.id, queue]));
+}
+
+async function loadQueueWorkspaceLegacyTasks(supabase: SupabaseClient, taskIds: string[]) {
+  if (!taskIds.length) return new Map<string, CanonicalQueueWorkspaceTaskRow>();
+
+  const result = await supabase
+    .from("of_tasks")
+    .select("id, creator_id, title, description, reason, priority_score, priority_reason, status, assigned_to, source_type, source_id, source_event_id, subscriber_id, task_type, rule_name, rule_version, priority, due_at, completed_at, cancelled_at, archived_at, created_at, updated_at, ignore_reason, resolution_note, of_creators(username, display_name)")
+    .in("id", taskIds);
+  assertNoError(result.error);
+
+  const tasks = (result.data ?? []) as unknown as CanonicalQueueWorkspaceTaskRow[];
+  return new Map(tasks.map((task) => [task.id, task]));
+}
+
+async function loadQueueWorkspaceCreators(supabase: SupabaseClient, creatorIds: string[]) {
+  if (!creatorIds.length) return new Map<string, Pick<OfCreator, "id" | "username" | "display_name">>();
+
+  const result = await supabase.from("of_creators").select("id, username, display_name").in("id", creatorIds);
+  assertNoError(result.error);
+
+  const creators = (result.data ?? []) as Array<Pick<OfCreator, "id" | "username" | "display_name">>;
+  return new Map(creators.map((creator) => [creator.id, creator]));
+}
+
+async function loadQueueWorkspaceConversationSummariesByIds(supabase: SupabaseClient, conversationIds: string[]): Promise<CanonicalQueueWorkspaceConversationBundle> {
+  if (!conversationIds.length) {
+    return { conversations: new Map(), relationshipIds: [] };
+  }
+
+  const result = await supabase
+    .from("of_conversation_instances")
+    .select("id, creator_id, subscriber_id, relationship_id, status, execution_mode, updated_at, waiting_until, waiting_reason, cancellation_reason, completion_reason, failed_at, cancelled_at, of_message_scripts(name), of_creators(id, username, display_name)")
+    .in("id", conversationIds);
+  assertNoError(result.error);
+
+  const rows = (result.data ?? []) as CanonicalQueueWorkspaceConversationRow[];
+  const relationshipIds = [...new Set(rows.map((row) => row.relationship_id).filter((value): value is string => Boolean(value)))];
+
+  const conversations = new Map(
+    rows.map((conversation) => [
+      conversation.id,
+      {
+        id: conversation.id,
+        subscriber_id: conversation.subscriber_id,
+        relationship_id: conversation.relationship_id,
+        lifecycle_state: mapConversationRuntimeStatusToLifecycleState(conversation.status, {
+          historyCount: 0,
+          waitingUntil: conversation.waiting_until,
+          waitingReason: conversation.waiting_reason,
+          cancellationReason: conversation.cancellation_reason,
+          completionReason: conversation.completion_reason,
+          failedAt: conversation.failed_at,
+          cancelledAt: conversation.cancelled_at
+        }),
+        status: conversation.status,
+        execution_mode: conversation.execution_mode,
+        script_name: Array.isArray(conversation.of_message_scripts)
+          ? conversation.of_message_scripts[0]?.name ?? null
+          : conversation.of_message_scripts?.name ?? null,
+        creator: Array.isArray(conversation.of_creators)
+          ? conversation.of_creators[0] ?? null
+          : conversation.of_creators ?? null,
+        updated_at: conversation.updated_at
+      } satisfies QueueWorkspaceConversationSummary
+    ])
+  );
+
+  return { conversations, relationshipIds };
+}
+
+async function loadQueueWorkspaceSubscriberSummariesByIds(supabase: SupabaseClient, relationshipIds: string[]) {
+  if (!relationshipIds.length) return new Map<string, QueueWorkspaceSubscriberSummary>();
+
+  const result = await supabase
+    .from("of_subscriber_relationships")
+    .select("id, display_name, username, relationship_state, current_subscription_status, lifetime_spend, urgency_score")
+    .in("id", relationshipIds);
+  const relationships = rowsOrEmptyIfMissingTable(result, "of_subscriber_relationships") as Array<Pick<OfSubscriberRelationship, "id" | "display_name" | "username" | "relationship_state" | "current_subscription_status" | "lifetime_spend" | "urgency_score">>;
+  return new Map(
+    relationships.map((relationship) => [
+      relationship.id,
+      {
+        id: relationship.id,
+        display_name: relationship.display_name,
+        username: relationship.username,
+        relationship_state: relationship.relationship_state,
+        subscription_status: relationship.current_subscription_status,
+        lifetime_spend: relationship.lifetime_spend,
+        urgency_score: relationship.urgency_score
+      } satisfies QueueWorkspaceSubscriberSummary
+    ])
+  );
+}
+
+function buildCanonicalQueueWorkspaceQueues(
+  rows: CanonicalQueueWorkspaceItemRow[],
+  queues: Map<string, CanonicalQueueWorkspaceQueueRow>,
+  tasks: Map<string, CanonicalQueueWorkspaceTaskRow>
+): QueueWorkspaceQueueSummary[] {
+  const groups = new Map<string, CanonicalQueueWorkspaceItemRow[]>();
+  for (const row of rows) {
+    const current = groups.get(row.queue_id) ?? [];
+    current.push(row);
+    groups.set(row.queue_id, current);
+  }
+
+  return [...groups.entries()]
+    .map(([queueId, group]) => {
+      const representativeRow = group[0];
+      const representativeTask = representativeRow.legacy_task_id ? tasks.get(representativeRow.legacy_task_id) ?? null : null;
+      const queue = queues.get(queueId);
+      const activeItemCount = group.filter((item) => !isResolvedQueueItemStatus(item.status)).length;
+      const resolvedItemCount = group.length - activeItemCount;
+      const derivedQueue: Queue = queue
+        ? {
+            ...queue
+          }
+        : representativeTask
+          ? {
+              id: queueId,
+              creator_id: representativeTask.creator_id,
+              name: representativeTask.rule_name,
+              label: humanizeIdentifier(representativeTask.rule_name),
+              description: representativeTask.description,
+              operational_status: representativeTask.status === "archived" ? "archived" : "active",
+              visibility_state: representativeTask.status === "archived" ? "hidden" : "visible",
+              priority: representativeTask.priority,
+              assigned_operator_id: representativeTask.assigned_to,
+              created_at: representativeTask.created_at,
+              updated_at: representativeTask.updated_at,
+              metadata: {
+                task_type: representativeTask.task_type,
+                source_type: representativeTask.source_type
+              }
+            }
+          : {
+              id: queueId,
+              creator_id: "unknown",
+              name: queueId,
+              label: humanizeIdentifier(queueId),
+              description: null,
+              operational_status: "active",
+              visibility_state: "visible",
+              priority: representativeRow.priority,
+              assigned_operator_id: representativeRow.assigned_operator_id,
+              created_at: representativeRow.created_at,
+              updated_at: representativeRow.updated_at,
+              metadata: {}
+            };
+      return {
+        ...derivedQueue,
+        item_count: group.length,
+        active_item_count: activeItemCount,
+        resolved_item_count: resolvedItemCount
+      };
+    })
+    .sort((left, right) => {
+      if (right.active_item_count !== left.active_item_count) return right.active_item_count - left.active_item_count;
+      if (right.item_count !== left.item_count) return right.item_count - left.item_count;
+      const leftPriority = queuePriorityRank(left.priority);
+      const rightPriority = queuePriorityRank(right.priority);
+      if (rightPriority !== leftPriority) return rightPriority - leftPriority;
+      return new Date(right.updated_at).getTime() - new Date(left.updated_at).getTime();
+    });
+}
+
+function buildCanonicalQueueWorkspaceItems(
+  rows: CanonicalQueueWorkspaceItemRow[],
+  queues: Map<string, CanonicalQueueWorkspaceQueueRow>,
+  tasks: Map<string, CanonicalQueueWorkspaceTaskRow>,
+  conversations: Map<string, QueueWorkspaceConversationSummary>,
+  subscribers: Map<string, QueueWorkspaceSubscriberSummary>
+): QueueWorkspaceItemSummary[] {
+  return [...rows]
+    .sort((left, right) => {
+      const leftTask = left.legacy_task_id ? tasks.get(left.legacy_task_id) ?? null : null;
+      const rightTask = right.legacy_task_id ? tasks.get(right.legacy_task_id) ?? null : null;
+      const leftScore = leftTask ? deriveTaskPriorityScore(leftTask) : deriveTaskPriorityScore({ priority: left.priority });
+      const rightScore = rightTask ? deriveTaskPriorityScore(rightTask) : deriveTaskPriorityScore({ priority: right.priority });
+      if (rightScore !== leftScore) return rightScore - leftScore;
+      const dueLeft = leftTask?.due_at ? new Date(leftTask.due_at).getTime() : Number.POSITIVE_INFINITY;
+      const dueRight = rightTask?.due_at ? new Date(rightTask.due_at).getTime() : Number.POSITIVE_INFINITY;
+      if (dueLeft !== dueRight) return dueLeft - dueRight;
+      return new Date(right.created_at).getTime() - new Date(left.created_at).getTime();
+    })
+    .map((row) => {
+      const queue = queues.get(row.queue_id) ?? null;
+      const task = row.legacy_task_id ? tasks.get(row.legacy_task_id) ?? null : null;
+      const conversationId = row.conversation_id ?? (task ? conversationIdFromTask(task) : null);
+      const conversation = conversationId ? conversations.get(conversationId) ?? null : null;
+      const subscriber = conversation?.relationship_id
+        ? subscribers.get(conversation.relationship_id) ?? null
+        : task?.subscriber_id
+          ? subscribers.get(task.subscriber_id) ?? null
+          : null;
+      const priorityScore = task?.priority_score ?? deriveTaskPriorityScore({ priority: row.priority });
+      return {
+        ...row,
+        title: task?.title ?? queue?.label ?? conversation?.script_name ?? humanizeIdentifier(row.queue_id),
+        queue_name: queue?.name ?? task?.rule_name ?? row.queue_id,
+        queue_label: queue?.label ?? task?.rule_name ?? humanizeIdentifier(row.queue_id),
+        assignment_label: row.assigned_operator_id ?? queue?.assigned_operator_id ?? task?.assigned_to ?? null,
+        priority_score: priorityScore,
+        priority_reason: task?.priority_reason ?? stringValue(row.metadata.priority_reason),
+        status_label: humanizeIdentifier(row.status),
+        conversation,
+        subscriber
+      };
+    });
+}
+
+function searchMatchesQueueWorkspaceRow(
+  row: CanonicalQueueWorkspaceItemRow,
+  queue: CanonicalQueueWorkspaceQueueRow | null | undefined,
+  task: CanonicalQueueWorkspaceTaskRow | null | undefined,
+  url: URL
+) {
+  const search = (url.searchParams.get("search") ?? "").trim().toLowerCase();
+  if (!search) return true;
+
+  const haystack = [
+    row.id,
+    row.legacy_task_id,
+    row.conversation_id,
+    row.queue_id,
+    queue?.name,
+    queue?.label,
+    queue?.description,
+    task?.title,
+    task?.description,
+    task?.reason,
+    task?.rule_name,
+    task?.task_type,
+    task?.assigned_to,
+    task?.of_creators?.display_name,
+    task?.of_creators?.username
+  ]
+    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    .join(" ")
+    .toLowerCase();
+
+  return haystack.includes(search);
+}
+
+function resolveSelectedCreatorFromQueues(
+  url: URL,
+  creators: Map<string, Pick<OfCreator, "id" | "username" | "display_name">>,
+  queues: QueueWorkspaceQueueSummary[]
+): Pick<OfCreator, "id" | "username" | "display_name"> | null {
+  const requested = url.searchParams.get("creatorId") ?? url.searchParams.get("creator");
+  if (requested && requested !== "all") {
+    return creators.get(requested) ?? null;
+  }
+
+  const firstQueue = queues[0];
+  if (!firstQueue) return null;
+  return creators.get(firstQueue.creator_id) ?? null;
+}
+
+function isResolvedQueueItemStatus(status: string) {
+  return status === "resolved";
 }
 
 async function getOperationsMetrics(supabase: SupabaseClient, url: URL): Promise<ConversationOperationsMetrics> {
@@ -6393,7 +6821,7 @@ function queueIdFromTask(task: OfTask) {
   return `queue:${task.creator_id}:${task.rule_name}`;
 }
 
-function conversationIdFromTask(task: OfTask) {
+function conversationIdFromTask(task: { source_type?: string | null; source_id?: string | null }) {
   if (typeof task.source_type === "string" && /conversation/i.test(task.source_type) && typeof task.source_id === "string") {
     return task.source_id;
   }
@@ -6454,13 +6882,15 @@ async function loadQueueWorkspaceConversationSummaries(supabase: SupabaseClient,
 
   const result = await supabase
     .from("of_conversation_instances")
-    .select("id, creator_id, status, execution_mode, updated_at, waiting_until, waiting_reason, cancellation_reason, completion_reason, failed_at, cancelled_at, of_message_scripts(name), of_creators(id, username, display_name)")
+    .select("id, creator_id, subscriber_id, relationship_id, status, execution_mode, updated_at, waiting_until, waiting_reason, cancellation_reason, completion_reason, failed_at, cancelled_at, of_message_scripts(name), of_creators(id, username, display_name)")
     .in("id", conversationIds);
   assertNoError(result.error);
 
   type QueueConversationRow = {
     id: string;
     creator_id: string;
+    subscriber_id: string | null;
+    relationship_id: string | null;
     status: ConversationRuntimeStatus;
     execution_mode: AutomationExecutionMode;
     updated_at: string;
@@ -6480,6 +6910,8 @@ async function loadQueueWorkspaceConversationSummaries(supabase: SupabaseClient,
       conversation.id,
       {
         id: conversation.id,
+        subscriber_id: conversation.subscriber_id,
+        relationship_id: conversation.relationship_id,
         lifecycle_state: mapConversationRuntimeStatusToLifecycleState(conversation.status, {
           historyCount: 0,
           waitingUntil: conversation.waiting_until,
@@ -6720,6 +7152,145 @@ async function getConversationOperationsDetail(supabase: SupabaseClient, convers
     subscriber: (subscriberResult.data ?? null) as Record<string, unknown> | null,
     relationship: (relationshipRows[0] ?? null) as Record<string, unknown> | null,
     creator: (creatorRow?.of_creators ?? null) as ConversationOperationsDetail["creator"]
+  };
+}
+
+async function getConversationWorkspace(supabase: SupabaseClient, conversationId: string): Promise<ConversationWorkspaceViewModel> {
+  const detail = await getConversationOperationsDetail(supabase, conversationId);
+  const queueItem = await loadConversationWorkspaceQueueItem(supabase, conversationId);
+  const queue = await loadConversationWorkspaceQueue(supabase, queueItem?.queue_id ?? null);
+  const currentQueueItem = queueItem
+    ? await buildConversationWorkspaceQueueItemSummary(supabase, queueItem, queue, detail)
+    : null;
+  const subscriberContext = toQueueWorkspaceSubscriberSummary(detail.relationship);
+  const recentEvents = await loadQueueWorkspaceRecentEvents(supabase, conversationId);
+
+  return {
+    selected_creator: detail.creator,
+    detail,
+    current_queue: queue,
+    current_queue_item: currentQueueItem,
+    subscriber_context: subscriberContext,
+    recent_events: recentEvents,
+    attachments: []
+  };
+}
+
+type ConversationWorkspaceQueueItemRow = CanonicalQueueWorkspaceItemRow;
+
+async function loadConversationWorkspaceQueueItem(supabase: SupabaseClient, conversationId: string): Promise<ConversationWorkspaceQueueItemRow | null> {
+  const result = await supabase
+    .from("of_queue_items")
+    .select("id, queue_id, legacy_task_id, conversation_id, assigned_operator_id, priority, status, created_at, updated_at, moved_at, resolved_at, metadata")
+    .eq("conversation_id", conversationId)
+    .order("updated_at", { ascending: false })
+    .limit(1);
+
+  if (result.error && isMissingSchemaCacheRelationError(result.error, "of_queue_items")) {
+    const legacyTask = await loadConversationWorkspaceLegacyTask(supabase, conversationId);
+    if (!legacyTask) return null;
+    return {
+      ...mapTaskToQueueItem(legacyTask),
+      legacy_task_id: legacyTask.id
+    };
+  }
+
+  assertNoError(result.error);
+  const row = (result.data ?? [])[0] ?? null;
+  if (row) return row as ConversationWorkspaceQueueItemRow;
+
+  const legacyTask = await loadConversationWorkspaceLegacyTask(supabase, conversationId);
+  if (!legacyTask) return null;
+  return {
+    ...mapTaskToQueueItem(legacyTask),
+    legacy_task_id: legacyTask.id
+  };
+}
+
+async function loadConversationWorkspaceLegacyTask(supabase: SupabaseClient, conversationId: string): Promise<OfTask | null> {
+  const result = await supabase
+    .from("of_tasks")
+    .select("*, of_creators(username, display_name)")
+    .eq("source_id", conversationId)
+    .order("updated_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (result.error && isMissingSchemaCacheRelationError(result.error, "of_tasks")) {
+    return null;
+  }
+  assertNoError(result.error);
+  return (result.data ?? null) as OfTask | null;
+}
+
+async function loadConversationWorkspaceQueue(supabase: SupabaseClient, queueId: string | null): Promise<Queue | null> {
+  if (!queueId) return null;
+  const result = await supabase
+    .from("of_queues")
+    .select("id, creator_id, name, label, description, operational_status, visibility_state, priority, assigned_operator_id, created_at, updated_at, metadata")
+    .eq("id", queueId)
+    .maybeSingle();
+  if (result.error && isMissingSchemaCacheRelationError(result.error, "of_queues")) {
+    return null;
+  }
+  assertNoError(result.error);
+  return (result.data ?? null) as Queue | null;
+}
+
+async function buildConversationWorkspaceQueueItemSummary(
+  supabase: SupabaseClient,
+  row: ConversationWorkspaceQueueItemRow,
+  queue: Queue | null,
+  detail: ConversationOperationsDetail
+): Promise<QueueWorkspaceItemSummary | null> {
+  const conversationSummary: QueueWorkspaceConversationSummary = {
+    id: detail.conversation.id,
+    subscriber_id: (detail.conversation.subscriber_id ?? null) as string | null,
+    relationship_id: detail.relationship && typeof detail.relationship.id === "string" ? detail.relationship.id : null,
+    lifecycle_state: detail.conversation.lifecycle_state,
+    status: detail.conversation.status,
+    execution_mode: detail.conversation.execution_mode,
+    script_name: detail.conversation.of_message_scripts?.name ?? null,
+    creator: detail.creator,
+    updated_at: detail.conversation.updated_at
+  };
+  const subscriberSummary = toQueueWorkspaceSubscriberSummary(detail.relationship);
+  const task = row.legacy_task_id ? await loadConversationWorkspaceLegacyTaskById(supabase, row.legacy_task_id) : null;
+  const priorityScore = task?.priority_score ?? deriveTaskPriorityScore({ priority: row.priority });
+  return {
+    ...row,
+    title: task?.title ?? queue?.label ?? conversationSummary.script_name ?? humanizeIdentifier(row.queue_id),
+    queue_name: queue?.name ?? task?.rule_name ?? row.queue_id,
+    queue_label: queue?.label ?? task?.rule_name ?? humanizeIdentifier(row.queue_id),
+    assignment_label: row.assigned_operator_id ?? queue?.assigned_operator_id ?? task?.assigned_to ?? null,
+    priority_score: priorityScore,
+    priority_reason: task?.priority_reason ?? stringValue(row.metadata.priority_reason),
+    status_label: humanizeIdentifier(row.status),
+    conversation: conversationSummary,
+    subscriber: subscriberSummary
+  };
+}
+
+async function loadConversationWorkspaceLegacyTaskById(supabase: SupabaseClient, taskId: string): Promise<OfTask | null> {
+  const result = await supabase.from("of_tasks").select("*, of_creators(username, display_name)").eq("id", taskId).maybeSingle();
+  if (result.error && isMissingSchemaCacheRelationError(result.error, "of_tasks")) {
+    return null;
+  }
+  assertNoError(result.error);
+  return (result.data ?? null) as OfTask | null;
+}
+
+function toQueueWorkspaceSubscriberSummary(
+  record: Record<string, unknown> | null
+): QueueWorkspaceSubscriberSummary | null {
+  if (!record) return null;
+  return {
+    id: typeof record.id === "string" ? record.id : null,
+    display_name: typeof record.display_name === "string" ? record.display_name : null,
+    username: typeof record.username === "string" ? record.username : null,
+    relationship_state: typeof record.relationship_state === "string" ? record.relationship_state : null,
+    subscription_status: typeof record.current_subscription_status === "string" ? record.current_subscription_status : null,
+    lifetime_spend: typeof record.lifetime_spend === "number" ? record.lifetime_spend : null,
+    urgency_score: typeof record.urgency_score === "number" ? record.urgency_score : null
   };
 }
 

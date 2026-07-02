@@ -4,7 +4,7 @@
 
 COP-1S is a stabilization sprint between the COP-1 foundation and COP-2 feature delivery.
 
-It exists to align implementation with the frozen architecture before introducing Conversation Interpretation, Conversation Opportunities, and Playbooks.
+It exists to align implementation with the frozen architecture before introducing the next layers of the platform.
 
 No new features are in scope.
 
@@ -63,7 +63,7 @@ COP-1S is complete when all of the following are true:
 ## Non-Goals
 
 - No Conversation Interpretation features.
-- No Conversation Opportunities features.
+- No reserved future layers are implemented in COP-1S.
 - No Playbooks features.
 - No Templates features.
 - No cosmetic refactoring.
