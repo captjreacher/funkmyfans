@@ -1,180 +1,114 @@
-import { Activity, AlertTriangle, ArrowUpRight, Bot, Clock3, ClipboardList, DollarSign, HeartPulse, MessageSquareReply, OctagonAlert, Plus, ShieldAlert, Sparkles, Workflow } from "lucide-react";
+import {
+  ArrowRight,
+  BarChart3,
+  Bot,
+  ClipboardList,
+  PlaySquare,
+  Settings2,
+  Sparkles,
+  Users
+} from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { MetricTile } from "../components/MetricTile";
 import type { DashboardData } from "../lib/api";
 
 export function Dashboard({
   data,
-  onOpenCreator,
-  onOpenSubscribers,
+  onOpenCreators,
+  onOpenQueue,
+  onOpenPlaybooks,
+  onOpenSimulations,
+  onOpenSettings,
   onConnectCreator
 }: {
   data: DashboardData;
-  onOpenCreator: (id: string) => void;
-  onOpenSubscribers: (filters: Record<string, string>) => void;
+  onOpenCreators: () => void;
+  onOpenQueue: () => void;
+  onOpenPlaybooks: () => void;
+  onOpenSimulations: () => void;
+  onOpenSettings: () => void;
   onConnectCreator: () => void;
 }) {
-  const latestSnapshot = data.snapshots[0];
-  const now = Date.now();
   const openTasks = data.tasks.filter((task) => isActiveTask(task.status)).length;
   const urgentTasks = data.tasks.filter((task) => isActiveTask(task.status) && task.priority_score >= 85).length;
-  const overdueTasks = data.tasks.filter((task) => task.due_at && new Date(task.due_at).getTime() < now && isActiveTask(task.status)).length;
-  const topSubscribers = [...data.relationships].sort((left, right) => subscriberPriorityScore(right) - subscriberPriorityScore(left)).slice(0, 5);
+  const overdueTasks = data.tasks.filter((task) => task.due_at && new Date(task.due_at).getTime() < Date.now() && isActiveTask(task.status)).length;
+  const connectedCreators = data.creators.filter((creator) => creator.status === "connected").length;
+  const creatorsNeedingAttention = data.creators.filter((creator) => creator.status === "attention" || creator.status === "pending").length;
 
   return (
     <main className="space-y-6 animate-in-soft">
-      <div className="flex items-center justify-between gap-3">
-        <div>
-          <h2 className="text-2xl font-semibold text-white">Dashboard</h2>
-          <p className="mt-1 text-sm text-blue-100/58">Operational status, task pressure, and the next creator move.</p>
-        </div>
-        <button type="button" onClick={onConnectCreator} className="inline-flex items-center gap-2 rounded-xl bg-cyan-400 px-4 py-2.5 text-sm font-semibold text-slate-950 shadow-[0_0_0_1px_rgba(34,211,238,0.15)] hover:bg-cyan-300">
-          <Plus className="h-4 w-4" aria-hidden="true" />
-          + Connect Creator
-        </button>
-      </div>
-
-      <section className="grid gap-4 xl:grid-cols-[1.25fr_0.75fr]">
-        <div className="glass-panel overflow-hidden rounded-2xl p-5">
-          <div className="flex flex-col justify-between gap-4 md:flex-row md:items-start">
-            <div className="max-w-3xl">
-              <div className="inline-flex items-center gap-2 rounded-full border border-cyan-300/20 bg-cyan-300/10 px-3 py-1 text-sm font-semibold text-cyan-200">
-                <Sparkles className="h-4 w-4" aria-hidden="true" />
-                Morning Brief
-              </div>
-              <h2 className="mt-4 text-3xl font-semibold text-white">{data.morningBrief.headline}</h2>
-              <p className="mt-3 max-w-2xl text-sm leading-6 text-blue-100/68">{data.morningBrief.summary}</p>
-              <div className="mt-4 grid gap-3 sm:grid-cols-3">
-                <MetricTile label="Missed Revenue" value={`$${data.morningBrief.missed_revenue.toLocaleString()}`} icon={DollarSign} />
-                <MetricTile label="Overdue Welcomes" value={String(data.morningBrief.overdue_welcome_conversations)} icon={Clock3} />
-                <MetricTile label="Provider" value={data.morningBrief.provider} icon={Bot} />
-              </div>
+      <section className="glass-panel rounded-[28px] p-6">
+        <div className="flex flex-col gap-5 xl:flex-row xl:items-start xl:justify-between">
+          <div className="max-w-3xl">
+            <div className="inline-flex items-center gap-2 rounded-full border border-cyan-300/20 bg-cyan-300/10 px-3 py-1 text-sm font-semibold text-cyan-200">
+              <Sparkles className="h-4 w-4" aria-hidden="true" />
+              Agency health
             </div>
-            <div className="rounded-2xl border border-pink-300/20 bg-pink-400/10 px-4 py-3 text-right">
-              <div className="text-sm font-medium text-pink-100/75">Highest Priority</div>
-              <div className="mt-1 text-2xl font-semibold text-pink-200">{data.morningBrief.highest_priority_subscriber}</div>
-              <div className="mt-2 text-xs leading-5 text-pink-100/78">{data.morningBrief.highest_priority_reason}</div>
-            </div>
+            <h2 className="mt-4 text-3xl font-semibold text-white">Dashboard</h2>
+            <p className="mt-3 max-w-2xl text-sm leading-6 text-blue-100/68">
+              This workspace is only for orientation. No operational work happens here.
+            </p>
           </div>
+
+          <button
+            type="button"
+            onClick={onConnectCreator}
+            className="inline-flex items-center gap-2 rounded-2xl bg-cyan-400 px-4 py-3 text-sm font-semibold text-slate-950 shadow-[0_0_0_1px_rgba(34,211,238,0.15)] hover:bg-cyan-300"
+          >
+            <Users className="h-4 w-4" aria-hidden="true" />
+            Connect Creator
+          </button>
         </div>
 
-        <div className="premium-card rounded-2xl p-5">
-          <div className="flex items-center justify-between gap-3">
-            <div>
-              <h2 className="text-lg font-semibold text-white">Today&apos;s Focus</h2>
-              <p className="mt-1 text-sm text-blue-100/62">One click into the right subscriber slice.</p>
-            </div>
-            <HeartPulse className="h-5 w-5 text-cyan-300" aria-hidden="true" />
-          </div>
-          <div className="mt-4 grid gap-3">
-            {data.dailyFocusQueue.map((card) => (
-              <button
-                key={card.key}
-                type="button"
-                onClick={() => onOpenSubscribers(card.filter)}
-                className="rounded-2xl border border-blue-500/15 bg-[#0D1B2A]/70 p-4 text-left transition hover:border-cyan-300/30 hover:bg-[#102338]"
-              >
-                <div className="flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-3">
-                    <span className="text-xl" aria-hidden="true">
-                      {card.emoji}
-                    </span>
-                    <div>
-                      <div className="text-sm font-semibold text-white">{card.title}</div>
-                      <div className="text-xs text-blue-100/54">{card.description}</div>
-                    </div>
-                  </div>
-                  <span className="rounded-full bg-white/5 px-3 py-1 text-sm font-semibold text-cyan-200">{card.count}</span>
-                </div>
-                <div className="mt-2 text-xs leading-5 text-blue-100/58">{card.reason}</div>
-              </button>
-            ))}
-          </div>
+        <div className="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <MetricTile label="Creators Connected" value={String(connectedCreators)} icon={Users} />
+          <MetricTile label="Creators Needing Attention" value={String(creatorsNeedingAttention)} icon={Bot} />
+          <MetricTile label="Open Queue Items" value={String(openTasks)} icon={ClipboardList} />
+          <MetricTile label="Urgent / Overdue" value={`${urgentTasks} / ${overdueTasks}`} icon={BarChart3} />
         </div>
       </section>
 
-      <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-        <OpsCard label="Drafts Needing Approval" value={String(data.dailyOperations.draftsNeedingApproval)} detail="Human review queue" icon={ShieldAlert} />
-        <OpsCard label="Failed Sends" value={String(data.dailyOperations.failedSends)} detail="Delivery and follow-up exceptions" icon={OctagonAlert} />
-        <OpsCard label="Fans Needing Reply" value={String(data.dailyOperations.fansNeedingReply)} detail="Conversations waiting on the agency" icon={MessageSquareReply} />
-        <OpsCard label="Automations Matched Today" value={String(data.dailyOperations.automationsMatchedToday)} detail="Runs that fired today" icon={Activity} />
-        <OpsCard label="Scripts Triggered Today" value={String(data.dailyOperations.scriptsTriggeredToday)} detail="Distinct scripts in motion" icon={Workflow} />
-        <OpsCard label="Revenue Opportunities / Tasks" value={String(data.dailyOperations.revenueOpportunities)} detail="High-value follow-up pressure" icon={DollarSign} />
+      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+        <NavCard title="Creators" detail="Search, connect, sync, and inspect a creator workspace." icon={Users} onClick={onOpenCreators} />
+        <NavCard title="Queue" detail="Resolve human-required exceptions in a dedicated workspace." icon={ClipboardList} onClick={onOpenQueue} />
+        <NavCard title="Playbooks" detail="Build reusable automation with the full-screen wizard." icon={PlaySquare} onClick={onOpenPlaybooks} />
+        <NavCard title="Simulations" detail="Validate playbooks before they touch a live creator." icon={Sparkles} onClick={onOpenSimulations} />
+        <NavCard title="Settings" detail="Manage users, providers, integrations, billing, API, and flags." icon={Settings2} onClick={onOpenSettings} />
+        <NavCard title="Morning Brief" detail={data.morningBrief.summary} icon={ArrowRight} onClick={onOpenQueue} />
       </section>
 
-      <section className="grid gap-4 xl:grid-cols-[0.95fr_1.05fr_0.8fr]">
-        <div className="premium-card rounded-2xl">
-          <div className="border-b border-blue-500/20 px-4 py-4">
-            <h2 className="text-base font-semibold text-white">Creator Health</h2>
-            <p className="mt-1 text-sm text-blue-100/58">Operational load by creator.</p>
-          </div>
-          <div className="divide-y divide-blue-500/10">
-            {data.creators.map((creator) => (
-              <button
-                key={creator.id}
-                type="button"
-                className="flex w-full items-center justify-between gap-4 px-4 py-4 text-left hover:bg-[#1A3655]/55"
-                onClick={() => onOpenCreator(creator.id)}
-              >
-                <div className="min-w-0">
-                  <div className="truncate font-semibold text-white">{creator.display_name || creator.username}</div>
-                  <div className="text-sm text-blue-100/58">@{creator.username}</div>
-                </div>
-                <div className="text-right text-sm">
-                  <div className="font-medium text-cyan-200">{latestSnapshot?.active_subscribers.toLocaleString() ?? 0} active</div>
-                  <div className="text-blue-100/58">{creatorTaskSummary(data.tasks, creator.id)}</div>
-                </div>
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div className="premium-card rounded-2xl">
-          <div className="border-b border-blue-500/20 px-4 py-4">
-            <h2 className="text-base font-semibold text-white">Top Subscriber Briefs</h2>
-            <p className="mt-1 text-sm text-blue-100/58">Who deserves the next operator minute.</p>
-          </div>
-          <div className="space-y-3 p-4">
-            {topSubscribers.map((relationship) => (
-              <button
-                key={relationship.id}
-                type="button"
-                className="w-full rounded-2xl border border-blue-500/15 bg-[#0D1B2A]/70 p-3 text-left hover:bg-[#102338]"
-                onClick={() => onOpenSubscribers({ creator: relationship.creator_id, persona: String(relationship.persona_key ?? "all") })}
-              >
-                <div className="flex items-center gap-3">
-                  <Avatar name={relationship.display_name || relationship.username || relationship.betterfans_subscriber_id} src={relationship.avatar_url ?? undefined} />
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-sm font-semibold text-white">{relationship.display_name || relationship.username || relationship.betterfans_subscriber_id}</div>
-                    <div className="truncate text-xs text-blue-100/54">
-                      {relationship.persona_emoji ?? "•"} {relationship.persona_name ?? "Subscriber"}
-                    </div>
-                    <div className="mt-1 truncate text-xs text-blue-100/54">{relationship.operator_briefing ?? relationship.recommended_next_action ?? "Monitor relationship"}</div>
-                  </div>
-                  <ArrowUpRight className="h-4 w-4 text-cyan-300" aria-hidden="true" />
-                </div>
-              </button>
-            ))}
-          </div>
-        </div>
-
+      <section className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
         <div className="premium-card rounded-2xl p-5">
           <div className="flex items-center justify-between gap-3">
             <div>
-              <h2 className="text-lg font-semibold text-white">Workload</h2>
-              <p className="mt-1 text-sm text-blue-100/62">The traditional backlog is still here, just not in charge.</p>
+              <h3 className="text-lg font-semibold text-white">Today&apos;s summary</h3>
+              <p className="mt-1 text-sm text-blue-100/62">The few numbers the operator needs to know first.</p>
             </div>
-            <ClipboardList className="h-5 w-5 text-cyan-300" aria-hidden="true" />
+            <Sparkles className="h-5 w-5 text-cyan-300" aria-hidden="true" />
           </div>
-          <div className="mt-5 grid gap-3">
-            <MetricTile label="Open Queue Items" value={String(openTasks)} icon={ClipboardList} />
-            <MetricTile label="Urgent Tasks" value={String(urgentTasks)} icon={AlertTriangle} />
-            <MetricTile label="Overdue Tasks" value={String(overdueTasks)} icon={Clock3} />
+          <div className="mt-5 grid gap-3 md:grid-cols-3">
+            <MetricTile label="Missed Revenue" value={`$${data.morningBrief.missed_revenue.toLocaleString()}`} icon={Sparkles} />
+            <MetricTile label="Overdue Welcomes" value={String(data.morningBrief.overdue_welcome_conversations)} icon={ClipboardList} />
+            <MetricTile label="Automations Matched" value={String(data.dailyOperations.automationsMatchedToday)} icon={Bot} />
           </div>
           <div className="mt-4 rounded-2xl border border-blue-500/15 bg-[#0D1B2A]/60 p-4">
-            <div className="text-sm font-semibold text-white">Active Queue Pulse</div>
-            <div className="mt-1 text-sm text-blue-100/58">
-              {openTasks} active queue items across {data.creators.length} creators. The focus queue should guide the next move.
+            <div className="text-sm font-semibold text-white">{data.morningBrief.headline}</div>
+            <div className="mt-2 text-sm leading-6 text-blue-100/68">{data.morningBrief.summary}</div>
+          </div>
+        </div>
+
+        <div className="premium-card rounded-2xl p-5">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h3 className="text-lg font-semibold text-white">Operating posture</h3>
+              <p className="mt-1 text-sm text-blue-100/62">Human-first by default.</p>
             </div>
+            <Settings2 className="h-5 w-5 text-cyan-300" aria-hidden="true" />
+          </div>
+          <div className="mt-5 grid gap-3">
+            <MetricTile label="Drafts Needing Approval" value={String(data.dailyOperations.draftsNeedingApproval)} icon={ClipboardList} />
+            <MetricTile label="Failed Sends" value={String(data.dailyOperations.failedSends)} icon={BarChart3} />
+            <MetricTile label="Fans Needing Reply" value={String(data.dailyOperations.fansNeedingReply)} icon={Bot} />
           </div>
         </div>
       </section>
@@ -182,52 +116,40 @@ export function Dashboard({
   );
 }
 
-function Avatar({ name, src }: { name: string; src?: string }) {
-  if (src) {
-    return <img src={src} alt="" className="h-10 w-10 shrink-0 rounded-2xl object-cover ring-1 ring-cyan-300/20" />;
-  }
+function NavCard({
+  title,
+  detail,
+  icon: Icon,
+  onClick
+}: {
+  title: string;
+  detail: string;
+  icon: LucideIcon;
+  onClick: () => void;
+}) {
   return (
-    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-blue-500/40 via-cyan-400/20 to-pink-400/30 text-sm font-bold text-white ring-1 ring-cyan-300/20">
-      {name.slice(0, 2).toUpperCase()}
-    </div>
-  );
-}
-
-function creatorTaskSummary(tasks: DashboardData["tasks"], creatorId: string) {
-  const active = tasks.filter((task) => task.creator_id === creatorId && isActiveTask(task.status)).length;
-  return `${active} active tasks`;
-}
-
-function subscriberPriorityScore(subscriber: DashboardData["relationships"][number]) {
-  return (
-    subscriber.urgency_score * 1.2 +
-    subscriber.revenue_opportunity_score * 0.9 +
-    subscriber.vip_score * 0.7 +
-    subscriber.churn_risk * 0.6 +
-    subscriber.engagement_score * 0.35 +
-    (subscriber.persona_key === "vip" ? 30 : 0) +
-    (subscriber.persona_key === "drifting_away" ? 28 : 0) +
-    (subscriber.persona_key === "new_fan" ? 18 : 0)
+    <button
+      type="button"
+      onClick={onClick}
+      className="premium-card premium-card-hover rounded-[24px] p-5 text-left"
+    >
+      <div className="flex items-start justify-between gap-4">
+        <div className="max-w-[80%]">
+          <div className="text-lg font-semibold text-white">{title}</div>
+          <div className="mt-2 text-sm leading-6 text-blue-100/64">{detail}</div>
+        </div>
+        <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-cyan-400/10 text-cyan-300">
+          <Icon className="h-4 w-4" aria-hidden="true" />
+        </div>
+      </div>
+      <div className="mt-4 inline-flex items-center gap-2 text-sm font-semibold text-cyan-200">
+        Open
+        <ArrowRight className="h-4 w-4" aria-hidden="true" />
+      </div>
+    </button>
   );
 }
 
 function isActiveTask(status: string) {
   return status === "open" || status === "in_progress" || status === "waiting";
-}
-
-function OpsCard({ label, value, detail, icon: Icon }: { label: string; value: string; detail: string; icon: typeof Sparkles }) {
-  return (
-    <div className="premium-card rounded-2xl p-4">
-      <div className="flex items-center justify-between gap-3">
-        <div>
-          <div className="text-xs font-semibold uppercase tracking-[0.16em] text-cyan-200/80">{label}</div>
-          <div className="mt-2 text-3xl font-semibold text-white">{value}</div>
-        </div>
-        <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-cyan-400/10 text-cyan-300">
-          <Icon className="h-5 w-5" aria-hidden="true" />
-        </div>
-      </div>
-      <div className="mt-2 text-sm text-blue-100/62">{detail}</div>
-    </div>
-  );
 }
