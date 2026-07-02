@@ -1,4 +1,4 @@
-import { BarChart3, FileText, Plus, Search, Settings2, Sparkles, Users } from "lucide-react";
+import { BarChart3, ClipboardList, FileText, Plus, Search, Settings2, Sparkles, TestTube2, Users } from "lucide-react";
 import { useEffect, useState } from "react";
 import { ConnectCreatorModal } from "./components/ConnectCreatorModal";
 import { CreatorDetail } from "./pages/CreatorDetail";
@@ -15,9 +15,9 @@ type View = "dashboard" | "creators" | "creator" | "queue" | "playbooks" | "simu
 const navItems: Array<{ view: View; label: string; icon: typeof BarChart3 }> = [
   { view: "dashboard", label: "Dashboard", icon: BarChart3 },
   { view: "creators", label: "Creators", icon: Users },
-  { view: "queue", label: "Queue", icon: Settings2 },
+  { view: "queue", label: "Queue", icon: ClipboardList },
   { view: "playbooks", label: "Playbooks", icon: FileText },
-  { view: "simulations", label: "Simulations", icon: Sparkles },
+  { view: "simulations", label: "Simulations", icon: TestTube2 },
   { view: "settings", label: "Settings", icon: Settings2 }
 ];
 
@@ -55,12 +55,12 @@ export function App() {
         <aside className="hidden h-full min-h-0 w-72 shrink-0 flex-col overflow-hidden border-r border-blue-500/20 bg-[#06111d] lg:flex">
           <div className="shrink-0 border-b border-blue-500/20 px-5 py-5">
             <div className="flex items-center gap-3">
-              <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-blue-500/20 shadow-[0_0_34px_rgba(59,130,246,.26)] ring-1 ring-cyan-300/20">
+              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-500/20 shadow-[0_0_34px_rgba(59,130,246,.20)] ring-1 ring-cyan-300/20">
                 <Sparkles className="h-6 w-6 text-cyan-300" aria-hidden="true" />
               </div>
               <div>
-                <div className="text-lg font-semibold text-white">Creator Cockpit v2</div>
-                <div className="text-sm text-blue-200/70">One workspace per job. Humans only see the exceptions.</div>
+                <div className="text-lg font-semibold text-white">Creator Cockpit</div>
+                <div className="text-sm text-blue-200/70">Creator operations platform</div>
               </div>
             </div>
           </div>
@@ -73,7 +73,7 @@ export function App() {
                   key={item.view}
                   type="button"
                   onClick={() => setView(item.view)}
-                  className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm font-semibold ${
+                  className={`flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm font-semibold ${
                     view === item.view
                       ? "selected-glow text-white"
                       : "text-blue-100/68 hover:bg-[#1A3655]/55 hover:text-white"
@@ -88,7 +88,7 @@ export function App() {
             <button
               type="button"
               onClick={openConnectCreator}
-              className="mt-3 flex w-full items-center gap-3 rounded-xl border border-cyan-300/20 bg-cyan-400/10 px-3 py-3 text-left text-sm font-semibold text-cyan-100 hover:bg-cyan-400/15 hover:text-white"
+              className="mt-3 flex w-full items-center gap-3 rounded-lg border border-cyan-300/20 bg-cyan-400/10 px-3 py-3 text-left text-sm font-semibold text-cyan-100 hover:bg-cyan-400/15 hover:text-white"
             >
               <Plus className="h-4 w-4" aria-hidden="true" />
               Connect Creator
@@ -100,13 +100,13 @@ export function App() {
           <header className="shrink-0 border-b border-blue-500/20 bg-[#071423]/78 backdrop-blur-2xl">
             <div className="flex min-h-20 flex-col gap-3 px-4 py-3 md:flex-row md:items-center md:justify-between md:px-6">
               <div>
-                <div className="text-sm font-semibold text-cyan-300">Creator Cockpit v2</div>
-                <h1 className="text-2xl font-semibold text-white">Agency operations, organised around creators.</h1>
+                <div className="text-sm font-semibold text-cyan-300">Creator Cockpit</div>
+                <h1 className="text-xl font-semibold text-white">Agency operations, organised around creators.</h1>
                 <div className="mt-1 text-sm text-blue-200/70">
-                  Conversation automation, queue exceptions, playbook design, simulations, and administration.
+                  Connect creators, sync activity, activate playbooks, resolve decisions.
                 </div>
               </div>
-              <label className="command-card flex min-h-12 w-full max-w-2xl items-center gap-3 rounded-2xl px-4">
+              <label className="command-card flex min-h-10 w-full max-w-xl items-center gap-3 rounded-lg px-4">
                 <Search className="h-5 w-5 text-cyan-300" aria-hidden="true" />
                 <input
                   className="w-full bg-transparent text-sm outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/80 focus-visible:ring-offset-2 focus-visible:ring-offset-[#071423]"

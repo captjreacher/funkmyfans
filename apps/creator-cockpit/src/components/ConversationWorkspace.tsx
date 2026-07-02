@@ -1,9 +1,9 @@
-import { ChevronLeft, Clock3, HandCoins, LoaderCircle, PauseCircle, Reply, Send, Slash, UserRound, Wand2 } from "lucide-react";
+import { ChevronLeft, HandCoins, LoaderCircle, PauseCircle, Reply, Send, Slash, UserRound, Wand2 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { fetchConversationWorkspace, type ConversationWorkspaceData } from "../lib/api";
 
-type QueueAction = "approve_ai" | "respond" | "assign" | "ignore" | "pause" | "nothing_more";
+type QueueAction = "approve_ai" | "respond" | "assign" | "ignore" | "pause";
 
 export function ConversationWorkspace({
   conversationId,
@@ -89,7 +89,7 @@ export function ConversationWorkspace({
           ) : null}
           <div className="text-sm font-semibold uppercase tracking-[0.24em] text-cyan-300">Dedicated workspace</div>
           <h2 className="mt-1 text-2xl font-semibold text-white">{formatPersonLabel(data.subscriber_context?.display_name, data.subscriber_context?.username)}</h2>
-          <p className="mt-1 text-sm text-blue-100/58">Conversation first, decision second.</p>
+          <p className="mt-1 text-sm text-blue-100/58">The conversation is context. The waiting decision is the focus.</p>
         </div>
         <button
           type="button"
@@ -106,7 +106,7 @@ export function ConversationWorkspace({
           <div className="flex items-center justify-between gap-3 border-b border-blue-500/20 pb-3">
             <div>
               <div className="text-sm font-semibold text-white">Conversation</div>
-              <div className="mt-1 text-sm text-blue-100/58">{conversation?.status ?? "unknown"} · {queueItem?.status_label ?? "queue item"}</div>
+              <div className="mt-1 text-sm text-blue-100/58">{conversation?.status ?? "unknown"} / {queueItem?.status_label ?? "queue item"}</div>
             </div>
             <span className="rounded-full bg-cyan-300/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] text-cyan-200">
               {decision ? labelize(decision) : "Waiting"}
@@ -151,7 +151,6 @@ export function ConversationWorkspace({
               <ActionButton label="Assign" icon={UserRound} active={decision === "assign"} onClick={() => void handleDecision("assign")} />
               <ActionButton label="Ignore" icon={Slash} active={decision === "ignore"} onClick={() => void handleDecision("ignore")} />
               <ActionButton label="Pause" icon={PauseCircle} active={decision === "pause"} onClick={() => void handleDecision("pause")} />
-              <ActionButton label="Nothing more" icon={Clock3} active={decision === "nothing_more"} onClick={() => void handleDecision("nothing_more")} />
             </div>
 
             <div className="mt-4 rounded-2xl border border-blue-500/15 bg-[#0D1B2A]/60 p-4 text-sm text-blue-100/68">

@@ -1,15 +1,15 @@
-import { ClipboardList, LoaderCircle, RefreshCw, Sparkles } from "lucide-react";
+import { ClipboardList, RefreshCw, Sparkles } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { ConversationWorkspace } from "../components/ConversationWorkspace";
 import { fetchQueueWorkspace, type QueueWorkspaceData } from "../lib/api";
 
 type QueueWorkspaceItemSummary = QueueWorkspaceData["items"][number];
-type QueueWorkspaceQueueSummary = QueueWorkspaceData["queues"][number];
 
 export function Queue() {
   const [data, setData] = useState<QueueWorkspaceData | null>(null);
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
+  const [detailOpen, setDetailOpen] = useState(false);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
@@ -22,8 +22,6 @@ export function Queue() {
     return data.items.find((item) => item.id === selectedId) ?? data.items[0] ?? null;
   }, [data, selectedItemId]);
 
-  const summary = data?.summary;
-
   async function refreshWorkspace() {
     setLoading(true);
     try {
@@ -35,21 +33,25 @@ export function Queue() {
     }
   }
 
+  if (detailOpen && selectedItem) {
+    return (
+      <main className="animate-in-soft">
+        <ConversationWorkspace conversationId={selectedItem.conversation?.id ?? null} onBack={() => setDetailOpen(false)} />
+      </main>
+    );
+  }
+
+  const summary = data?.summary;
+
   return (
-    <main className="space-y-4 animate-in-soft">
+    <main className="animate-in-soft space-y-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <div className="text-sm font-semibold uppercase tracking-[0.24em] text-cyan-300">Queue</div>
-          <h2 className="mt-1 text-2xl font-semibold text-white">Resolve human-required actions only.</h2>
-          <p className="mt-1 text-sm text-blue-100/58">
-            Every queue item represents exactly one decision. The conversation provides context; the task stays in focus.
-          </p>
+          <h2 className="mt-1 text-2xl font-semibold text-white">Resolve human-required actions only</h2>
+          <p className="mt-1 text-sm text-blue-100/58">Each row is one pending decision. Open it, decide, move on.</p>
         </div>
-        <button
-          type="button"
-          onClick={() => void refreshWorkspace()}
-          className="inline-flex items-center gap-2 rounded-xl bg-cyan-400 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-cyan-300"
-        >
+        <button type="button" onClick={() => void refreshWorkspace()} className="inline-flex items-center gap-2 rounded-lg bg-cyan-400 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-cyan-300">
           <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} aria-hidden="true" />
           Refresh
         </button>
@@ -64,105 +66,60 @@ export function Queue() {
         </section>
       ) : null}
 
-      <section className="grid gap-4 xl:grid-cols-[0.95fr_1.05fr]">
-        <aside className="premium-card rounded-2xl p-4">
-          <div className="flex items-center justify-between gap-3 border-b border-blue-500/20 pb-3">
-            <div>
-              <div className="text-sm font-semibold text-white">Queue items</div>
-              <div className="mt-1 text-sm text-blue-100/58">Sorted by priority, then due time.</div>
-            </div>
-            <span className="rounded-full bg-cyan-300/10 px-3 py-1 text-sm font-semibold text-cyan-200">{data?.items.length ?? 0}</span>
+      <section className="premium-card overflow-hidden rounded-lg">
+        <div className="flex items-center justify-between gap-3 border-b border-blue-500/18 px-4 py-3">
+          <div>
+            <div className="text-sm font-semibold text-white">Pending decisions</div>
+            <div className="mt-1 text-sm text-blue-100/58">One row per human intervention.</div>
           </div>
-
-          <div className="mt-3 max-h-[70vh] space-y-3 overflow-y-auto pr-1">
-            {data?.items.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => setSelectedItemId(item.id)}
-                className={`w-full rounded-2xl border p-4 text-left transition ${
-                  item.id === selectedItem?.id
-                    ? "selected-glow border-cyan-300/20"
-                    : "border-blue-500/15 bg-[#0D1B2A]/65 hover:border-cyan-300/30 hover:bg-[#102338]"
-                }`}
-              >
-                <QueueItemRow item={item} />
-              </button>
-            ))}
-            {!data?.items.length ? <div className="p-6 text-sm text-blue-100/58">No queue items need attention right now.</div> : null}
-          </div>
-        </aside>
-
-        <section className="space-y-4">
-          <div className="premium-card rounded-2xl p-4">
-            <div className="flex items-start justify-between gap-3">
+          <span className="rounded-full bg-cyan-300/10 px-3 py-1 text-sm font-semibold text-cyan-200">{data?.items.length ?? 0}</span>
+        </div>
+        <div className="grid grid-cols-[1.3fr_0.75fr_0.7fr_0.8fr_0.65fr] gap-3 border-b border-blue-500/18 px-4 py-3 text-xs font-semibold uppercase tracking-[0.14em] text-blue-100/52">
+          <div>Action</div>
+          <div>Subscriber</div>
+          <div>Queue</div>
+          <div>Reason</div>
+          <div className="text-right">Priority</div>
+        </div>
+        <div className="divide-y divide-blue-500/12">
+          {data?.items.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => {
+                setSelectedItemId(item.id);
+                setDetailOpen(true);
+              }}
+              className="grid w-full grid-cols-[1.3fr_0.75fr_0.7fr_0.8fr_0.65fr] items-center gap-3 px-4 py-3 text-left text-sm hover:bg-[#102338]/72"
+            >
               <div className="min-w-0">
-                <div className="text-sm font-semibold text-cyan-300">Selected item</div>
-                <h3 className="mt-1 text-xl font-semibold text-white">{selectedItem?.title ?? "Choose a queue item"}</h3>
-                <p className="mt-2 text-sm leading-6 text-blue-100/58">
-                  {selectedItem
-                    ? `${selectedItem.queue_label} · ${selectedItem.assignment_label ?? "Unassigned"} · ${selectedItem.status_label}`
-                    : "Pick a queue item to open its dedicated workspace."}
-                </p>
+                <div className="truncate font-semibold text-white">{item.title}</div>
+                <div className="mt-0.5 truncate text-xs text-blue-100/52">{item.status_label} / {item.assignment_label ?? "Unassigned"}</div>
               </div>
-              {selectedItem ? <span className={`rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] ${priorityTone(selectedItem.priority)}`}>{selectedItem.priority}</span> : null}
-            </div>
-          </div>
-
-          {selectedItem?.conversation?.id ? (
-            <ConversationWorkspace conversationId={selectedItem.conversation.id} onBack={() => undefined} />
-          ) : (
-            <div className="premium-card rounded-2xl p-6 text-sm text-blue-100/64">
-              This item does not have a linked conversation yet.
-            </div>
-          )}
-        </section>
+              <div className="truncate text-blue-100/68">{compactPersonLabel(item.subscriber)}</div>
+              <div className="truncate text-blue-100/68">{item.queue_label}</div>
+              <div className="truncate text-blue-100/58">{item.priority_reason ?? "Review required"}</div>
+              <div className="text-right">
+                <span className={`rounded-full px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] ${priorityTone(item.priority)}`}>{item.priority}</span>
+              </div>
+            </button>
+          ))}
+          {!data?.items.length ? <div className="px-4 py-8 text-sm text-blue-100/58">No queue items need attention right now.</div> : null}
+        </div>
       </section>
     </main>
   );
 }
 
-function QueueItemRow({ item }: { item: QueueWorkspaceItemSummary }) {
+function MetricCard({ label, value, icon: Icon }: { label: string; value: number; icon: LucideIcon }) {
   return (
-    <div className="space-y-2">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="truncate text-sm font-semibold text-white">{item.title}</div>
-          <div className="mt-1 truncate text-xs text-blue-100/54">{compactPersonLabel(item.subscriber)}</div>
-        </div>
-        <span className={`rounded-full px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] ${priorityTone(item.priority)}`}>{item.priority}</span>
-      </div>
-
-      <div className="flex flex-wrap gap-2 text-xs text-blue-100/58">
-        <span className="rounded-full border border-blue-500/15 px-2.5 py-1">{item.queue_label}</span>
-        <span className="rounded-full border border-blue-500/15 px-2.5 py-1">{item.status_label}</span>
-        <span className="rounded-full border border-blue-500/15 px-2.5 py-1">{item.assignment_label ?? "Unassigned"}</span>
-      </div>
-
-      <div className="text-sm text-blue-100/68">{item.priority_reason ?? "No reason recorded."}</div>
-    </div>
-  );
-}
-
-function MetricCard({
-  label,
-  value,
-  icon: Icon
-}: {
-  label: string;
-  value: number;
-  icon: LucideIcon;
-}) {
-  return (
-    <div className="premium-card rounded-2xl p-4">
+    <div className="premium-card rounded-lg p-4">
       <div className="flex items-center justify-between gap-3">
         <div>
           <div className="text-xs font-semibold uppercase tracking-[0.16em] text-cyan-200/80">{label}</div>
-          <div className="mt-2 text-3xl font-semibold text-white">{value}</div>
+          <div className="mt-2 text-2xl font-semibold text-white">{value}</div>
         </div>
-        <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-cyan-400/10 text-cyan-300">
-          <Icon className="h-5 w-5" aria-hidden="true" />
-        </div>
+        <Icon className="h-5 w-5 text-cyan-300" aria-hidden="true" />
       </div>
     </div>
   );
