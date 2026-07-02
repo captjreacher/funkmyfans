@@ -816,18 +816,40 @@ export interface ScriptWorkspaceConfig {
 export type ScriptVisualBuilderNodeType =
   | "trigger"
   | "message"
+  | "ask_question"
+  | "wait"
+  | "draft_reply"
+  | "generate_response"
+  | "analyse_conversation"
+  | "classify_intent"
   | "ai_prompt"
+  | "if_else"
   | "condition"
   | "branch"
+  | "switch"
+  | "filter"
   | "human_approval"
+  | "approve"
   | "assign_queue"
+  | "assign"
+  | "pause"
+  | "escalate"
+  | "ppv_offer"
+  | "bundle"
+  | "custom_content"
+  | "renew_subscription"
   | "delay"
+  | "schedule"
+  | "expiry"
   | "end";
+
+export type ScriptVisualBuilderNodeCategory = "conversation" | "ai" | "logic" | "human" | "commerce" | "timing";
 
 export interface ScriptVisualBuilderNode {
   id: string;
   type: ScriptVisualBuilderNodeType;
   label: string;
+  category?: ScriptVisualBuilderNodeCategory;
   x: number;
   y: number;
   config: Record<string, unknown>;
@@ -845,6 +867,11 @@ export interface ScriptVisualBuilderConfig {
   selectedNodeId?: string | null;
   nodes: ScriptVisualBuilderNode[];
   connections: ScriptVisualBuilderConnection[];
+  viewport?: {
+    x: number;
+    y: number;
+    zoom: number;
+  };
 }
 
 export interface ScriptBuilderBranchRule {

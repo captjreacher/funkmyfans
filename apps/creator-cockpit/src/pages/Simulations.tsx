@@ -153,9 +153,9 @@ export function Simulations({ initialScriptId }: { initialScriptId?: string }) {
           <TestTube2 className="h-4 w-4" aria-hidden="true" />
           Simulations
         </div>
-        <h2 className="mt-4 text-3xl font-semibold text-white">Validate playbooks before they reach a live creator.</h2>
+        <h2 className="mt-4 text-3xl font-semibold text-white">Validate conversation flows before they reach a live creator.</h2>
         <p className="mt-3 max-w-3xl text-sm leading-6 text-blue-100/68">
-          Choose a playbook, choose a scenario, run the test, and inspect the timeline and outcome. No editing is available here.
+          Choose a flow, choose a scenario, run the simulation, and inspect the timeline and outcome. No editing is available here.
         </p>
 
         <div className="mt-5 flex flex-wrap gap-2">
@@ -174,7 +174,7 @@ export function Simulations({ initialScriptId }: { initialScriptId?: string }) {
             className="inline-flex items-center gap-2 rounded-2xl bg-cyan-400 px-4 py-3 text-sm font-semibold text-slate-950 disabled:cursor-not-allowed disabled:opacity-45"
           >
             <PlaySquare className="h-4 w-4" aria-hidden="true" />
-            {busy ? "Running..." : "Run"}
+            {busy ? "Running..." : "Run Simulation"}
           </button>
         </div>
       </section>
@@ -195,12 +195,12 @@ export function Simulations({ initialScriptId }: { initialScriptId?: string }) {
               </select>
             </Field>
 
-            <Field label="Playbook">
+            <Field label="Conversation Flow">
               <select value={selectedScriptId} onChange={(event) => setSelectedScriptId(event.target.value)} className="command-card w-full rounded-2xl px-4 py-3 text-sm">
-                <option value="">Select a playbook</option>
+                <option value="">Select a flow</option>
                 {playbooks.map((script) => (
                   <option key={script.id} value={script.id}>
-                    {script.name}
+                    {flowLabel(script.name)}
                   </option>
                 ))}
               </select>
@@ -230,10 +230,10 @@ export function Simulations({ initialScriptId }: { initialScriptId?: string }) {
           </div>
 
           <div className="mt-5 grid gap-3 md:grid-cols-2">
-            <MetricCard label="Playbooks" value={workspace.scripts.length} icon={Sparkles} />
+            <MetricCard label="Conversation Flows" value={workspace.scripts.length} icon={Sparkles} />
             <MetricCard label="Scenarios" value={scenarios.length} icon={TestTube2} />
             <MetricCard label="Subscribers" value={simulatedSubscribers.length} icon={PlaySquare} />
-            <MetricCard label="Selected" value={selectedScript ? selectedScript.name : "none"} icon={Sparkles} />
+            <MetricCard label="Selected" value={selectedScript ? flowLabel(selectedScript.name) : "none"} icon={Sparkles} />
           </div>
         </div>
 
@@ -244,7 +244,7 @@ export function Simulations({ initialScriptId }: { initialScriptId?: string }) {
               <div className="mt-4 space-y-3">
                 <OutcomeRow label="Status" value={simulation.simulation.status} />
                 <OutcomeRow label="Event type" value={simulation.simulation.event_type} />
-                <OutcomeRow label="Playbook" value={simulation.simulation.script?.name ?? selectedScript?.name ?? "unknown"} />
+                <OutcomeRow label="Flow" value={flowLabel(simulation.simulation.script?.name ?? selectedScript?.name ?? "unknown")} />
                 <OutcomeRow label="Scenario" value={simulation.simulation.scenario?.label ?? selectedScenario?.label ?? "unknown"} />
                 <OutcomeRow label="Subscriber" value={simulation.simulation.simulated_subscriber?.name ?? selectedSubscriber?.name ?? "default"} />
                 <OutcomeRow label="Last error" value={simulation.simulation.last_error ?? "none"} />
@@ -318,6 +318,10 @@ function OutcomeRow({ label, value }: { label: string; value: string }) {
 
 function formatDate(value: string | null | undefined) {
   return value ? new Date(value).toLocaleString() : "unknown";
+}
+
+function flowLabel(value: string) {
+  return value.replace(/\bScripts\b/g, "Conversation Flows").replace(/\bScript\b/g, "Flow");
 }
 
 function errorMessage(error: unknown) {

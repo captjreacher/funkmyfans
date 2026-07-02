@@ -15,6 +15,7 @@
     "@funkmyfans/of-rules-engine": "*",
     "@funkmyfans/of-types": "*",
     "@supabase/supabase-js": "^2.86.0",
+    "@xyflow/react": "^12.11.1",
     "lucide-react": "^0.561.0",
     "react": "^19.2.3",
     "react-dom": "^19.2.3"
