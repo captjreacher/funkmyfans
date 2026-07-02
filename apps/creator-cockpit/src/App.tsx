@@ -24,6 +24,7 @@ const navItems: Array<{ view: View; label: string; icon: typeof BarChart3 }> = [
 export function App() {
   const [view, setView] = useState<View>("dashboard");
   const [selectedCreatorId, setSelectedCreatorId] = useState<string | null>(null);
+  const [simulationScriptId, setSimulationScriptId] = useState<string | undefined>();
   const [data, setData] = useState<DashboardData | null>(null);
   const [connectCreatorOpen, setConnectCreatorOpen] = useState(false);
 
@@ -47,6 +48,11 @@ export function App() {
 
   function openCreators() {
     setView("creators");
+  }
+
+  function openSimulations(scriptId?: string) {
+    setSimulationScriptId(scriptId);
+    setView("simulations");
   }
 
   return (
@@ -147,7 +153,7 @@ export function App() {
                     onOpenCreators={() => openCreators()}
                     onOpenQueue={() => setView("queue")}
                     onOpenPlaybooks={() => setView("playbooks")}
-                    onOpenSimulations={() => setView("simulations")}
+                    onOpenSimulations={() => openSimulations()}
                     onOpenSettings={() => setView("settings")}
                     onConnectCreator={openConnectCreator}
                   />
@@ -165,9 +171,9 @@ export function App() {
 
                 {view === "queue" ? <Queue /> : null}
 
-                {view === "playbooks" ? <Playbooks /> : null}
+                {view === "playbooks" ? <Playbooks onOpenSimulations={openSimulations} /> : null}
 
-                {view === "simulations" ? <Simulations /> : null}
+                {view === "simulations" ? <Simulations initialScriptId={simulationScriptId} /> : null}
 
                 {view === "settings" ? <Settings /> : null}
               </>

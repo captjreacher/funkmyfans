@@ -12,7 +12,7 @@ import {
 } from "../lib/api";
 import type { OfCreatorAutomationScenario, OfSimulatedSubscriber } from "@funkmyfans/of-types";
 
-export function Simulations() {
+export function Simulations({ initialScriptId }: { initialScriptId?: string }) {
   const [workspace, setWorkspace] = useState<ScriptsWorkspaceData | null>(null);
   const [creatorId, setCreatorId] = useState<string>("");
   const [scenarios, setScenarios] = useState<OfCreatorAutomationScenario[]>([]);
@@ -30,6 +30,10 @@ export function Simulations() {
   }, []);
 
   useEffect(() => {
+    if (initialScriptId) setSelectedScriptId(initialScriptId);
+  }, [initialScriptId]);
+
+  useEffect(() => {
     if (!creatorId) return;
     void loadCreatorContext(creatorId);
   }, [creatorId]);
@@ -38,10 +42,14 @@ export function Simulations() {
     if (!workspace) return;
     const selectedCreator = workspace.creators[0];
     if (!creatorId && selectedCreator) setCreatorId(selectedCreator.id);
-    if (!selectedScriptId) {
+    if (initialScriptId && workspace.scripts.some((script) => script.id === initialScriptId)) {
+      const script = workspace.scripts.find((item) => item.id === initialScriptId);
+      setSelectedScriptId(initialScriptId);
+      if (script && script.creator_id !== creatorId) setCreatorId(script.creator_id);
+    } else if (!selectedScriptId) {
       setSelectedScriptId(workspace.scripts.find((script) => script.creator_id === (selectedCreator?.id ?? creatorId))?.id ?? workspace.scripts[0]?.id ?? "");
     }
-  }, [creatorId, selectedScriptId, workspace]);
+  }, [creatorId, initialScriptId, selectedScriptId, workspace]);
 
   const selectedScript = useMemo(
     () => workspace?.scripts.find((script) => script.id === selectedScriptId) ?? null,

@@ -810,6 +810,41 @@ export interface ScriptWorkspaceConfig {
   ai?: ScriptWorkspaceAiConfig;
   approval?: ScriptWorkspaceApprovalConfig;
   conditions?: ScriptBuilderCondition[];
+  visualBuilder?: ScriptVisualBuilderConfig;
+}
+
+export type ScriptVisualBuilderNodeType =
+  | "trigger"
+  | "message"
+  | "ai_prompt"
+  | "condition"
+  | "branch"
+  | "human_approval"
+  | "assign_queue"
+  | "delay"
+  | "end";
+
+export interface ScriptVisualBuilderNode {
+  id: string;
+  type: ScriptVisualBuilderNodeType;
+  label: string;
+  x: number;
+  y: number;
+  config: Record<string, unknown>;
+}
+
+export interface ScriptVisualBuilderConnection {
+  id: string;
+  from: string;
+  to: string;
+  label?: string;
+}
+
+export interface ScriptVisualBuilderConfig {
+  schemaVersion: 1;
+  selectedNodeId?: string | null;
+  nodes: ScriptVisualBuilderNode[];
+  connections: ScriptVisualBuilderConnection[];
 }
 
 export interface ScriptBuilderBranchRule {
