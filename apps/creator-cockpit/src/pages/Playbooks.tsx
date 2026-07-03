@@ -15,6 +15,12 @@ import {
   MessageCircleMore,
   MessageSquareText,
   Package,
+  PanelBottomClose,
+  PanelBottomOpen,
+  PanelLeftClose,
+  PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
   PauseCircle,
   Play,
   Plus,
@@ -140,7 +146,13 @@ type FlowHistorySnapshot = {
   selectedNodeId: string | null;
   selectedEdgeIds: string[];
 };
+type BuilderPanelState = {
+  leftPanelOpen: boolean;
+  inspectorOpen: boolean;
+  simulationPanelOpen: boolean;
+};
 const fallbackRouteKey = "fallback";
+const builderPanelStorageKey = "fmf.builderPanels.v1";
 
 const iconMap: Record<string, LucideIcon> = {
   BadgeAlert,
@@ -428,6 +440,7 @@ function ConversationFlowBuilder({
   const [simulationBusy, setSimulationBusy] = useState<string | null>(null);
   const [simulationError, setSimulationError] = useState<string | null>(null);
   const [manualReplyText, setManualReplyText] = useState("Manual operator reply for this simulation.");
+  const [panelState, setPanelState] = useState<BuilderPanelState>(() => readBuilderPanelState());
   const { screenToFlowPosition, getViewport } = useReactFlow();
 
   const flow = useMemo(() => fromReactFlow(nodes, edges, selectedNodeId, getViewport()), [edges, getViewport, nodes, selectedNodeId]);
@@ -437,6 +450,7 @@ function ConversationFlowBuilder({
   const simulationStates = useMemo(() => buildSimulationStepStates(flow, simulationDetail, simulationQueueItem), [flow, simulationDetail, simulationQueueItem]);
   const deleteKeyCode = useMemo(() => ["Backspace", "Delete"], []);
   const multiSelectionKeyCode = useMemo(() => ["Shift"], []);
+  const builderGridTemplate = `${panelState.leftPanelOpen ? "250px " : ""}minmax(0,1fr)${panelState.inspectorOpen ? " 340px" : ""}`;
 
   const currentSnapshot = useCallback(
     (): FlowHistorySnapshot => ({
@@ -466,6 +480,14 @@ function ConversationFlowBuilder({
     setSimulationQueueItem(null);
     setSimulationError(null);
   }, [session.script]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(builderPanelStorageKey, JSON.stringify(panelState));
+    } catch {
+      // Panel persistence is a convenience; ignore storage failures.
+    }
+  }, [panelState]);
 
   const restoreSnapshot = useCallback((snapshot: FlowHistorySnapshot) => {
     setNodes(cloneNodes(snapshot.nodes));
@@ -578,6 +600,7 @@ function ConversationFlowBuilder({
     setSelectedNodeId(builderNode.id);
     setSelectedEdgeIds([]);
     setInspectorTab("properties");
+    setPanelState((current) => ({ ...current, inspectorOpen: true }));
   }
 
   const quickAddStep = useCallback((sourceNodeId: string, type: ScriptVisualBuilderNodeType, sourceHandle?: string | null) => {
@@ -599,6 +622,7 @@ function ConversationFlowBuilder({
     setSelectedNodeId(builderNode.id);
     setSelectedEdgeIds([]);
     setInspectorTab("properties");
+    setPanelState((current) => ({ ...current, inspectorOpen: true }));
   }, [nodes, pushHistory, validation]);
 
   const renderedNodes = useMemo(
@@ -626,6 +650,7 @@ function ConversationFlowBuilder({
     setSelectedEdgeIds((current) => (current.length ? [] : current));
     setInspectorTab("properties");
     setEditingNodeId(node.id);
+    setPanelState((current) => ({ ...current, inspectorOpen: true }));
   }, []);
 
   const onBuilderEdgeDoubleClick = useCallback((event: MouseEvent, edge: FlowEdge) => {
@@ -680,6 +705,7 @@ function ConversationFlowBuilder({
   }
 
   async function runBuilderSimulation() {
+    setPanelState((current) => ({ ...current, simulationPanelOpen: true }));
     setSimulationBusy("run");
     try {
       const result = await startSimulation(session.script.creator_id, {
@@ -707,6 +733,7 @@ function ConversationFlowBuilder({
 
   async function runSimulationAction(action: string, runner: () => Promise<SimulationDetailData>) {
     if (!simulationDetail?.simulation.id) return;
+    setPanelState((current) => ({ ...current, simulationPanelOpen: true }));
     setSimulationBusy(action);
     try {
       const result = await runner();
@@ -773,6 +800,30 @@ function ConversationFlowBuilder({
           </div>
         </div>
         <div className="flex flex-wrap gap-2">
+          <BuilderPanelToggle
+            active={panelState.leftPanelOpen}
+            activeLabel="Hide Steps"
+            inactiveLabel="Steps"
+            activeIcon={PanelLeftClose}
+            inactiveIcon={PanelLeftOpen}
+            onClick={() => setPanelState((current) => ({ ...current, leftPanelOpen: !current.leftPanelOpen }))}
+          />
+          <BuilderPanelToggle
+            active={panelState.inspectorOpen}
+            activeLabel="Hide Properties"
+            inactiveLabel="Properties"
+            activeIcon={PanelRightClose}
+            inactiveIcon={PanelRightOpen}
+            onClick={() => setPanelState((current) => ({ ...current, inspectorOpen: !current.inspectorOpen }))}
+          />
+          <BuilderPanelToggle
+            active={panelState.simulationPanelOpen}
+            activeLabel="Hide Execution"
+            inactiveLabel="Execution"
+            activeIcon={PanelBottomClose}
+            inactiveIcon={PanelBottomOpen}
+            onClick={() => setPanelState((current) => ({ ...current, simulationPanelOpen: !current.simulationPanelOpen }))}
+          />
           <button type="button" onClick={undo} disabled={!historyPast.length || busy} className="rounded-lg border border-blue-400/20 bg-[#102338]/72 px-3 py-2 text-sm font-semibold text-blue-50 disabled:opacity-45">
             Undo
           </button>
@@ -809,10 +860,10 @@ function ConversationFlowBuilder({
 
       {error ? <div className="shrink-0 border-b border-rose-400/25 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">{error}</div> : null}
 
-      <div className="grid min-h-0 flex-1 grid-cols-[250px_minmax(560px,1fr)_340px] overflow-hidden">
-        <NodeLibrary onDragStart={handleDragStart} onAddNode={addNode} />
+      <div className="grid min-h-0 flex-1 overflow-hidden" style={{ gridTemplateColumns: builderGridTemplate }}>
+        {panelState.leftPanelOpen ? <NodeLibrary onDragStart={handleDragStart} onAddNode={addNode} /> : null}
 
-        <section className="min-h-0 overflow-hidden bg-[#06111d]" onDrop={handleDrop} onDragOver={handleDragOver}>
+        <section className="min-h-0 min-w-0 overflow-hidden bg-[#06111d]" onDrop={handleDrop} onDragOver={handleDragOver}>
           <ReactFlow<FlowNode, FlowEdge>
             nodes={renderedNodes}
             edges={edges}
@@ -835,34 +886,69 @@ function ConversationFlowBuilder({
           </ReactFlow>
         </section>
 
-        <Inspector
-          tab={inspectorTab}
-          onTabChange={setInspectorTab}
-          node={selectedBuilderNode}
-          flow={flow}
-          validation={validation}
-          onUpdateNode={updateSelectedNode}
-          editingNodeId={editingNodeId}
-          onEditingHandled={() => setEditingNodeId(null)}
-        />
+        {panelState.inspectorOpen ? (
+          <Inspector
+            tab={inspectorTab}
+            onTabChange={setInspectorTab}
+            node={selectedBuilderNode}
+            flow={flow}
+            validation={validation}
+            onUpdateNode={updateSelectedNode}
+            editingNodeId={editingNodeId}
+            onEditingHandled={() => setEditingNodeId(null)}
+          />
+        ) : null}
       </div>
 
-      <BuilderSimulationDebugger
-        detail={simulationDetail}
-        queueItem={simulationQueueItem}
-        timeline={simulationTimeline}
-        busy={simulationBusy}
-        error={simulationError}
-        manualReplyText={manualReplyText}
-        onManualReplyTextChange={setManualReplyText}
-        onApproveAi={() => void runQueueAction("approve_ai")}
-        onManualReply={() => void runQueueAction("respond")}
-        onIgnore={() => void runQueueAction("ignore")}
-        onPurchaseSuccess={() => void runSimulationAction("purchase_success", () => simulationPurchase(simulationDetail!.simulation.id, true))}
-        onPurchaseFailure={() => void runSimulationAction("purchase_failure", () => simulationPurchase(simulationDetail!.simulation.id, false))}
-        onSendReply={() => void runSimulationAction("reply", () => simulationReply(simulationDetail!.simulation.id, manualReplyText))}
-      />
+      {panelState.simulationPanelOpen ? (
+        <BuilderSimulationDebugger
+          detail={simulationDetail}
+          queueItem={simulationQueueItem}
+          timeline={simulationTimeline}
+          busy={simulationBusy}
+          error={simulationError}
+          manualReplyText={manualReplyText}
+          onManualReplyTextChange={setManualReplyText}
+          onApproveAi={() => void runQueueAction("approve_ai")}
+          onManualReply={() => void runQueueAction("respond")}
+          onIgnore={() => void runQueueAction("ignore")}
+          onPurchaseSuccess={() => void runSimulationAction("purchase_success", () => simulationPurchase(simulationDetail!.simulation.id, true))}
+          onPurchaseFailure={() => void runSimulationAction("purchase_failure", () => simulationPurchase(simulationDetail!.simulation.id, false))}
+          onSendReply={() => void runSimulationAction("reply", () => simulationReply(simulationDetail!.simulation.id, manualReplyText))}
+          onHide={() => setPanelState((current) => ({ ...current, simulationPanelOpen: false }))}
+        />
+      ) : null}
     </main>
+  );
+}
+
+function BuilderPanelToggle({
+  active,
+  activeLabel,
+  inactiveLabel,
+  activeIcon: ActiveIcon,
+  inactiveIcon: InactiveIcon,
+  onClick
+}: {
+  active: boolean;
+  activeLabel: string;
+  inactiveLabel: string;
+  activeIcon: LucideIcon;
+  inactiveIcon: LucideIcon;
+  onClick: () => void;
+}) {
+  const Icon = active ? ActiveIcon : InactiveIcon;
+  const label = active ? activeLabel : inactiveLabel;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-semibold ${active ? "border-cyan-300/28 bg-cyan-400/12 text-cyan-100" : "border-blue-400/20 bg-[#102338]/72 text-blue-50"}`}
+      title={label}
+    >
+      <Icon className="h-4 w-4" aria-hidden="true" />
+      <span>{label}</span>
+    </button>
   );
 }
 
@@ -968,7 +1054,8 @@ function BuilderSimulationDebugger({
   onIgnore,
   onPurchaseSuccess,
   onPurchaseFailure,
-  onSendReply
+  onSendReply,
+  onHide
 }: {
   detail: SimulationDetailData | null;
   queueItem: QueueWorkspaceItemSummary | null;
@@ -983,6 +1070,7 @@ function BuilderSimulationDebugger({
   onPurchaseSuccess: () => void;
   onPurchaseFailure: () => void;
   onSendReply: () => void;
+  onHide: () => void;
 }) {
   const canAct = Boolean(detail?.simulation.id) && !busy;
   const waitingForPurchase = detail?.conversation?.waiting_reason?.includes("purchase") ?? false;
@@ -997,7 +1085,13 @@ function BuilderSimulationDebugger({
                 {detail ? `${detail.simulation.status} / ${detail.conversation?.status ?? "no conversation"}` : "Run a builder simulation to watch steps execute."}
               </div>
             </div>
-            {detail ? <span className={`rounded-full px-3 py-1 text-xs font-semibold uppercase ${simulationStateTone(statusToSimulationState(detail.conversation?.status, detail.simulation.status))}`}>{detail.conversation?.status ?? detail.simulation.status}</span> : null}
+            <div className="flex items-center gap-2">
+              {detail ? <span className={`rounded-full px-3 py-1 text-xs font-semibold uppercase ${simulationStateTone(statusToSimulationState(detail.conversation?.status, detail.simulation.status))}`}>{detail.conversation?.status ?? detail.simulation.status}</span> : null}
+              <button type="button" onClick={onHide} className="inline-flex items-center gap-2 rounded-lg border border-blue-400/20 bg-[#102338]/72 px-3 py-2 text-xs font-semibold text-blue-50">
+                <PanelBottomClose className="h-4 w-4" aria-hidden="true" />
+                Hide
+              </button>
+            </div>
           </div>
 
           {error ? <div className="mt-3 rounded-lg border border-rose-400/25 bg-rose-500/10 px-3 py-2 text-sm text-rose-100">{error}</div> : null}
@@ -1808,6 +1902,26 @@ function categoryColor(category?: ScriptVisualBuilderNodeCategory) {
 
 function sameStringArray(left: string[], right: string[]) {
   return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function readBuilderPanelState(): BuilderPanelState {
+  const fallback: BuilderPanelState = {
+    leftPanelOpen: false,
+    inspectorOpen: false,
+    simulationPanelOpen: false
+  };
+  try {
+    const stored = window.localStorage.getItem(builderPanelStorageKey);
+    if (!stored) return fallback;
+    const parsed = JSON.parse(stored) as Partial<BuilderPanelState>;
+    return {
+      leftPanelOpen: typeof parsed.leftPanelOpen === "boolean" ? parsed.leftPanelOpen : fallback.leftPanelOpen,
+      inspectorOpen: typeof parsed.inspectorOpen === "boolean" ? parsed.inspectorOpen : fallback.inspectorOpen,
+      simulationPanelOpen: typeof parsed.simulationPanelOpen === "boolean" ? parsed.simulationPanelOpen : fallback.simulationPanelOpen
+    };
+  } catch {
+    return fallback;
+  }
 }
 
 function isBranchNodeType(type: ScriptVisualBuilderNodeType) {

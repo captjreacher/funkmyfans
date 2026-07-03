@@ -1,4 +1,4 @@
-import { BarChart3, ClipboardList, FileText, Plus, Route, Search, Settings2, Sparkles, TestTube2, Users } from "lucide-react";
+import { BarChart3, ClipboardList, FileText, PanelLeftClose, PanelLeftOpen, Plus, Route, Search, Settings2, Sparkles, TestTube2, Users } from "lucide-react";
 import { useEffect, useState } from "react";
 import { ConnectCreatorModal } from "./components/ConnectCreatorModal";
 import { CreatorDetail } from "./pages/CreatorDetail";
@@ -29,10 +29,15 @@ export function App() {
   const [simulationScriptId, setSimulationScriptId] = useState<string | undefined>();
   const [data, setData] = useState<DashboardData | null>(null);
   const [connectCreatorOpen, setConnectCreatorOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => readStoredBoolean("fmf.appSidebarCollapsed", true));
 
   useEffect(() => {
     void refreshDashboard();
   }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem("fmf.appSidebarCollapsed", JSON.stringify(sidebarCollapsed));
+  }, [sidebarCollapsed]);
 
   async function refreshDashboard() {
     const result = await fetchDashboard();
@@ -60,13 +65,13 @@ export function App() {
   return (
     <div className="h-screen overflow-hidden text-slate-100">
       <div className="flex h-full min-w-0 overflow-hidden">
-        <aside className="hidden h-full min-h-0 w-72 shrink-0 flex-col overflow-hidden border-r border-blue-500/20 bg-[#06111d] lg:flex">
-          <div className="shrink-0 border-b border-blue-500/20 px-5 py-5">
-            <div className="flex items-center gap-3">
+        <aside className={`hidden h-full min-h-0 shrink-0 flex-col overflow-hidden border-r border-blue-500/20 bg-[#06111d] lg:flex ${sidebarCollapsed ? "w-16" : "w-72"}`}>
+          <div className={`shrink-0 border-b border-blue-500/20 ${sidebarCollapsed ? "px-3 py-4" : "px-5 py-5"}`}>
+            <div className={`flex items-center ${sidebarCollapsed ? "justify-center" : "gap-3"}`}>
               <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-500/20 shadow-[0_0_34px_rgba(59,130,246,.20)] ring-1 ring-cyan-300/20">
                 <Sparkles className="h-6 w-6 text-cyan-300" aria-hidden="true" />
               </div>
-              <div>
+              <div className={sidebarCollapsed ? "sr-only" : undefined}>
                 <div className="text-lg font-semibold text-white">Creator Cockpit</div>
                 <div className="text-sm text-blue-200/70">Creator operations platform</div>
               </div>
@@ -74,6 +79,16 @@ export function App() {
           </div>
 
           <nav className="flex-1 min-h-0 space-y-1 overflow-y-auto p-3">
+            <button
+              type="button"
+              onClick={() => setSidebarCollapsed((current) => !current)}
+              className={`flex w-full items-center rounded-lg border border-blue-400/20 bg-[#102338]/72 px-3 py-2.5 text-sm font-semibold text-blue-50 ${sidebarCollapsed ? "justify-center" : "gap-3"}`}
+              aria-label={sidebarCollapsed ? "Expand app sidebar" : "Collapse app sidebar"}
+              title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+            >
+              {sidebarCollapsed ? <PanelLeftOpen className="h-4 w-4" aria-hidden="true" /> : <PanelLeftClose className="h-4 w-4" aria-hidden="true" />}
+              <span className={sidebarCollapsed ? "sr-only" : undefined}>{sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}</span>
+            </button>
             {navItems.map((item) => {
               const Icon = item.icon;
               return (
@@ -81,14 +96,15 @@ export function App() {
                   key={item.view}
                   type="button"
                   onClick={() => setView(item.view)}
-                  className={`flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm font-semibold ${
+                  className={`flex w-full items-center rounded-lg px-3 py-2.5 text-left text-sm font-semibold ${sidebarCollapsed ? "justify-center" : "gap-3"} ${
                     view === item.view
                       ? "selected-glow text-white"
                       : "text-blue-100/68 hover:bg-[#1A3655]/55 hover:text-white"
                   }`}
+                  title={item.label}
                 >
                   <Icon className="h-4 w-4" aria-hidden="true" />
-                  {item.label}
+                  <span className={sidebarCollapsed ? "sr-only" : undefined}>{item.label}</span>
                 </button>
               );
             })}
@@ -96,10 +112,11 @@ export function App() {
             <button
               type="button"
               onClick={openConnectCreator}
-              className="mt-3 flex w-full items-center gap-3 rounded-lg border border-cyan-300/20 bg-cyan-400/10 px-3 py-3 text-left text-sm font-semibold text-cyan-100 hover:bg-cyan-400/15 hover:text-white"
+              className={`mt-3 flex w-full items-center rounded-lg border border-cyan-300/20 bg-cyan-400/10 px-3 py-3 text-left text-sm font-semibold text-cyan-100 hover:bg-cyan-400/15 hover:text-white ${sidebarCollapsed ? "justify-center" : "gap-3"}`}
+              title="Connect Creator"
             >
               <Plus className="h-4 w-4" aria-hidden="true" />
-              Connect Creator
+              <span className={sidebarCollapsed ? "sr-only" : undefined}>Connect Creator</span>
             </button>
           </nav>
         </aside>
@@ -194,4 +211,13 @@ export function App() {
       />
     </div>
   );
+}
+
+function readStoredBoolean(key: string, fallback: boolean) {
+  try {
+    const value = window.localStorage.getItem(key);
+    return value === null ? fallback : value === "true";
+  } catch {
+    return fallback;
+  }
 }
