@@ -33,7 +33,7 @@ import {
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { DragEvent, ReactNode } from "react";
+import type { DragEvent, MouseEvent, ReactNode } from "react";
 import {
   addEdge,
   applyEdgeChanges,
@@ -434,12 +434,8 @@ function ConversationFlowBuilder({
   const selectedBuilderNode = flow.nodes.find((node) => node.id === selectedNodeId) ?? flow.nodes[0] ?? null;
   const simulationTimeline = useMemo(() => buildSimulationTimeline(simulationDetail, flow), [flow, simulationDetail]);
   const simulationStates = useMemo(() => buildSimulationStepStates(flow, simulationDetail, simulationQueueItem), [flow, simulationDetail, simulationQueueItem]);
-  const renderedNodes = nodes.map((node) =>
-    withAuthoringData(node, validation, {
-      onInlineEdit: updateNodeInline,
-      onQuickAdd: quickAddStep
-    }, simulationStates.get(node.id))
-  );
+  const deleteKeyCode = useMemo(() => ["Backspace", "Delete"], []);
+  const multiSelectionKeyCode = useMemo(() => ["Shift"], []);
 
   const currentSnapshot = useCallback(
     (): FlowHistorySnapshot => ({
@@ -543,7 +539,7 @@ function ConversationFlowBuilder({
     );
   }, [pushHistory]);
 
-  function updateNodeInline(nodeId: string, patch: Partial<ScriptVisualBuilderNode>) {
+  const updateNodeInline = useCallback((nodeId: string, patch: Partial<ScriptVisualBuilderNode>) => {
     pushHistory();
     setNodes((current) =>
       current.map((node) => {
@@ -560,7 +556,7 @@ function ConversationFlowBuilder({
         return toReactFlowNode(nextBuilder, validation);
       })
     );
-  }
+  }, [pushHistory, validation]);
 
   function updateSelectedNode(patch: Partial<ScriptVisualBuilderNode>) {
     if (!selectedBuilderNode) return;
@@ -583,7 +579,7 @@ function ConversationFlowBuilder({
     setInspectorTab("properties");
   }
 
-  function quickAddStep(sourceNodeId: string, type: ScriptVisualBuilderNodeType, sourceHandle?: string | null) {
+  const quickAddStep = useCallback((sourceNodeId: string, type: ScriptVisualBuilderNodeType, sourceHandle?: string | null) => {
     const sourceNode = nodes.find((node) => node.id === sourceNodeId);
     if (!sourceNode) return;
     const position = {
@@ -602,7 +598,53 @@ function ConversationFlowBuilder({
     setSelectedNodeId(builderNode.id);
     setSelectedEdgeIds([]);
     setInspectorTab("properties");
-  }
+  }, [nodes, pushHistory, validation]);
+
+  const renderedNodes = useMemo(
+    () =>
+      nodes.map((node) =>
+        withAuthoringData(
+          node,
+          validation,
+          {
+            onInlineEdit: updateNodeInline,
+            onQuickAdd: quickAddStep
+          },
+          simulationStates.get(node.id)
+        )
+      ),
+    [nodes, quickAddStep, simulationStates, updateNodeInline, validation]
+  );
+
+  const onBuilderNodeDragStart = useCallback(() => {
+    pushHistory();
+  }, [pushHistory]);
+
+  const onBuilderNodeDoubleClick = useCallback((_: MouseEvent, node: FlowNode) => {
+    setSelectedNodeId((current) => (current === node.id ? current : node.id));
+    setSelectedEdgeIds((current) => (current.length ? [] : current));
+    setInspectorTab("properties");
+    setEditingNodeId(node.id);
+  }, []);
+
+  const onBuilderEdgeDoubleClick = useCallback((event: MouseEvent, edge: FlowEdge) => {
+    event.preventDefault();
+    pushHistory();
+    setEdges((current) => current.filter((item) => item.id !== edge.id));
+    setSelectedEdgeIds((current) => (current.length ? [] : current));
+  }, [pushHistory]);
+
+  const onBuilderSelectionChange = useCallback(({ nodes: selectedNodes, edges: selectedEdges }: { nodes: FlowNode[]; edges: FlowEdge[] }) => {
+    const nextNodeId = selectedNodes[0]?.id ?? null;
+    const nextEdgeIds = selectedEdges.map((edge) => edge.id);
+    setSelectedNodeId((current) => (current === nextNodeId ? current : nextNodeId));
+    setSelectedEdgeIds((current) => (sameStringArray(current, nextEdgeIds) ? current : nextEdgeIds));
+  }, []);
+
+  const isValidBuilderConnection = useCallback(
+    (connection: Connection | FlowEdge) => Boolean(connection.source && connection.target && connection.source !== connection.target),
+    []
+  );
 
   function handleDragStart(event: DragEvent<HTMLButtonElement>, type: ScriptVisualBuilderNodeType) {
     event.dataTransfer.setData("application/funkmyfans-node", type);
@@ -777,27 +819,14 @@ function ConversationFlowBuilder({
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
-            onNodeDragStart={() => pushHistory()}
-            onNodeDoubleClick={(_, node) => {
-              setSelectedNodeId(node.id);
-              setSelectedEdgeIds([]);
-              setInspectorTab("properties");
-              setEditingNodeId(node.id);
-            }}
-            onEdgeDoubleClick={(event, edge) => {
-              event.preventDefault();
-              pushHistory();
-              setEdges((current) => current.filter((item) => item.id !== edge.id));
-              setSelectedEdgeIds([]);
-            }}
-            onSelectionChange={({ nodes: selectedNodes, edges: selectedEdges }) => {
-              setSelectedNodeId(selectedNodes[0]?.id ?? null);
-              setSelectedEdgeIds(selectedEdges.map((edge) => edge.id));
-            }}
-            isValidConnection={(connection) => Boolean(connection.source && connection.target && connection.source !== connection.target)}
+            onNodeDragStart={onBuilderNodeDragStart}
+            onNodeDoubleClick={onBuilderNodeDoubleClick}
+            onEdgeDoubleClick={onBuilderEdgeDoubleClick}
+            onSelectionChange={onBuilderSelectionChange}
+            isValidConnection={isValidBuilderConnection}
             fitView
-            deleteKeyCode={["Backspace", "Delete"]}
-            multiSelectionKeyCode={["Shift"]}
+            deleteKeyCode={deleteKeyCode}
+            multiSelectionKeyCode={multiSelectionKeyCode}
           >
             <Background variant={BackgroundVariant.Dots} color="rgba(59,130,246,.30)" gap={24} size={1} />
             <MiniMap pannable zoomable nodeStrokeWidth={3} nodeColor={(node) => categoryColor((node.data as Partial<FlowNodeData>).category)} />
@@ -1631,6 +1660,10 @@ function categoryColor(category?: ScriptVisualBuilderNodeCategory) {
   if (category === "commerce") return "#22c55e";
   if (category === "timing") return "#60a5fa";
   return "#22d3ee";
+}
+
+function sameStringArray(left: string[], right: string[]) {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 function isBranchNodeType(type: ScriptVisualBuilderNodeType) {
