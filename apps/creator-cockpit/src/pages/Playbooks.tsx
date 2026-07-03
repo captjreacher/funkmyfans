@@ -106,6 +106,7 @@ type InspectorTab = "properties" | "validation" | "variables";
 type BuilderSession = {
   script: OfMessageScript;
   flow: ScriptVisualBuilderConfig;
+  loadedAt: number;
 };
 
 type FlowNodeData = {
@@ -120,8 +121,19 @@ type FlowNodeData = {
   validationMessage?: string;
   simulationState?: BuilderSimulationStepState;
   dimmed?: boolean;
+  routeSummary?: NodeRouteSummary[];
+  routeCollapsed?: boolean;
+  routeCount?: number;
   onInlineEdit?: (nodeId: string, patch: Partial<ScriptVisualBuilderNode>) => void;
   onQuickAdd?: (sourceNodeId: string, type: ScriptVisualBuilderNodeType, sourceHandle?: string | null) => void;
+  onToggleRoutes?: (nodeId: string) => void;
+};
+type NodeRouteSummary = {
+  key: string;
+  label: string;
+  destinationLabel: string;
+  destinationCount: number;
+  validationState: "valid" | "warning" | "error";
 };
 type FlowNodeValidationState = FlowNodeData["validationState"];
 type BuilderSimulationStepState = "pending" | "running" | "completed" | "waiting_queue" | "failed";
@@ -195,7 +207,13 @@ const quickStepTemplates: Array<{ label: string; type: ScriptVisualBuilderNodeTy
   { label: "End", type: "end" }
 ];
 
-export function Playbooks({ onOpenSimulations }: { onOpenSimulations?: (scriptId?: string) => void }) {
+export function Playbooks({
+  onOpenSimulations,
+  onOpenBuilder
+}: {
+  onOpenSimulations?: (scriptId?: string) => void;
+  onOpenBuilder?: () => void;
+}) {
   const [workspace, setWorkspace] = useState<ScriptsWorkspaceData | null>(null);
   const [tab, setTab] = useState<LibraryTab>("Template Library");
   const [builderSession, setBuilderSession] = useState<BuilderSession | null>(null);
@@ -222,7 +240,8 @@ export function Playbooks({ onOpenSimulations }: { onOpenSimulations?: (scriptId
         const script = result.scripts.find((item) => item.id === preferredId);
         if (script) {
           const detail = await fetchScript(script.id);
-          setBuilderSession({ script: detail.script, flow: flowFromConversationFlow(detail.script) });
+          onOpenBuilder?.();
+          setBuilderSession({ script: detail.script, flow: flowFromConversationFlow(detail.script), loadedAt: Date.now() });
         }
       }
       setError(null);
@@ -282,7 +301,8 @@ export function Playbooks({ onOpenSimulations }: { onOpenSimulations?: (scriptId
       });
       const result = await fetchScriptsWorkspace();
       setWorkspace(result);
-      setBuilderSession({ script: response.script, flow: flowFromConversationFlow(response.script) });
+      onOpenBuilder?.();
+      setBuilderSession({ script: response.script, flow: flowFromConversationFlow(response.script), loadedAt: Date.now() });
       setError(null);
     } catch (createError) {
       setError(errorMessage(createError, "Unable to create conversation flow"));
@@ -303,7 +323,7 @@ export function Playbooks({ onOpenSimulations }: { onOpenSimulations?: (scriptId
       const response = await saveScriptBuilder(session.script.id, compileBuilderFlow(session.script, flow));
       const nextScript = publish ? (await updateScript(response.script.id, { status: "active" })).script : response.script;
       await loadWorkspace(nextScript.id);
-      setBuilderSession({ script: nextScript, flow: flowFromConversationFlow(nextScript) });
+      setBuilderSession({ script: nextScript, flow: flowFromConversationFlow(nextScript), loadedAt: Date.now() });
       setError(null);
       return true;
     } catch (saveError) {
@@ -320,7 +340,7 @@ export function Playbooks({ onOpenSimulations }: { onOpenSimulations?: (scriptId
     try {
       const result = await updateScript(builderSession.script.id, { status });
       await loadWorkspace(result.script.id);
-      setBuilderSession({ script: result.script, flow: flowFromConversationFlow(result.script) });
+      setBuilderSession({ script: result.script, flow: flowFromConversationFlow(result.script), loadedAt: Date.now() });
       setError(null);
     } catch (statusError) {
       setError(errorMessage(statusError, "Unable to update flow status"));
@@ -332,7 +352,8 @@ export function Playbooks({ onOpenSimulations }: { onOpenSimulations?: (scriptId
   async function openBuilder(script: OfMessageScript) {
     try {
       const detail = await fetchScript(script.id);
-      setBuilderSession({ script: detail.script, flow: flowFromConversationFlow(detail.script) });
+      onOpenBuilder?.();
+      setBuilderSession({ script: detail.script, flow: flowFromConversationFlow(detail.script), loadedAt: Date.now() });
       setError(null);
     } catch (openError) {
       setError(errorMessage(openError, "Unable to open conversation flow"));
@@ -451,6 +472,7 @@ function ConversationFlowBuilder({
   const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
   const [historyPast, setHistoryPast] = useState<FlowHistorySnapshot[]>([]);
   const [historyFuture, setHistoryFuture] = useState<FlowHistorySnapshot[]>([]);
+  const [branchDisclosure, setBranchDisclosure] = useState<Record<string, boolean>>({});
   const [simulationDetail, setSimulationDetail] = useState<SimulationDetailData | null>(null);
   const [simulationQueueItem, setSimulationQueueItem] = useState<QueueWorkspaceItemSummary | null>(null);
   const [simulationBusy, setSimulationBusy] = useState<string | null>(null);
@@ -472,7 +494,7 @@ function ConversationFlowBuilder({
   );
   const deleteKeyCode = useMemo(() => ["Backspace", "Delete"], []);
   const multiSelectionKeyCode = useMemo(() => ["Shift"], []);
-  const builderGridTemplate = `${panelState.leftPanelOpen ? "250px " : ""}minmax(0,1fr)${panelState.inspectorOpen ? " 340px" : ""}`;
+  const builderGridTemplate = `${panelState.leftPanelOpen ? "250px " : ""}minmax(0,1fr)${panelState.inspectorOpen ? " 420px" : ""}`;
 
   const currentSnapshot = useCallback(
     (): FlowHistorySnapshot => ({
@@ -496,12 +518,23 @@ function ConversationFlowBuilder({
     setEdges(toReactFlowEdges(nextFlow));
     setSelectedNodeId(nextFlow.selectedNodeId ?? nextFlow.nodes[0]?.id ?? null);
     setSelectedEdgeIds([]);
+    setBranchDisclosure(
+      nextFlow.nodes.reduce((acc, node) => {
+        if (isBranchNodeType(node.type)) acc[node.id] = false;
+        return acc;
+      }, {} as Record<string, boolean>)
+    );
     setHistoryPast([]);
     setHistoryFuture([]);
     setSimulationDetail(null);
     setSimulationQueueItem(null);
     setSimulationError(null);
   }, [session.script]);
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => fitView({ padding: 0.12, duration: 350 }));
+    return () => window.cancelAnimationFrame(frame);
+  }, [fitView, session.loadedAt]);
 
   useEffect(() => {
     try {
@@ -603,6 +636,10 @@ function ConversationFlowBuilder({
     );
   }, [pushHistory, validation]);
 
+  const toggleBranchDisclosure = useCallback((nodeId: string) => {
+    setBranchDisclosure((current) => ({ ...current, [nodeId]: !current[nodeId] }));
+  }, []);
+
   function updateSelectedNode(patch: Partial<ScriptVisualBuilderNode>) {
     if (!selectedBuilderNode) return;
     pushHistory();
@@ -648,20 +685,27 @@ function ConversationFlowBuilder({
   }, [nodes, pushHistory, validation]);
 
   const renderedNodes = useMemo(
-    () =>
-      nodes.map((node) =>
-        withAuthoringData(
+    () => {
+      const nodeById = new Map(nodes.map((item) => [item.id, item]));
+      return nodes.map((node) => {
+        const routeSummary = routeSummaryForNode(node, flow.connections, validation, nodeById);
+        return withAuthoringData(
           node,
           validation,
           {
             onInlineEdit: updateNodeInline,
-            onQuickAdd: quickAddStep
+            onQuickAdd: quickAddStep,
+            onToggleRoutes: toggleBranchDisclosure,
+            routeSummary,
+            routeCollapsed: isBranchNodeType(node.data.type) ? !Boolean(branchDisclosure[node.id]) : false,
+            routeCount: routeSummary.length
           },
           simulationStates.get(node.id),
           Boolean(focusedPathNodeIds && !focusedPathNodeIds.has(node.id))
-        )
-      ),
-    [focusedPathNodeIds, nodes, quickAddStep, simulationStates, updateNodeInline, validation]
+        );
+      });
+    },
+    [branchDisclosure, flow.connections, flow.nodes, focusedPathNodeIds, nodes, quickAddStep, simulationStates, toggleBranchDisclosure, updateNodeInline, validation]
   );
   const renderedEdges = useMemo(
     () => edges.map((edge) => withEdgeFocusState(edge, focusedPathNodeIds)),
@@ -680,6 +724,14 @@ function ConversationFlowBuilder({
     setPanelState((current) => ({ ...current, inspectorOpen: true }));
   }, []);
 
+  const onBuilderNodeClick = useCallback((_: MouseEvent, node: FlowNode) => {
+    setSelectedNodeId(node.id);
+    setSelectedEdgeIds([]);
+    setInspectorTab("properties");
+    setEditingNodeId(node.id);
+    setPanelState((current) => (current.inspectorOpen ? current : { ...current, inspectorOpen: true }));
+  }, []);
+
   const onBuilderEdgeDoubleClick = useCallback((event: MouseEvent, edge: FlowEdge) => {
     event.preventDefault();
     pushHistory();
@@ -692,6 +744,14 @@ function ConversationFlowBuilder({
     const nextEdgeIds = selectedEdges.map((edge) => edge.id);
     setSelectedNodeId((current) => (current === nextNodeId ? current : nextNodeId));
     setSelectedEdgeIds((current) => (sameStringArray(current, nextEdgeIds) ? current : nextEdgeIds));
+    if (nextNodeId) {
+      setInspectorTab("properties");
+      setEditingNodeId(nextNodeId);
+      setPanelState((current) => (current.inspectorOpen ? current : { ...current, inspectorOpen: true }));
+    } else if (!nextEdgeIds.length) {
+      setEditingNodeId(null);
+      setPanelState((current) => ({ ...current, inspectorOpen: false }));
+    }
   }, []);
 
   const isValidBuilderConnection = useCallback(
@@ -899,14 +959,16 @@ function ConversationFlowBuilder({
       <div className="grid min-h-0 flex-1 overflow-hidden" style={{ gridTemplateColumns: builderGridTemplate }}>
         {panelState.leftPanelOpen ? <NodeLibrary onDragStart={handleDragStart} onAddNode={addNode} /> : null}
 
-        <section className="min-h-0 min-w-0 overflow-hidden bg-[#06111d]" onDrop={handleDrop} onDragOver={handleDragOver}>
+        <section className="relative min-h-[460px] min-w-0 overflow-hidden bg-[#06111d]" onDrop={handleDrop} onDragOver={handleDragOver}>
           <ReactFlow<FlowNode, FlowEdge>
+            className="h-full w-full"
             nodes={renderedNodes}
             edges={renderedEdges}
             nodeTypes={nodeTypes}
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
+            onNodeClick={onBuilderNodeClick}
             onNodeDragStart={onBuilderNodeDragStart}
             onNodeDoubleClick={onBuilderNodeDoubleClick}
             onEdgeDoubleClick={onBuilderEdgeDoubleClick}
@@ -932,6 +994,7 @@ function ConversationFlowBuilder({
             onUpdateNode={updateSelectedNode}
             editingNodeId={editingNodeId}
             onEditingHandled={() => setEditingNodeId(null)}
+            onClose={() => setPanelState((current) => ({ ...current, inspectorOpen: false }))}
           />
         ) : null}
       </div>
@@ -1046,7 +1109,8 @@ function Inspector({
   validation,
   onUpdateNode,
   editingNodeId,
-  onEditingHandled
+  onEditingHandled,
+  onClose
 }: {
   tab: InspectorTab;
   onTabChange: (tab: InspectorTab) => void;
@@ -1056,11 +1120,22 @@ function Inspector({
   onUpdateNode: (patch: Partial<ScriptVisualBuilderNode>) => void;
   editingNodeId: string | null;
   onEditingHandled: () => void;
+  onClose: () => void;
 }) {
   const nodeIssues = node ? validation.filter((issue) => issue.nodeId === node.id) : [];
   return (
     <aside className="min-h-0 overflow-y-auto border-l border-blue-500/18 bg-[#081524] p-4">
-      <div className="grid grid-cols-3 gap-1 rounded-lg border border-blue-500/18 bg-[#0D1B2A]/65 p-1">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="text-xs font-semibold uppercase tracking-[0.18em] text-cyan-200/80">Step Editor</div>
+          <div className="mt-1 text-sm text-blue-100/58">Edit the selected step without losing the canvas context.</div>
+        </div>
+        <button type="button" onClick={onClose} className="rounded-lg border border-blue-400/20 bg-[#102338]/72 px-3 py-2 text-xs font-semibold text-blue-50">
+          Close
+        </button>
+      </div>
+
+      <div className="mt-4 grid grid-cols-3 gap-1 rounded-lg border border-blue-500/18 bg-[#0D1B2A]/65 p-1">
         {(["properties", "validation", "variables"] as InspectorTab[]).map((item) => (
           <button key={item} type="button" onClick={() => onTabChange(item)} className={`rounded-md px-2 py-2 text-xs font-semibold capitalize ${tab === item ? "selected-glow text-white" : "text-blue-100/62"}`}>
             {item}
@@ -1207,45 +1282,167 @@ function PropertiesPanel({
     },
     [onFocusHandled, shouldFocusName]
   );
+  const updateConfig = (patch: Record<string, unknown>) => onUpdateNode({ config: { ...node.config, ...patch } });
+  const renderedAdvancedKeys = new Set<string>(["body", "approvalNote", "destination", "queueName", "conditionKey", "conditionValue", "delayMinutes", "scheduleLabel", "outcomeKey", "outcomeLabel", "terminalType", "price", "title"]);
+  const hasBodyField = ["message", "ask_question", "wait", "draft_reply", "generate_response", "analyse_conversation", "classify_intent", "pause"].includes(node.type);
+  const hasCommerceBody = node.type === "ppv_offer" || node.type === "bundle" || node.type === "custom_content" || node.type === "renew_subscription";
+  const hasOutcomeMetadata = node.type === "end" || node.type === "approve" || node.type === "assign" || node.type === "escalate" || node.type === "pause";
+  const hasTimingSettings = node.type === "delay" || node.type === "expiry" || node.type === "schedule" || node.type === "wait";
+  const hasRoutingSettings = node.type === "switch" || isBranchNodeType(node.type);
   return (
-    <div>
-      <div className="mt-4 flex items-center gap-3">
-        <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-cyan-300/10 text-cyan-200">
+    <div className="space-y-4">
+      <div className="mt-4 rounded-2xl border border-blue-500/15 bg-[#0D1B2A]/65 p-4">
+        <div className="flex items-center gap-3">
+          <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-cyan-300/10 text-cyan-200">
           <Icon className="h-5 w-5" aria-hidden="true" />
-        </span>
-        <div className="min-w-0">
-          <div className="truncate text-sm font-semibold text-white">{entry.label}</div>
-          <div className="truncate text-xs text-blue-100/52">{nodeCategoryLabels[entry.category]}</div>
+          </span>
+          <div className="min-w-0">
+            <div className="truncate text-sm font-semibold text-white">{entry.label}</div>
+            <div className="truncate text-xs text-blue-100/52">{nodeCategoryLabels[entry.category]}</div>
+          </div>
+        </div>
+        <div className="mt-3 rounded-full border border-blue-400/18 bg-[#102338]/72 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.12em] text-blue-100/80">
+          {node.type}
+        </div>
+        <Field label="Step name">
+          <input ref={nameInputRef} value={node.label} onChange={(event) => onUpdateNode({ label: event.target.value })} className="command-card w-full rounded-lg px-3 py-2 text-sm" />
+        </Field>
+      </div>
+
+      <div className="rounded-2xl border border-blue-500/15 bg-[#0D1B2A]/65 p-4">
+        <div className="text-xs font-semibold uppercase tracking-[0.16em] text-cyan-200/80">Content</div>
+        <div className="mt-3 space-y-4">
+          {hasBodyField ? (
+            <Field label={node.type === "ask_question" ? "Question prompt" : node.type === "draft_reply" ? "Draft prompt" : "Message / prompt"}>
+              <textarea
+                value={stringValue(node.config.body)}
+                onChange={(event) => updateConfig({ body: event.target.value })}
+                rows={8}
+                className="command-card w-full rounded-lg px-3 py-2 text-sm"
+              />
+            </Field>
+          ) : null}
+          {node.type === "ppv_offer" ? (
+            <div className="grid gap-4 md:grid-cols-2">
+              <Field label="Offer title">
+                <input value={stringValue(node.config.title)} onChange={(event) => updateConfig({ title: event.target.value })} className="command-card w-full rounded-lg px-3 py-2 text-sm" />
+              </Field>
+              <Field label="Price">
+                <input type="number" value={numberValue(node.config.price)} onChange={(event) => updateConfig({ price: Number(event.target.value) })} className="command-card w-full rounded-lg px-3 py-2 text-sm" />
+              </Field>
+              <Field label="Offer message">
+                <textarea value={stringValue(node.config.body)} onChange={(event) => updateConfig({ body: event.target.value })} rows={6} className="command-card w-full rounded-lg px-3 py-2 text-sm md:col-span-2" />
+              </Field>
+            </div>
+          ) : null}
+          {node.type === "approve" ? (
+            <Field label="Approval prompt">
+              <textarea value={stringValue(node.config.approvalNote)} onChange={(event) => updateConfig({ approvalNote: event.target.value })} rows={6} className="command-card w-full rounded-lg px-3 py-2 text-sm" />
+            </Field>
+          ) : null}
+          {hasCommerceBody && node.type !== "ppv_offer" ? (
+            <Field label="Commerce prompt">
+              <textarea value={stringValue(node.config.body)} onChange={(event) => updateConfig({ body: event.target.value })} rows={6} className="command-card w-full rounded-lg px-3 py-2 text-sm" />
+            </Field>
+          ) : null}
         </div>
       </div>
 
-      <div className="mt-4 text-xs font-semibold uppercase tracking-[0.16em] text-cyan-200/80">Step settings</div>
+      {hasRoutingSettings ? (
+        <div className="rounded-2xl border border-blue-500/15 bg-[#0D1B2A]/65 p-4">
+          <div className="text-xs font-semibold uppercase tracking-[0.16em] text-cyan-200/80">Routing</div>
+          <div className="mt-3 space-y-4">
+            {node.type === "switch" ? (
+              <>
+                <Field label="Routing variable">
+                  <input value={stringValue(node.config.conditionKey)} onChange={(event) => updateConfig({ conditionKey: event.target.value })} className="command-card w-full rounded-lg px-3 py-2 text-sm" />
+                </Field>
+                <SwitchRoutesPanel node={node} onUpdateNode={onUpdateNode} />
+              </>
+            ) : (
+              <div className="grid gap-4 md:grid-cols-2">
+                <Field label="Condition key">
+                  <input value={stringValue(node.config.conditionKey)} onChange={(event) => updateConfig({ conditionKey: event.target.value })} className="command-card w-full rounded-lg px-3 py-2 text-sm" />
+                </Field>
+                <Field label="Condition value">
+                  <input value={stringValue(node.config.conditionValue)} onChange={(event) => updateConfig({ conditionValue: event.target.value })} className="command-card w-full rounded-lg px-3 py-2 text-sm" />
+                </Field>
+              </div>
+            )}
+          </div>
+        </div>
+      ) : null}
 
-      <Field label="Step name">
-        <input ref={nameInputRef} value={node.label} onChange={(event) => onUpdateNode({ label: event.target.value })} className="command-card w-full rounded-lg px-3 py-2 text-sm" />
-      </Field>
+      {hasTimingSettings ? (
+        <div className="rounded-2xl border border-blue-500/15 bg-[#0D1B2A]/65 p-4">
+          <div className="text-xs font-semibold uppercase tracking-[0.16em] text-cyan-200/80">Timing</div>
+          <div className="mt-3 grid gap-4 md:grid-cols-2">
+            {node.type === "delay" || node.type === "expiry" ? (
+              <Field label={node.type === "expiry" ? "Expiry minutes" : "Delay minutes"}>
+                <input type="number" value={numberValue(node.config.delayMinutes)} onChange={(event) => updateConfig({ delayMinutes: Number(event.target.value) })} className="command-card w-full rounded-lg px-3 py-2 text-sm" />
+              </Field>
+            ) : null}
+            {node.type === "schedule" ? (
+              <Field label="Schedule label">
+                <input value={stringValue(node.config.scheduleLabel)} onChange={(event) => updateConfig({ scheduleLabel: event.target.value })} className="command-card w-full rounded-lg px-3 py-2 text-sm" />
+              </Field>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
 
-      {entry.configurationSchema.map((field) => (
-        <Field key={field.key} label={field.label}>
-          {field.input === "textarea" ? (
-            <textarea value={stringValue(node.config[field.key])} onChange={(event) => onUpdateNode({ config: { ...node.config, [field.key]: event.target.value } })} rows={5} className="command-card w-full rounded-lg px-3 py-2 text-sm" />
-          ) : field.input === "number" ? (
-            <input type="number" value={numberValue(node.config[field.key])} onChange={(event) => onUpdateNode({ config: { ...node.config, [field.key]: Number(event.target.value) } })} className="command-card w-full rounded-lg px-3 py-2 text-sm" />
-          ) : field.input === "select" ? (
-            <select value={stringValue(node.config[field.key])} onChange={(event) => onUpdateNode({ config: { ...node.config, [field.key]: event.target.value } })} className="command-card w-full rounded-lg px-3 py-2 text-sm">
-              {(field.options ?? []).map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-            </select>
-          ) : (
-            <input value={stringValue(node.config[field.key])} onChange={(event) => onUpdateNode({ config: { ...node.config, [field.key]: event.target.value } })} className="command-card w-full rounded-lg px-3 py-2 text-sm" />
-          )}
-        </Field>
-      ))}
+      {hasOutcomeMetadata ? (
+        <div className="rounded-2xl border border-blue-500/15 bg-[#0D1B2A]/65 p-4">
+          <div className="text-xs font-semibold uppercase tracking-[0.16em] text-cyan-200/80">Outcome</div>
+          <div className="mt-3 grid gap-4 md:grid-cols-3">
+            <Field label="Outcome key">
+              <input value={stringValue(node.config.outcomeKey)} onChange={(event) => updateConfig({ outcomeKey: event.target.value })} className="command-card w-full rounded-lg px-3 py-2 text-sm" />
+            </Field>
+            <Field label="Outcome label">
+              <input value={stringValue(node.config.outcomeLabel)} onChange={(event) => updateConfig({ outcomeLabel: event.target.value })} className="command-card w-full rounded-lg px-3 py-2 text-sm" />
+            </Field>
+            <Field label="Terminal type">
+              <input value={stringValue(node.config.terminalType)} onChange={(event) => updateConfig({ terminalType: event.target.value })} className="command-card w-full rounded-lg px-3 py-2 text-sm" />
+            </Field>
+          </div>
+        </div>
+      ) : null}
 
-      {node.type === "switch" ? <SwitchRoutesPanel node={node} onUpdateNode={onUpdateNode} /> : null}
+      <div className="rounded-2xl border border-blue-500/15 bg-[#0D1B2A]/65 p-4">
+        <details open={false}>
+          <summary className="cursor-pointer list-none text-xs font-semibold uppercase tracking-[0.16em] text-cyan-200/80">Advanced settings</summary>
+          <div className="mt-4 grid gap-4 md:grid-cols-2">
+            {entry.configurationSchema
+              .filter((field) => !renderedAdvancedKeys.has(field.key))
+              .map((field) => (
+                <Field key={field.key} label={field.label}>
+                  {field.input === "textarea" ? (
+                    <textarea value={stringValue(node.config[field.key])} onChange={(event) => updateConfig({ [field.key]: event.target.value })} rows={4} className="command-card w-full rounded-lg px-3 py-2 text-sm" />
+                  ) : field.input === "number" ? (
+                    <input type="number" value={numberValue(node.config[field.key])} onChange={(event) => updateConfig({ [field.key]: Number(event.target.value) })} className="command-card w-full rounded-lg px-3 py-2 text-sm" />
+                  ) : field.input === "select" ? (
+                    <select value={stringValue(node.config[field.key])} onChange={(event) => updateConfig({ [field.key]: event.target.value })} className="command-card w-full rounded-lg px-3 py-2 text-sm">
+                      {(field.options ?? []).map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input value={stringValue(node.config[field.key])} onChange={(event) => updateConfig({ [field.key]: event.target.value })} className="command-card w-full rounded-lg px-3 py-2 text-sm" />
+                  )}
+                </Field>
+              ))}
+          </div>
+        </details>
+      </div>
 
       {issues.length ? (
-        <div className="mt-4 space-y-2">
-          {issues.map((issue) => <IssueRow key={issue.message} issue={issue} />)}
+        <div className="space-y-2">
+          <div className="text-xs font-semibold uppercase tracking-[0.16em] text-cyan-200/80">Validation</div>
+          {issues.map((issue) => (
+            <IssueRow key={issue.message} issue={issue} />
+          ))}
         </div>
       ) : null}
     </div>
@@ -1297,68 +1494,97 @@ function FlowNodeCard({ id, data, selected }: NodeProps<FlowNode>) {
   const [quickAddHandle, setQuickAddHandle] = useState<string | null | false>(false);
   const validationTone = validationToneClass(data.validationState);
   const simulationClass = data.simulationState ? simulationNodeClass(data.simulationState) : "";
+  const routes = data.routeSummary ?? [];
+  const collapsed = data.routeCollapsed ?? (isBranch || isSwitch);
+  const visibleRoutes = collapsed ? routes.slice(0, Math.min(2, routes.length)) : routes;
+  const hiddenRouteCount = Math.max(0, routes.length - visibleRoutes.length);
   return (
-    <div className={`relative w-[260px] rounded-lg border p-3.5 shadow-[0_18px_48px_rgba(0,0,0,.28)] ${selected ? "border-cyan-300 bg-[#15314E]" : "border-blue-500/20 bg-[#0D1B2A]"} ${simulationClass} ${data.dimmed ? "opacity-25" : ""}`} style={{ borderTopColor: color, borderTopWidth: 3 }}>
+    <div
+      className={`relative w-[220px] rounded-2xl border border-blue-500/18 bg-[#0D1B2A] p-3 shadow-[0_18px_48px_rgba(0,0,0,.28)] ${selected ? "ring-2 ring-cyan-300/45" : ""} ${simulationClass} ${data.dimmed ? "opacity-30" : ""}`}
+      style={{ borderTopColor: color, borderTopWidth: 3 }}
+    >
       {canReceive ? <Handle type="target" position={Position.Left} className="!h-3 !w-3 !border-2 !border-[#06111d]" style={{ background: color }} /> : null}
-      <div className="flex items-center gap-2">
-        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md" style={{ background: `${color}24`, color }}>
+      <div className="flex items-start gap-2.5">
+        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg" style={{ background: `${color}1f`, color }}>
           <Icon className="h-4 w-4" aria-hidden="true" />
         </span>
-        <input
-          value={data.label}
-          onChange={(event) => data.onInlineEdit?.(id, { label: event.target.value })}
-          className="nodrag min-w-0 flex-1 rounded border border-transparent bg-transparent px-1 text-sm font-semibold text-white outline-none focus:border-cyan-300/50 focus:bg-[#06111d]/80"
-          aria-label="Step name"
-        />
-        <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase ${validationTone}`} title={data.validationMessage}>
-          {data.validationState}
-        </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-start justify-between gap-2">
+            <div className="min-w-0">
+              <div className="truncate text-sm font-semibold text-white">{data.label}</div>
+              <div className="truncate text-[11px] uppercase tracking-[0.12em] text-blue-100/56">{data.summary}</div>
+            </div>
+            <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase ${validationTone}`} title={data.validationMessage}>
+              {data.validationState}
+            </span>
+          </div>
+        </div>
       </div>
       {data.simulationState ? (
         <div className={`mt-2 rounded-md px-2 py-1 text-[11px] font-semibold uppercase tracking-[0.12em] ${simulationStateTone(data.simulationState)}`}>
           {data.simulationState.replaceAll("_", " ")}
         </div>
       ) : null}
-      <InlineStepEditor nodeId={id} data={data} />
-      {canSend && !isBranch ? (
-        <>
-          <Handle type="source" position={Position.Right} className="!h-3 !w-3 !border-2 !border-[#06111d]" style={{ background: color }} />
-          <QuickAddButton onClick={() => setQuickAddHandle(quickAddHandle === null ? false : null)} className="right-[-34px] top-1/2 -translate-y-1/2" />
-        </>
-      ) : null}
-      {canSend && isSwitch ? (
-        <>
-          <div className="mt-3 grid gap-1.5 text-[11px] font-semibold uppercase tracking-[0.08em]">
-            {routeCasesFromConfig(data.config).map((routeCase, index) => (
-              <div key={routeCase.key || `case-${index}`} className="relative">
-                <Handle id={routeCase.key} type="source" position={Position.Right} className="!h-3 !w-3 !border-2 !border-[#06111d]" style={{ top: 10 + index * 30, background: "#a78bfa" }} />
-                <button type="button" onClick={() => setQuickAddHandle(quickAddHandle === routeCase.key ? false : routeCase.key)} className="nodrag flex w-full items-center justify-between rounded-md border border-violet-400/20 bg-violet-500/10 px-2 py-1 text-violet-100">
-                  <span className="truncate">{routeCase.label || routeCase.key || "Route"}</span> <Plus className="h-3 w-3 shrink-0" aria-hidden="true" />
-                </button>
+      {canSend && isBranch ? (
+        <div className="mt-3 space-y-1.5">
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-blue-100/50">
+              {collapsed ? "Branch family collapsed" : "Branch family expanded"}
+            </div>
+            <button
+              type="button"
+              onClick={() => data.onToggleRoutes?.(id)}
+              className="nodrag rounded-full border border-blue-400/18 bg-[#102338]/72 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-blue-50 hover:border-cyan-300/35 hover:text-white"
+            >
+              {collapsed ? "Expand" : "Collapse"}
+            </button>
+          </div>
+          <div className="space-y-1.5">
+            {visibleRoutes.map((route, index) => (
+              <div key={route.key} className="relative flex items-center justify-between gap-2 rounded-lg border border-blue-500/14 bg-[#071423]/70 px-2 py-1.5">
+                <Handle
+                  id={route.key}
+                  type="source"
+                  position={Position.Right}
+                  className="!h-3 !w-3 !border-2 !border-[#06111d]"
+                  style={{ top: 16 + index * 54, background: route.validationState === "error" ? "#fb7185" : "#a78bfa" }}
+                />
+                <div className="min-w-0">
+                  <div className="truncate text-[11px] font-semibold text-white">{route.label}</div>
+                  <div className="truncate text-[10px] text-blue-100/52">
+                    {route.destinationCount > 1 ? `${route.destinationCount} destinations` : route.destinationLabel}
+                  </div>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase ${validationToneClass(route.validationState)}`}>
+                    {route.validationState}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setQuickAddHandle(quickAddHandle === route.key ? false : route.key)}
+                    className="nodrag rounded-full border border-cyan-300/20 bg-cyan-400/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-cyan-100 hover:bg-cyan-400/16"
+                  >
+                    + step
+                  </button>
+                </div>
               </div>
             ))}
-            <div className="relative">
-              <Handle id={fallbackRouteKey} type="source" position={Position.Right} className="!h-3 !w-3 !border-2 !border-[#06111d]" style={{ top: 10 + routeCasesFromConfig(data.config).length * 30, background: "#fb7185" }} />
-              <button type="button" onClick={() => setQuickAddHandle(quickAddHandle === fallbackRouteKey ? false : fallbackRouteKey)} className="nodrag flex w-full items-center justify-between rounded-md border border-rose-400/20 bg-rose-500/10 px-2 py-1 text-rose-100">
-                Fallback <Plus className="h-3 w-3 shrink-0" aria-hidden="true" />
-              </button>
-            </div>
+            {collapsed && hiddenRouteCount > 0 ? <div className="text-[11px] text-blue-100/52">+{hiddenRouteCount} more routes hidden</div> : null}
           </div>
-        </>
+        </div>
       ) : null}
-      {canSend && isBranch && !isSwitch ? (
-        <>
-          <Handle id="yes" type="source" position={Position.Right} className="!h-3 !w-3 !border-2 !border-[#06111d]" style={{ top: 26, background: "#22c55e" }} />
-          <Handle id="no" type="source" position={Position.Right} className="!h-3 !w-3 !border-2 !border-[#06111d]" style={{ top: 62, background: "#fb7185" }} />
-          <div className="mt-3 grid gap-2 text-[11px] font-semibold uppercase tracking-[0.08em]">
-            <button type="button" onClick={() => setQuickAddHandle(quickAddHandle === "yes" ? false : "yes")} className="nodrag flex items-center justify-between rounded-md border border-emerald-400/20 bg-emerald-500/10 px-2 py-1 text-emerald-100">
-              YES path <Plus className="h-3 w-3" aria-hidden="true" />
-            </button>
-            <button type="button" onClick={() => setQuickAddHandle(quickAddHandle === "no" ? false : "no")} className="nodrag flex items-center justify-between rounded-md border border-rose-400/20 bg-rose-500/10 px-2 py-1 text-rose-100">
-              {data.type === "switch" || data.type === "filter" ? "Fallback path" : "NO path"} <Plus className="h-3 w-3" aria-hidden="true" />
-            </button>
-          </div>
-        </>
+      {canSend && !isBranch ? (
+        <div className="mt-3 flex items-center justify-between gap-2">
+          <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-blue-100/50">Primary flow continues</div>
+          <Handle type="source" position={Position.Right} className="!h-3 !w-3 !border-2 !border-[#06111d]" style={{ background: color }} />
+          <button
+            type="button"
+            onClick={() => setQuickAddHandle(quickAddHandle === null ? false : null)}
+            className="nodrag rounded-full border border-cyan-300/20 bg-cyan-400/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-cyan-100 hover:bg-cyan-400/16"
+          >
+            + step
+          </button>
+        </div>
       ) : null}
       {quickAddHandle !== false ? (
         <QuickAddMenu
@@ -1553,12 +1779,12 @@ function buildFlowEdge(connection: FlowEdgeInput): FlowEdge {
     type: "smoothstep",
     label: displayLabel,
     data: { label },
-    style: { stroke: "rgba(34,211,238,.82)", strokeWidth: 2 },
+    style: { stroke: "rgba(34,211,238,.58)", strokeWidth: 1.7 },
     labelBgPadding: [8, 4],
     labelBgBorderRadius: 6,
     labelBgStyle: { fill: "rgba(8,21,36,.94)", stroke: "rgba(34,211,238,.28)" },
-    labelStyle: { fill: "#dff8ff", fontSize: 12, fontWeight: 700 },
-    markerEnd: { type: MarkerType.ArrowClosed, color: "rgba(34,211,238,.82)" }
+    labelStyle: { fill: "#dff8ff", fontSize: 11, fontWeight: 700 },
+    markerEnd: { type: MarkerType.ArrowClosed, color: "rgba(34,211,238,.58)" }
   };
 }
 
@@ -1573,7 +1799,7 @@ function cloneEdges(edges: FlowEdge[]) {
 function withAuthoringData(
   node: FlowNode,
   validation: FlowValidationIssue[],
-  handlers: Pick<FlowNodeData, "onInlineEdit" | "onQuickAdd">,
+  handlers: Pick<FlowNodeData, "onInlineEdit" | "onQuickAdd" | "onToggleRoutes"> & Pick<FlowNodeData, "routeSummary" | "routeCollapsed" | "routeCount">,
   simulationState?: BuilderSimulationStepState,
   dimmed = false
 ): FlowNode {
@@ -1778,10 +2004,10 @@ function authoringStepTemplate(type: ScriptVisualBuilderNodeType): { label?: str
 }
 
 function arrangeFlowNodes(nodes: FlowNode[], edges: FlowEdge[]) {
-  const columnWidth = 360;
-  const rowHeight = 190;
-  const left = 80;
-  const top = 120;
+  const columnWidth = 420;
+  const rowHeight = 230;
+  const left = 120;
+  const top = 140;
   const byId = new Map(nodes.map((node) => [node.id, node]));
   const outgoing = buildOutgoingEdges(edges, byId);
   const incoming = buildIncomingEdges(edges, byId);
@@ -1961,7 +2187,69 @@ function nodeSummary(node: ScriptVisualBuilderNode) {
   if (node.type === "approve") return stringValue(node.config.destination) || "Approval required";
   if (node.type === "assign" || node.type === "escalate") return stringValue(node.config.queueName) || "Queue";
   if (node.type === "end") return stringValue(node.config.outcomeLabel) || stringValue(node.config.outcomeKey) || "Complete";
-  return stringValue(node.config.body) || stringValue(node.config.title) || "Configured step";
+  if (node.type === "ppv_offer") return `${stringValue(node.config.title) || "PPV offer"} | $${numberValue(node.config.price) || 0}`;
+  if (node.type === "message" || node.type === "ask_question" || node.type === "wait" || node.type === "draft_reply" || node.type === "generate_response" || node.type === "analyse_conversation" || node.type === "classify_intent") {
+    return "Content configured";
+  }
+  return "Configured step";
+}
+
+function routeSummaryForNode(
+  node: FlowNode,
+  connections: ScriptVisualBuilderConnection[],
+  validation: FlowValidationIssue[],
+  nodeById: Map<string, FlowNode>
+) {
+  if (!isBranchNodeType(node.data.type)) return [];
+
+  const targetLabelFor = (targetId: string) => nodeById.get(targetId)?.data.label ?? "Unwired";
+  const connectionLabelMatches = (routeKey: string) => connections.filter((connection) => connection.from === node.id && (connection.label === routeKey || connection.id === routeKey));
+
+  const routeItems: NodeRouteSummary[] =
+    node.data.type === "switch"
+      ? [
+          ...routeCasesFromConfig(node.data.config).map((routeCase) => {
+            const matches = connectionLabelMatches(routeCase.key);
+            const destinations = matches.map((connection) => targetLabelFor(connection.to));
+            return {
+              key: routeCase.key || fallbackRouteKey,
+              label: routeCase.label || routeCase.key || "Route",
+              destinationLabel: destinations.length ? destinations[0] : "Unwired",
+              destinationCount: destinations.length || 0,
+              validationState: matches.length && destinations.length ? "valid" : "warning"
+            } satisfies NodeRouteSummary;
+          }),
+          {
+            key: fallbackRouteKey,
+            label: "Fallback",
+            destinationLabel: targetLabelFor((connections.find((connection) => connection.from === node.id && connection.label === fallbackRouteKey) ?? { to: "" }).to),
+            destinationCount: connections.some((connection) => connection.from === node.id && connection.label === fallbackRouteKey) ? 1 : 0,
+            validationState: connections.some((connection) => connection.from === node.id && connection.label === fallbackRouteKey) ? "valid" : "warning"
+          } satisfies NodeRouteSummary
+        ]
+      : [
+          {
+            key: "yes",
+            label: "YES path",
+            destinationLabel: targetLabelFor((connections.find((connection) => connection.from === node.id && connection.label === "yes") ?? { to: "" }).to),
+            destinationCount: connections.some((connection) => connection.from === node.id && connection.label === "yes") ? 1 : 0,
+            validationState: connections.some((connection) => connection.from === node.id && connection.label === "yes") ? "valid" : "warning"
+          } satisfies NodeRouteSummary,
+          {
+            key: "no",
+            label: node.data.type === "filter" ? "Fallback path" : "NO path",
+            destinationLabel: targetLabelFor((connections.find((connection) => connection.from === node.id && (connection.label === "no" || connection.label === fallbackRouteKey)) ?? { to: "" }).to),
+            destinationCount: connections.some((connection) => connection.from === node.id && (connection.label === "no" || connection.label === fallbackRouteKey)) ? 1 : 0,
+            validationState: connections.some((connection) => connection.from === node.id && (connection.label === "no" || connection.label === fallbackRouteKey)) ? "valid" : "warning"
+          } satisfies NodeRouteSummary
+        ];
+
+  const nodeIssues = validation.filter((issue) => issue.nodeId === node.id);
+  const hasError = nodeIssues.some((issue) => issue.severity === "error");
+  return routeItems.map((route) => ({
+    ...route,
+    validationState: hasError ? "error" : route.validationState
+  }));
 }
 
 function SwitchRoutesPanel({ node, onUpdateNode }: { node: ScriptVisualBuilderNode; onUpdateNode: (patch: Partial<ScriptVisualBuilderNode>) => void }) {
@@ -2028,10 +2316,10 @@ function edgeDisplayLabel(label?: string) {
 }
 
 function routeHandleOffset(config: Record<string, unknown>, sourceHandle?: string | null) {
-  if (!sourceHandle || sourceHandle === "yes") return -110;
-  if (sourceHandle === "no" || sourceHandle === fallbackRouteKey) return 110;
+  if (!sourceHandle || sourceHandle === "yes") return -130;
+  if (sourceHandle === "no" || sourceHandle === fallbackRouteKey) return 130;
   const index = routeCasesFromConfig(config).findIndex((routeCase) => routeCase.key === sourceHandle);
-  return index >= 0 ? (index - 1) * 110 : 0;
+  return index >= 0 ? (index - 1) * 130 : 0;
 }
 
 function historyOutcomeLabel(payload: unknown) {
@@ -2120,23 +2408,11 @@ function collectDescendants(nodeId: string, outgoing: Map<string, FlowEdge[]>, f
 }
 
 function readBuilderPanelState(): BuilderPanelState {
-  const fallback: BuilderPanelState = {
+  return {
     leftPanelOpen: false,
     inspectorOpen: false,
     simulationPanelOpen: false
   };
-  try {
-    const stored = window.localStorage.getItem(builderPanelStorageKey);
-    if (!stored) return fallback;
-    const parsed = JSON.parse(stored) as Partial<BuilderPanelState>;
-    return {
-      leftPanelOpen: typeof parsed.leftPanelOpen === "boolean" ? parsed.leftPanelOpen : fallback.leftPanelOpen,
-      inspectorOpen: typeof parsed.inspectorOpen === "boolean" ? parsed.inspectorOpen : fallback.inspectorOpen,
-      simulationPanelOpen: typeof parsed.simulationPanelOpen === "boolean" ? parsed.simulationPanelOpen : fallback.simulationPanelOpen
-    };
-  } catch {
-    return fallback;
-  }
 }
 
 function isBranchNodeType(type: ScriptVisualBuilderNodeType) {

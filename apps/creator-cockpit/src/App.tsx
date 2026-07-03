@@ -190,7 +190,7 @@ export function App() {
 
                 {view === "queue" ? <Queue /> : null}
 
-                {view === "playbooks" ? <Playbooks onOpenSimulations={openSimulations} /> : null}
+                {view === "playbooks" ? <Playbooks onOpenSimulations={openSimulations} onOpenBuilder={() => setSidebarCollapsed(true)} /> : null}
 
                 {view === "journeys" ? <Journeys /> : null}
 
