@@ -806,6 +806,9 @@ export interface ScriptWorkspaceApprovalConfig {
 export interface ScriptWorkspaceConfig {
   templateKey?: string;
   styleKey?: string;
+  archetypeKey?: string;
+  archetypeSource?: string;
+  templateVersion?: string;
   archivedAt?: string | null;
   execution?: ScriptWorkspaceExecutionConfig;
   ai?: ScriptWorkspaceAiConfig;

@@ -181,20 +181,22 @@ export function flowFromConversationFlow(script: OfMessageScript): ScriptVisualB
       }
     })
   );
-  const end = normalizeNode({
-    id: "end",
-    type: "end",
-    label: "End",
-    category: "conversation",
-    x: 360 + Math.max(stepNodes.length, 1) * 280,
-    y: 220,
-    config: { outcome: "complete" }
-  });
+  const end = stepNodes.some((node) => node.type === "end")
+    ? null
+    : normalizeNode({
+        id: "end",
+        type: "end",
+        label: "End",
+        category: "conversation",
+        x: 360 + Math.max(stepNodes.length, 1) * 280,
+        y: 220,
+        config: { outcomeKey: "complete", outcomeLabel: "Complete", terminalType: "completed" }
+      });
 
   return {
     schemaVersion: 1,
     selectedNodeId: "trigger",
-    nodes: [trigger, ...stepNodes, end],
+    nodes: end ? [trigger, ...stepNodes, end] : [trigger, ...stepNodes],
     connections: connectionsFromScript(script),
     viewport: { x: 0, y: 0, zoom: 0.9 }
   };

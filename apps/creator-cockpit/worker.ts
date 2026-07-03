@@ -3187,6 +3187,7 @@ async function ensureAgencySeedLibrary(supabase: SupabaseClient, creators: OfCre
 async function ensureSeedMessageScript(supabase: SupabaseClient, creatorId: string, template: MessageScriptTemplate) {
   const existing = await findCreatorScriptByName(supabase, creatorId, template.name);
   if (existing?.id) {
+    await refreshSeedMessageScriptIfOutdated(supabase, String(existing.id), template);
     await ensureSeedScriptStepsIfMissing(supabase, String(existing.id), template);
     return existing;
   }
@@ -3200,6 +3201,31 @@ async function ensureSeedMessageScript(supabase: SupabaseClient, creatorId: stri
     await ensureSeedScriptStepsIfMissing(supabase, String(racedExisting.id), template);
     return racedExisting;
   }
+}
+
+async function refreshSeedMessageScriptIfOutdated(supabase: SupabaseClient, scriptId: string, template: MessageScriptTemplate) {
+  const templateKey = template.builderConfig?.workspace?.templateKey;
+  const templateVersion = template.builderConfig?.workspace?.templateVersion;
+  if (templateKey !== "new_subscriber_funnel" || !templateVersion) return;
+
+  const existing = await supabase.from("of_message_scripts").select("id, builder_config").eq("id", scriptId).single();
+  assertNoError(existing.error);
+  const builderConfig = normalizeBuilderConfig(existing.data?.builder_config);
+  if (builderConfig.workspace?.templateKey !== templateKey) return;
+  if (builderConfig.workspace?.templateVersion === templateVersion) {
+    const existingSteps = await supabase.from("of_message_script_steps").select("id").eq("script_id", scriptId);
+    assertNoError(existingSteps.error);
+    if ((existingSteps.data ?? []).length >= template.steps.length) return;
+  }
+
+  const deleted = await supabase.from("of_message_script_steps").delete().eq("script_id", scriptId);
+  assertNoError(deleted.error);
+  try {
+    await insertScriptTemplateSteps(supabase, scriptId, template.steps);
+  } catch (error) {
+    if (!isDuplicateKeyError(error)) throw error;
+  }
+  await updateMessageScript(supabase, scriptId, template as unknown as Record<string, unknown>);
 }
 
 async function findCreatorScriptByName(supabase: SupabaseClient, creatorId: string, name: string) {
@@ -3397,84 +3423,177 @@ function automationRuleSeeds() {
   ];
 }
 
+function newSubscriberFunnelTemplate(): MessageScriptTemplate {
+  const routeCases = [
+    ["warm_enthusiastic", "Warm / enthusiastic", "warm_reflect"],
+    ["short_low_effort", "Short / low effort", "short_prompt"],
+    ["compliment", "Compliment", "compliment_prompt"],
+    ["flirtatious", "Flirtatious", "flirt_prompt"],
+    ["curious_about_creator", "Curious about creator", "curious_prompt"],
+    ["asks_for_content", "Asks for content", "content_prompt"],
+    ["purchase_intent", "Purchase intent", "purchase_offer"],
+    ["price_objection", "Price objection", "price_response"],
+    ["not_ready", "Not ready", "not_ready_response"],
+    ["silent_no_reply", "Silent / no reply", "silence_followup_one"],
+    ["boundary_testing", "Boundary testing", "boundary_redirect"],
+    ["explicit_or_unsupported_request", "Explicit or unsupported", "boundary_redirect"],
+    ["off_topic", "Fallback / off-topic", "off_topic_redirect"],
+    ["no_interest_disengaged", "No interest / disengaged", "closed_message"]
+  ] as const;
+  const followUpCases = [
+    ["shares_preference", "Shares preference", "relationship_wrap"],
+    ["warm_enthusiastic", "Warm / enthusiastic", "relationship_wrap"],
+    ["compliment", "Compliment", "relationship_wrap"],
+    ["flirtatious", "Flirtatious", "relationship_wrap"],
+    ["curious_about_creator", "Curious about creator", "subscription_wrap"],
+    ["asks_for_content", "Asks for content", "content_wrap"],
+    ["purchase_intent", "Purchase intent", "purchase_offer"],
+    ["one_to_one_request", "One-to-one request", "one_to_one_wrap"],
+    ["price_objection", "Price objection", "price_response"],
+    ["not_ready", "Not ready", "not_ready_response"],
+    ["boundary_testing", "Boundary testing", "boundary_redirect"],
+    ["explicit_or_unsupported_request", "Explicit or unsupported", "boundary_redirect"],
+    ["short_low_effort", "Still low effort", "low_effort_exit"],
+    ["off_topic", "Still off-topic", "off_topic_exit"],
+    ["silent_no_reply", "Silent / no reply", "silence_followup_two"],
+    ["no_interest_disengaged", "No interest / disengaged", "closed_message"]
+  ] as const;
+  const offerCases = [
+    ["purchase_intent", "Accepts offer", "ppv_interest_wrap"],
+    ["one_to_one_request", "One-to-one request", "one_to_one_wrap"],
+    ["price_objection", "Price objection", "price_response"],
+    ["not_ready", "Not ready", "not_ready_response"],
+    ["boundary_testing", "Boundary testing", "boundary_redirect"],
+    ["explicit_or_unsupported_request", "Explicit or unsupported", "boundary_redirect"],
+    ["no_interest_disengaged", "No interest / disengaged", "closed_message"]
+  ] as const;
+
+  return seedTemplate({
+    key: "new_subscriber_funnel",
+    name: "New Subscriber Funnel",
+    description: "Girl Next Door baseline flow for welcoming a new subscriber, routing response classes, and ending in explicit relationship, conversion, nurture, no-response, closed, or human-review outcomes.",
+    triggerEventType: "subscriber_created",
+    category: "Revenue",
+    tags: ["seed", "new-subscriber", "girl-next-door", "response-routing", "reference-flow"],
+    execution: { mode: "immediate" },
+    ai: { mode: "draft_only" },
+    approval: { mode: "always_approve" },
+    variables: [
+      variable("subscriber_name", "Subscriber Name", "there"),
+      variable("creator_name", "Creator Name", "MoonSiren"),
+      variable("archetype_key", "Archetype Key", "girl_next_door"),
+      variable("response_class", "Response Class", ""),
+      variable("next_response_class", "Next Response Class", ""),
+      variable("starter_ppv_title", "Starter PPV Title", "Starter PPV"),
+      variable("starter_ppv_price", "Starter PPV Price", "19")
+    ],
+    workspace: {
+      archetypeKey: "girl_next_door",
+      archetypeSource: "nsp_1_baseline",
+      templateVersion: "nsp-4"
+    },
+    steps: [
+      nspQuestion("opening_welcome", "Opening Welcome", "Hey {{subscriber_name}}, I am glad you made it in. What kind of mood should I start you with: sweet, playful, or a little teasing?", "classify_initial"),
+      nspClassify("classify_initial", "Classify Initial Reply", "response_class", "route_initial"),
+      nspBranch("route_initial", "Route Initial Response", "response_class", routeCases, "off_topic_redirect"),
+      nspQuestion("warm_reflect", "Warm Response", "That is sweet. I like when someone actually says hi instead of just disappearing into the page. What pulled you in first?", "classify_followup"),
+      nspQuestion("short_prompt", "Low-Effort Rescue", "Hey you. I will make it easy: are you here to look around, flirt a little, or find something extra?", "classify_followup"),
+      nspQuestion("compliment_prompt", "Compliment Response", "That is really sweet. Now I am curious what caught your eye first.", "classify_followup"),
+      nspQuestion("flirt_prompt", "Flirt Response", "Careful, I might start liking the attention. Are you more into sweet flirting or being teased a little?", "classify_followup"),
+      nspQuestion("curious_prompt", "Curious About Creator", "I am usually sweet with a teasing streak. I like making this feel more personal than just scrolling. What kind of attention do you like getting?", "classify_followup"),
+      nspQuestion("content_prompt", "Content Discovery", "I can steer you. Do you want something soft and cute first, something playful, or are you looking for an extra little treat?", "classify_followup"),
+      nspQuestion("off_topic_redirect", "Fallback Redirect", "You came in sideways with that one. I am still going to ask: are you here to chat, browse, or find something extra?", "classify_followup"),
+      nspClassify("classify_followup", "Classify Follow-up Reply", "next_response_class", "route_followup"),
+      nspBranch("route_followup", "Route Follow-up Response", "next_response_class", followUpCases, "off_topic_exit"),
+      nspQuestion("purchase_offer", "Soft Purchase Offer", "I do have a welcome treat I can send over. It is {{starter_ppv_title}} for ${{starter_ppv_price}} if you want something extra to start with.", "classify_offer_reply", { ppvTitle: "Starter PPV", ppvPrice: 19 }),
+      nspClassify("classify_offer_reply", "Classify Offer Reply", "next_response_class", "route_offer_reply"),
+      nspBranch("route_offer_reply", "Route Offer Reply", "next_response_class", offerCases, "conversion_wrap"),
+      nspMessage("relationship_wrap", "Relationship Building", "I like that. Start with the vibe that pulled you in, then tell me what you want more of. I like being pointed in the right direction.", "end_engaged_relationship"),
+      nspMessage("content_wrap", "Profile / Content Exploration", "Start with the vibe that caught your eye, then tell me what kind of thing would actually feel worth it for you.", "end_profile_content_exploration"),
+      nspMessage("subscription_wrap", "Subscription Value", "If you like a personal little back-and-forth, staying close here is the best part. Tell me what would make this feel fun for you.", "end_subscription_upsell_opportunity"),
+      nspMessage("conversion_wrap", "Conversion Opportunity", "That sounds like something I can help with. I will keep it easy and not rush you.", "end_conversion_opportunity_detected"),
+      nspMessage("ppv_interest_wrap", "PPV Interest", "Perfect. I will treat that as your cue for the welcome extra and keep it simple.", "end_ppv_interest"),
+      nspMessage("one_to_one_wrap", "One-to-One Bridge", "If you want something more personal, tell me the mood and I can see what makes sense. I may need to check the details before promising anything.", "end_one_to_one_opportunity"),
+      nspMessage("price_response", "Price Objection", "No stress. I would rather you enjoy being here than feel pushed. Look around first, and if you want something extra later, just tell me.", "end_nurture_later"),
+      nspMessage("not_ready_response", "Not Ready", "That is fine. Look around a little and come back when something catches you. I am curious what you end up liking.", "end_nurture_later"),
+      nspMessage("low_effort_exit", "Repeated Low Effort", "I will not make you do homework. Have a look around, and if something catches you, come tell me.", "end_closed_disengaged"),
+      nspMessage("off_topic_exit", "Off-topic Soft Exit", "I will let you wander for a bit. Come back when you know what mood you want from me.", "end_nurture_later"),
+      nspQuestion("silence_followup_one", "First No-response Follow-up", "You went quiet on me a little. Should I leave you to explore, or do you want me to point you somewhere fun?", "classify_silence_reply"),
+      nspClassify("classify_silence_reply", "Classify Silence Reply", "next_response_class", "route_silence_reply"),
+      nspBranch("route_silence_reply", "Route Silence Reply", "next_response_class", followUpCases, "silence_followup_two"),
+      nspMessage("silence_followup_two", "Second No-response Follow-up", "I will not chase you. I will keep the good stuff here for when you feel like coming back.", "end_no_response"),
+      nspQuestion("boundary_redirect", "Boundary Redirect", "I cannot do that, but we can keep it fun another way. Tell me the vibe you want and I will stay within what is okay here.", "classify_boundary_reply"),
+      nspClassify("classify_boundary_reply", "Classify Boundary Reply", "next_response_class", "route_boundary_reply"),
+      nspBranch("route_boundary_reply", "Route Boundary Reply", "next_response_class", [
+        ["shares_preference", "Respects boundary", "content_wrap"],
+        ["flirtatious", "Safe flirting", "relationship_wrap"],
+        ["asks_for_content", "Safe content ask", "content_wrap"],
+        ["boundary_testing", "Boundary repeated", "boundary_pause"],
+        ["explicit_or_unsupported_request", "Unsupported repeated", "boundary_pause"],
+        ["no_interest_disengaged", "No interest", "closed_message"]
+      ] as const, "boundary_pause"),
+      nspMessage("boundary_pause", "Human Review Pause", "I already said I cannot go there. I am going to pause this instead of pushing it.", "end_human_review_required"),
+      nspMessage("closed_message", "Closed / Disengaged", "All good. I will leave you be. You can always come back if you change your mind.", "end_closed_disengaged"),
+      nspEnd("end_engaged_relationship", "engaged_relationship", "Engaged relationship", "completed"),
+      nspEnd("end_profile_content_exploration", "profile_content_exploration", "Profile / content exploration", "completed"),
+      nspEnd("end_conversion_opportunity_detected", "conversion_opportunity_detected", "Conversion opportunity detected", "completed"),
+      nspEnd("end_ppv_interest", "ppv_interest", "PPV interest", "completed"),
+      nspEnd("end_subscription_upsell_opportunity", "subscription_upsell_opportunity", "Subscription upsell opportunity", "completed"),
+      nspEnd("end_one_to_one_opportunity", "one_to_one_opportunity", "One-to-one opportunity", "handoff"),
+      nspEnd("end_nurture_later", "nurture_later", "Nurture later", "completed"),
+      nspEnd("end_no_response", "no_response", "No response", "completed"),
+      nspEnd("end_closed_disengaged", "closed_disengaged", "Closed / disengaged", "completed"),
+      nspEnd("end_human_review_required", "human_review_required", "Human review required", "handoff")
+    ]
+  });
+}
+
+function nspMessage(id: string, label: string, body: string, nextStepId: string, extra?: Pick<ScriptBuilderStepMetadata, "ppvTitle" | "ppvPrice">): ScriptStepTemplate {
+  return { id, type: "message", order: 0, body, nextStepId, metadata: { kind: "send_message", nodeKey: id, label, ...extra } };
+}
+
+function nspQuestion(id: string, label: string, body: string, nextStepId: string, extra?: Pick<ScriptBuilderStepMetadata, "ppvTitle" | "ppvPrice">): ScriptStepTemplate {
+  return { id, type: "question", order: 0, body, nextStepId, metadata: { kind: "ask_question", nodeKey: id, label, ...extra } };
+}
+
+function nspClassify(id: string, label: string, variableKey: string, nextStepId: string): ScriptStepTemplate {
+  return { id, type: "set_variable", order: 0, body: "Classify subscriber reply using the New Subscriber response-class map.", nextStepId, metadata: { kind: "set_variable", nodeKey: id, label, variableKey, variableValue: "__classify_nsp_response__" } };
+}
+
+function nspBranch(
+  id: string,
+  label: string,
+  variableKey: string,
+  cases: ReadonlyArray<readonly [string, string, string]>,
+  fallbackStepId: string
+): ScriptStepTemplate {
+  return {
+    id,
+    type: "branch",
+    order: 0,
+    body: `Route by ${variableKey}.`,
+    fallbackStepId,
+    metadata: {
+      kind: "branch",
+      nodeKey: id,
+      label,
+      branchRules: cases.map(([key, caseLabel, nextStepId]) => ({
+        id: `${id}_${key}`,
+        label: caseLabel,
+        condition: condition("variable", variableKey, "equals", key),
+        nextStepId
+      }))
+    }
+  };
+}
+
+function nspEnd(id: string, outcomeKey: string, outcomeLabel: string, terminalType: string): ScriptStepTemplate {
+  return { id, type: "end", order: 0, body: "", metadata: { kind: "end_conversation", nodeKey: id, label: outcomeLabel, outcomeKey, outcomeLabel, terminalType } };
+}
+
 function agencySeedLibrary(): MessageScriptTemplate[] {
   return [
-    seedTemplate({
-      key: "new_subscriber_funnel",
-      name: "New Subscriber Funnel",
-      description: "Production reference flow for welcoming a new subscriber, handling AI confidence approval, offering PPV, and completing on purchase outcome.",
-      triggerEventType: "subscriber_created",
-      category: "Revenue",
-      tags: ["seed", "new-subscriber", "revenue", "ppv", "reference-flow"],
-      execution: { mode: "immediate" },
-      ai: { mode: "auto_send" },
-      approval: { mode: "never_approve" },
-      variables: [
-        variable("subscriber_name", "Subscriber Name", "there"),
-        variable("creator_signature", "Creator Signature", "xo"),
-        variable("starter_ppv_title", "Starter PPV Title", "Starter PPV"),
-        variable("starter_ppv_price", "Starter PPV Price", "19")
-      ],
-      steps: [
-        { id: "welcome_message", type: "message", order: 0, body: "Hey {{subscriber_name}}. I love seeing a new name come in. You picked a fun time to join me.", nextStepId: "short_wait", metadata: { kind: "send_message", nodeKey: "welcome_message", label: "Welcome Message" } },
-        { id: "short_wait", type: "wait", order: 1, body: "Wait before asking the engagement question.", delayMinutes: 2, nextStepId: "engagement_question", metadata: { kind: "wait", nodeKey: "short_wait", label: "Wait" } },
-        { id: "engagement_question", type: "question", order: 2, body: "What kind of vibe do you want most from me first: playful, teasing, or something more personal?", nextStepId: "interpret_reply", metadata: { kind: "ask_question", nodeKey: "engagement_question", label: "Ask Engagement Question" } },
-        { id: "interpret_reply", type: "set_variable", order: 3, body: "Interpret subscriber reply.", nextStepId: "ai_draft", metadata: { kind: "set_variable", nodeKey: "interpret_reply", label: "Interpret Reply", variableKey: "ai_confidence", variableValue: "__derive_from_last_reply__" } },
-        { id: "ai_draft", type: "set_variable", order: 4, body: "Draft AI reply from the subscriber response.", nextStepId: "confidence_check", metadata: { kind: "set_variable", nodeKey: "ai_draft", label: "AI Draft", variableKey: "ai_draft_reply", variableValue: "__draft_from_last_reply__" } },
-        {
-          id: "confidence_check",
-          type: "branch",
-          order: 5,
-          body: "Route by AI confidence.",
-          nextStepId: "auto_reply",
-          fallbackStepId: "approval_reply",
-          metadata: {
-            kind: "branch",
-            nodeKey: "confidence_check",
-            label: "Confidence Check",
-            branchRules: [
-              { id: "high_confidence", label: "High Confidence", condition: condition("variable", "ai_confidence", "gte", "75"), nextStepId: "auto_reply" }
-            ]
-          }
-        },
-        { id: "auto_reply", type: "message", order: 6, body: "{{ai_draft_reply}}", nextStepId: "ppv_offer", metadata: { kind: "send_message", nodeKey: "auto_reply", label: "Auto Send", messageGenerationMode: "ai_generated" } },
-        { id: "approval_reply", type: "message", order: 7, body: "{{ai_draft_reply}}", nextStepId: "ppv_offer", metadata: { kind: "send_message", nodeKey: "approval_reply", label: "Human Approval", messageGenerationMode: "ai_generated", notes: "Approve AI Reply" } },
-        {
-          id: "ppv_offer",
-          type: "message",
-          order: 8,
-          body: "I can send you my {{starter_ppv_title}} for ${{starter_ppv_price}} if you want a little welcome treat.",
-          nextStepId: "purchase_check",
-          metadata: {
-            kind: "send_message",
-            nodeKey: "ppv_offer",
-            label: "Offer PPV",
-          ppvTitle: "Starter PPV",
-          ppvPrice: 19
-          }
-        },
-        { id: "purchase_check", type: "wait", order: 9, body: "Wait for PPV purchase result.", nextStepId: "purchased_branch", metadata: { kind: "wait", nodeKey: "purchase_check", label: "Purchase Check", waitForPurchase: true } },
-        {
-          id: "purchased_branch",
-          type: "branch",
-          order: 10,
-          body: "Purchased?",
-          nextStepId: "follow_up",
-          fallbackStepId: "follow_up",
-          metadata: {
-            kind: "branch",
-            nodeKey: "purchased_branch",
-            label: "Purchased?",
-            branchRules: [
-              { id: "purchased_yes", label: "YES", condition: condition("variable", "purchase_status", "equals", "purchased"), nextStepId: "deliver_content" }
-            ]
-          }
-        },
-        { id: "deliver_content", type: "message", order: 11, body: "Perfect. I unlocked it for you. Enjoy this one and tell me which part got your attention.", nextStepId: "end", metadata: { kind: "send_message", nodeKey: "deliver_content", label: "Deliver Content" } },
-        { id: "follow_up", type: "follow_up", order: 12, body: "No pressure. I will keep the welcome treat ready if you decide you want it.", nextStepId: "end", metadata: { kind: "send_message", nodeKey: "follow_up", label: "Follow-up" } },
-        { id: "end", type: "end", order: 13, body: "", metadata: { kind: "end_conversation", nodeKey: "end", label: "End" } }
-      ]
-    }),
+    newSubscriberFunnelTemplate(),
     seedTemplate({
       key: "renewal_reminder",
       name: "Renewal Reminder",
@@ -3631,6 +3750,7 @@ function seedTemplate(input: {
   execution: ScriptWorkspaceConfig["execution"];
   ai: ScriptWorkspaceConfig["ai"];
   approval: ScriptWorkspaceConfig["approval"];
+  workspace?: Partial<ScriptWorkspaceConfig>;
   variables?: ScriptBuilderVariable[];
   conditions?: ScriptBuilderCondition[];
   steps: ScriptStepTemplate[];
@@ -3658,7 +3778,8 @@ function seedTemplate(input: {
         ai: input.ai,
         approval: input.approval,
         conditions: input.conditions ?? [],
-        archivedAt: null
+        archivedAt: null,
+        ...input.workspace
       }
     },
     steps: input.steps.map((stepItem, index) => ({
@@ -3823,6 +3944,9 @@ function normalizeWorkspaceConfig(value: unknown): ScriptWorkspaceConfig {
   return {
     templateKey: typeof value.templateKey === "string" && value.templateKey.trim() ? value.templateKey.trim() : undefined,
     styleKey: typeof value.styleKey === "string" && value.styleKey.trim() ? value.styleKey.trim() : undefined,
+    archetypeKey: typeof value.archetypeKey === "string" && value.archetypeKey.trim() ? value.archetypeKey.trim() : undefined,
+    archetypeSource: typeof value.archetypeSource === "string" && value.archetypeSource.trim() ? value.archetypeSource.trim() : undefined,
+    templateVersion: typeof value.templateVersion === "string" && value.templateVersion.trim() ? value.templateVersion.trim() : undefined,
     archivedAt: typeof value.archivedAt === "string" && value.archivedAt.trim() ? value.archivedAt : null,
     execution: normalizeExecutionConfig(value.execution),
     ai: normalizeAiConfig(value.ai),
@@ -3835,6 +3959,9 @@ function defaultWorkspaceConfig(): ScriptWorkspaceConfig {
   return {
     templateKey: undefined,
     styleKey: undefined,
+    archetypeKey: undefined,
+    archetypeSource: undefined,
+    templateVersion: undefined,
     archivedAt: null,
     execution: { mode: "immediate" },
     ai: { mode: "draft_only" },
@@ -5656,6 +5783,9 @@ function toVariableMap(variables: Record<string, unknown>) {
 }
 
 function resolveRuntimeVariableValue(variableKey: string, variableValue: string | undefined, variables: Record<string, unknown>) {
+  if ((variableKey === "response_class" || variableKey === "next_response_class") && variableValue === "__classify_nsp_response__") {
+    return classifyNewSubscriberReply(String(variables.last_reply_text ?? ""));
+  }
   if (variableKey === "ai_confidence" && variableValue === "__derive_from_last_reply__") {
     return deriveReplyConfidence(String(variables.last_reply_text ?? ""));
   }
@@ -5668,6 +5798,26 @@ function resolveRuntimeVariableValue(variableKey: string, variableValue: string 
     return "I am happy you are here. I can make your first day feel personal.";
   }
   return interpolateTemplate(variableValue ?? "", toVariableMap(variables));
+}
+
+function classifyNewSubscriberReply(replyText: string) {
+  const lower = replyText.toLowerCase().trim();
+  if (!lower || /\b(silent|no reply|quiet|no-response)\b/.test(lower)) return "silent_no_reply";
+  if (/\b(stop|no thanks|not interested|leave me|go away)\b/.test(lower)) return "no_interest_disengaged";
+  if (/\b(can't do that|cannot do that|again|push|meet|off platform|phone|private info|illegal|unsupported|explicit)\b/.test(lower)) return "explicit_or_unsupported_request";
+  if (/\b(boundary|why not|come on|break rule|bypass)\b/.test(lower)) return "boundary_testing";
+  if (/\b(custom|one.?to.?one|1.?1|personal just for me|private set|made for me)\b/.test(lower)) return "one_to_one_request";
+  if (/\b(how much|price|buy|paid|ppv|send it|extra treat|want it|i'll take|ill take|purchase)\b/.test(lower)) return "purchase_intent";
+  if (/\b(too much|expensive|free|discount|broke|cheaper|costs)\b/.test(lower)) return "price_objection";
+  if (/\b(maybe|later|just looking|not sure|think about|not ready)\b/.test(lower)) return "not_ready";
+  if (/\b(what do you post|what are you like|about you|expect here|your vibe|tell me about you)\b/.test(lower)) return "curious_about_creator";
+  if (/\b(content|see|show|where should i start|browse|photos?|videos?|what do you have)\b/.test(lower)) return "asks_for_content";
+  if (/\b(cute|beautiful|gorgeous|pretty|hot|love your|smile|vibe|look)\b/.test(lower)) return "compliment";
+  if (/\b(flirt|tease|playful|naughty|sweet flirting|attention)\b/.test(lower)) return "flirtatious";
+  if (/\b(sweet|playful|teasing|soft|cute|preference|i like|into|mood)\b/.test(lower)) return "shares_preference";
+  if (/\b(happy|excited|glad|finally|here|found you|love this)\b/.test(lower)) return "warm_enthusiastic";
+  if (/^(hey|hi|hello|ok|nice|lol|k|yo)\b/.test(lower) || lower.length <= 8) return "short_low_effort";
+  return "off_topic";
 }
 
 function deriveReplyConfidence(replyText: string) {

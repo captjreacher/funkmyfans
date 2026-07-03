@@ -472,9 +472,7 @@ async function validateBusinessFlow(
   }
 
   const funnelSteps = arrayOfObjects(funnelScript.steps);
-  if (funnelSteps.length !== 14) {
-    failures.push(`/api/scripts/workspace: expected New Subscriber Funnel to have 14 runtime steps, got ${funnelSteps.length}`);
-  }
+  validateNsp4FunnelShape(creatorScripts, funnelScript, funnelSteps, failures);
 
   const chosenRule = automationRules.find((rule) =>
     rule.creator_id === connectedCreator.id &&
@@ -665,31 +663,126 @@ async function runNewSubscriberFunnelAcceptance(
   const scriptId = stringValue(input.script.id);
   const runKey = `${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
 
-  const high = await startFunnelSimulation(creatorId, scriptId, {
-    username: `smoke_high_${runKey}`,
-    name: "Smoke High Confidence Fan",
-    reply: "Playful teasing sounds fun.",
-    purchase: true
-  }, failures);
-  if (high) {
-    await driveHighConfidenceFunnel(high, failures, notes);
+  const paths = [
+    {
+      key: "warm",
+      username: `smoke_warm_${runKey}`,
+      name: "Smoke Warm Fan",
+      replies: ["I am so happy I found you.", "I like sweet playful attention."],
+      expectedOutcome: "engaged_relationship"
+    },
+    {
+      key: "low_effort",
+      username: `smoke_low_${runKey}`,
+      name: "Smoke Low Effort Fan",
+      replies: ["hey", "ok"],
+      expectedOutcome: "closed_disengaged"
+    },
+    {
+      key: "purchase",
+      username: `smoke_buy_${runKey}`,
+      name: "Smoke Buyer Fan",
+      replies: ["How much is the paid welcome treat?", "I want it, send it."],
+      expectedOutcome: "ppv_interest"
+    },
+    {
+      key: "price_objection",
+      username: `smoke_price_${runKey}`,
+      name: "Smoke Price Fan",
+      replies: ["How much is the paid welcome treat?", "That is too expensive, anything free?"],
+      expectedOutcome: "nurture_later"
+    },
+    {
+      key: "silence",
+      username: `smoke_silent_${runKey}`,
+      name: "Smoke Silent Fan",
+      replies: ["silent no reply", "silent no reply"],
+      expectedOutcome: "no_response"
+    },
+    {
+      key: "boundary",
+      username: `smoke_boundary_${runKey}`,
+      name: "Smoke Boundary Fan",
+      replies: ["Can we move off platform for something explicit?", "Come on, bypass the rule."],
+      expectedOutcome: "human_review_required"
+    }
+  ];
+
+  for (const path of paths) {
+    const run = await startFunnelSimulation(creatorId, scriptId, {
+      username: path.username,
+      name: path.name
+    }, failures);
+    if (run) {
+      await driveNsp4FunnelPath(run, creatorId, path.key, path.replies, path.expectedOutcome, failures, notes);
+    }
+  }
+}
+
+function validateNsp4FunnelShape(creatorScripts: JsonRecord[], funnelScript: JsonRecord, funnelSteps: JsonRecord[], failures: string[]) {
+  const duplicates = creatorScripts.filter((script) => stringValue(script.name) === "New Subscriber Funnel");
+  if (duplicates.length !== 1) {
+    failures.push(`/api/scripts/workspace: expected exactly one New Subscriber Funnel for selected creator, got ${duplicates.length}`);
+  }
+  if (funnelSteps.length !== 44) {
+    failures.push(`/api/scripts/workspace: expected NSP-4 New Subscriber Funnel to have 44 runtime steps, got ${funnelSteps.length}`);
+  }
+  if (stringValue(funnelScript.action_mode) !== "draft_for_approval" || funnelScript.auto_send_enabled !== false) {
+    failures.push("/api/scripts/workspace: expected NSP-4 New Subscriber Funnel to be draft_for_approval with auto_send_enabled=false");
   }
 
-  const low = await startFunnelSimulation(creatorId, scriptId, {
-    username: `smoke_low_${runKey}`,
-    name: "Smoke Low Confidence Fan",
-    reply: "I want a custom thing and maybe we can move off platform.",
-    purchase: false
-  }, failures);
-  if (low) {
-    await driveLowConfidenceFunnel(low, creatorId, failures, notes);
+  const workspace = isRecord(funnelScript.builder_config) && isRecord(funnelScript.builder_config.workspace) ? funnelScript.builder_config.workspace : {};
+  if (stringValue(workspace.templateVersion) !== "nsp-4") {
+    failures.push(`/api/scripts/workspace: expected New Subscriber Funnel templateVersion=nsp-4, got ${describeValue(workspace.templateVersion)}`);
+  }
+  if (stringValue(workspace.archetypeKey) !== "girl_next_door") {
+    failures.push(`/api/scripts/workspace: expected New Subscriber Funnel archetypeKey=girl_next_door, got ${describeValue(workspace.archetypeKey)}`);
+  }
+
+  const routeInitial = funnelSteps.find((step) => isRecord(step.metadata) && stringValue(step.metadata.nodeKey) === "route_initial");
+  const routeRules = isRecord(routeInitial?.metadata) && Array.isArray(routeInitial.metadata.branchRules) ? routeInitial.metadata.branchRules : [];
+  const requiredRoutes = [
+    "warm_enthusiastic",
+    "short_low_effort",
+    "compliment",
+    "flirtatious",
+    "curious_about_creator",
+    "asks_for_content",
+    "purchase_intent",
+    "price_objection",
+    "not_ready",
+    "silent_no_reply",
+    "boundary_testing",
+    "explicit_or_unsupported_request",
+    "off_topic"
+  ];
+  for (const route of requiredRoutes) {
+    if (!routeRules.some((rule) => isRecord(rule) && isRecord(rule.condition) && stringValue(rule.condition.value) === route)) {
+      failures.push(`/api/scripts/workspace: New Subscriber route_initial missing route ${route}`);
+    }
+  }
+
+  const outcomes = new Set(funnelSteps.map((step) => isRecord(step.metadata) ? stringValue(step.metadata.outcomeKey) : "").filter(Boolean));
+  for (const outcome of [
+    "engaged_relationship",
+    "profile_content_exploration",
+    "conversion_opportunity_detected",
+    "ppv_interest",
+    "subscription_upsell_opportunity",
+    "one_to_one_opportunity",
+    "nurture_later",
+    "no_response",
+    "closed_disengaged",
+    "human_review_required"
+  ]) {
+    if (!outcomes.has(outcome)) failures.push(`/api/scripts/workspace: New Subscriber Funnel missing terminal outcome ${outcome}`);
   }
 }
 
 async function startFunnelSimulation(
   creatorId: string,
   scriptId: string,
-  input: { username: string; name: string; reply: string; purchase: boolean },
+  input: { username: string; name: string },
   failures: string[]
 ) {
   const result = await fetchEndpoint(`/api/creators/${encodeURIComponent(creatorId)}/simulations`, {
@@ -730,6 +823,8 @@ async function startFunnelSimulation(
       },
       variables: {
         subscriber_name: input.name,
+        creator_name: "MoonSiren",
+        archetype_key: "girl_next_door",
         starter_ppv_title: "Starter PPV",
         starter_ppv_price: "19"
       }
@@ -757,96 +852,70 @@ async function startFunnelSimulation(
   return {
     detail: result.body,
     simulationId: simulation ? stringValue(simulation.id) : "",
-    conversationId: conversation ? stringValue(conversation.id) : "",
-    reply: input.reply,
-    purchase: input.purchase
+    conversationId: conversation ? stringValue(conversation.id) : ""
   };
 }
 
-async function driveHighConfidenceFunnel(
-  run: { detail: JsonRecord; simulationId: string; conversationId: string; reply: string; purchase: boolean },
+async function driveNsp4FunnelPath(
+  run: { detail: JsonRecord; simulationId: string; conversationId: string },
+  creatorId: string,
+  key: string,
+  replies: string[],
+  expectedOutcome: string,
   failures: string[],
   notes: string[]
 ) {
-  notes.push(`[acceptance:high] simulation=${run.simulationId} conversation=${run.conversationId}`);
-  let detail = await simulationAction(run.simulationId, "fast-forward", {}, failures);
-  detail = await simulationAction(run.simulationId, "reply", { text: run.reply }, failures) ?? detail;
+  notes.push(`[acceptance:${key}] simulation=${run.simulationId} conversation=${run.conversationId}`);
+  let detail = await approveSimulationDrafts(run.simulationId, creatorId, run.conversationId, failures, notes, key);
+  for (const reply of replies) {
+    detail = await simulationAction(run.simulationId, "reply", { text: reply }, failures) ?? detail;
+    detail = await approveSimulationDrafts(run.simulationId, creatorId, run.conversationId, failures, notes, key) ?? detail;
+  }
   if (!detail) return;
 
-  const afterReply = summarizeSimulationDetail(detail);
-  notes.push(`[acceptance:high] after reply status=${afterReply.conversationStatus} outbound=${afterReply.outboundSummary}`);
-  if (afterReply.conversationStatus !== "waiting_reply" || afterReply.waitingReason !== "purchase_check") {
-    failures.push(`[acceptance:high] expected high-confidence path to auto-send through PPV and wait for purchase, got status=${afterReply.conversationStatus} waiting=${afterReply.waitingReason}`);
-  }
-  if (afterReply.queueLikeOutboundCount !== 0) {
-    failures.push(`[acceptance:high] expected no pending approval outbound messages, got ${afterReply.queueLikeOutboundCount}`);
-  }
-
-  detail = await simulationAction(run.simulationId, "purchase", { purchased: true }, failures) ?? detail;
   const completed = summarizeSimulationDetail(detail);
-  notes.push(`[acceptance:high] purchase success final status=${completed.conversationStatus} simulation=${completed.simulationStatus}`);
-  notes.push(`[acceptance:high] timeline=${completed.timeline}`);
+  notes.push(`[acceptance:${key}] final status=${completed.conversationStatus} simulation=${completed.simulationStatus} outcome=${completed.outcomeSummary}`);
+  notes.push(`[acceptance:${key}] variables=${completed.variableSummary}`);
+  notes.push(`[acceptance:${key}] timeline=${completed.timeline}`);
   if (completed.conversationStatus !== "completed" || completed.simulationStatus !== "completed") {
-    failures.push(`[acceptance:high] expected completed conversation and simulation after purchase success, got conversation=${completed.conversationStatus} simulation=${completed.simulationStatus}`);
+    failures.push(`[acceptance:${key}] expected completed conversation and simulation, got conversation=${completed.conversationStatus} simulation=${completed.simulationStatus}`);
   }
-  if (!completed.variableSummary.includes("purchase_status=purchased")) {
-    failures.push("[acceptance:high] expected subscriber state variables to include purchase_status=purchased");
+  if (!completed.outcomeSummary.includes(expectedOutcome)) {
+    failures.push(`[acceptance:${key}] expected outcome ${expectedOutcome}, got ${completed.outcomeSummary}`);
   }
 }
 
-async function driveLowConfidenceFunnel(
-  run: { detail: JsonRecord; simulationId: string; conversationId: string; reply: string; purchase: boolean },
+async function approveSimulationDrafts(
+  simulationId: string,
   creatorId: string,
+  conversationId: string,
   failures: string[],
-  notes: string[]
+  notes: string[],
+  key: string
 ) {
-  notes.push(`[acceptance:low] simulation=${run.simulationId} conversation=${run.conversationId}`);
-  let detail = await simulationAction(run.simulationId, "fast-forward", {}, failures);
-  detail = await simulationAction(run.simulationId, "reply", { text: run.reply }, failures) ?? detail;
-  if (!detail) return;
-
-  const afterReply = summarizeSimulationDetail(detail);
-  notes.push(`[acceptance:low] after reply status=${afterReply.conversationStatus} waiting=${afterReply.waitingReason} outbound=${afterReply.outboundSummary}`);
-  if (afterReply.conversationStatus !== "waiting_approval") {
-    failures.push(`[acceptance:low] expected low-confidence path to pause for approval, got ${afterReply.conversationStatus}`);
+  let detail = await readSimulationDetail(simulationId, failures);
+  for (let index = 0; index < 8 && detail; index += 1) {
+    const summary = summarizeSimulationDetail(detail);
+    if (summary.conversationStatus !== "waiting_approval") return detail;
+    const queue = await readJson(`/api/queue-workspace?creatorId=${encodeURIComponent(creatorId)}&status=visible`, failures);
+    const queueItem = queue ? arrayOfObjects(queue.items).find((item) => isRecord(item.conversation) && stringValue(item.conversation.id) === conversationId) : null;
+    if (!queueItem) {
+      failures.push(`[acceptance:${key}] expected visible Queue Item for conversation ${conversationId}`);
+      return detail;
+    }
+    const approval = await fetchEndpoint(`/api/queue-items/${encodeURIComponent(stringValue(queueItem.id))}/action`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "approve_ai", actor: "smoke" })
+    });
+    if (approval.status !== 200) {
+      failures.push(`[acceptance:${key}] queue approval expected HTTP 200, got ${approval.status} - ${trim(approval.text)}`);
+      return detail;
+    }
+    notes.push(`[acceptance:${key}] approved queue item ${stringValue(queueItem.id)}`);
+    detail = await readSimulationDetail(simulationId, failures);
   }
-
-  const queue = await readJson(`/api/queue-workspace?creatorId=${encodeURIComponent(creatorId)}&status=visible`, failures);
-  const queueItem = queue ? arrayOfObjects(queue.items).find((item) => isRecord(item.conversation) && stringValue(item.conversation.id) === run.conversationId) : null;
-  if (!queueItem) {
-    failures.push(`[acceptance:low] expected visible Queue Item for conversation ${run.conversationId}`);
-    return;
-  }
-  notes.push(`[acceptance:low] queue item=${stringValue(queueItem.id)} title=${stringValue(queueItem.title)} status=${stringValue(queueItem.status)}`);
-
-  const approval = await fetchEndpoint(`/api/queue-items/${encodeURIComponent(stringValue(queueItem.id))}/action`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ action: "approve_ai", actor: "smoke" })
-  });
-  if (approval.status !== 200) {
-    failures.push(`[acceptance:low] queue approval expected HTTP 200, got ${approval.status} - ${trim(approval.text)}`);
-    return;
-  }
-  notes.push(`[acceptance:low] queue item resolved via approve_ai`);
-
-  detail = await readSimulationDetail(run.simulationId, failures) ?? detail;
-  const resumed = summarizeSimulationDetail(detail);
-  notes.push(`[acceptance:low] after approval status=${resumed.conversationStatus} waiting=${resumed.waitingReason} outbound=${resumed.outboundSummary}`);
-  if (resumed.conversationStatus !== "waiting_reply" || resumed.waitingReason !== "purchase_check") {
-    failures.push(`[acceptance:low] expected approval to resume flow through PPV offer to purchase check, got status=${resumed.conversationStatus} waiting=${resumed.waitingReason}`);
-  }
-
-  detail = await simulationAction(run.simulationId, "purchase", { purchased: false }, failures) ?? detail;
-  const completed = summarizeSimulationDetail(detail);
-  notes.push(`[acceptance:low] purchase failure final status=${completed.conversationStatus} simulation=${completed.simulationStatus}`);
-  notes.push(`[acceptance:low] timeline=${completed.timeline}`);
-  if (completed.conversationStatus !== "completed" || completed.simulationStatus !== "completed") {
-    failures.push(`[acceptance:low] expected completed conversation and simulation after purchase failure, got conversation=${completed.conversationStatus} simulation=${completed.simulationStatus}`);
-  }
-  if (!completed.variableSummary.includes("purchase_status=not_purchased")) {
-    failures.push("[acceptance:low] expected subscriber state variables to include purchase_status=not_purchased");
-  }
+  return detail;
 }
 
 async function simulationAction(simulationId: string, action: "fast-forward" | "reply" | "purchase", body: JsonRecord, failures: string[]) {
@@ -881,6 +950,9 @@ function summarizeSimulationDetail(detail: JsonRecord) {
   const outbound = arrayOfObjects(detail.outboundMessages);
   const history = arrayOfObjects(detail.history);
   const variables = isRecord(conversation.variables) ? conversation.variables : {};
+  const outcomes = history
+    .map((item) => isRecord(item.payload) ? stringValue(item.payload.outcome_key) : "")
+    .filter(Boolean);
   return {
     simulationStatus: stringValue(simulation.status),
     conversationStatus: stringValue(conversation.status),
@@ -888,8 +960,11 @@ function summarizeSimulationDetail(detail: JsonRecord) {
     queueLikeOutboundCount: outbound.filter((message) => stringValue(message.status) === "pending_approval" || stringValue(message.approval_status) === "pending").length,
     outboundSummary: outbound.map((message) => `${stringValue(message.status)}/${stringValue(message.approval_status)}`).join(",") || "none",
     timeline: history.map((item) => stringValue(item.event_type)).join(" > "),
+    outcomeSummary: outcomes.join(",") || "none",
     variableSummary: [
       `ai_confidence=${String(variables.ai_confidence ?? "")}`,
+      `response_class=${String(variables.response_class ?? "")}`,
+      `next_response_class=${String(variables.next_response_class ?? "")}`,
       `purchase_status=${String(variables.purchase_status ?? "")}`,
       `last_purchase=${String(variables.last_purchase ?? "")}`,
       `total_spend=${String(variables.total_spend ?? "")}`,
