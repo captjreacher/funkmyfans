@@ -3178,17 +3178,52 @@ async function deleteMessageScript(supabase: SupabaseClient, scriptId: string) {
 
 async function ensureAgencySeedLibrary(supabase: SupabaseClient, creators: OfCreator[]) {
   for (const creator of creators) {
-    const existing = await supabase.from("of_message_scripts").select("name").eq("creator_id", creator.id);
-    assertNoError(existing.error);
-    const existingNames = new Set((existing.data ?? []).map((item) => String(item.name).toLowerCase()));
     for (const template of agencySeedLibrary()) {
-      if (existingNames.has(template.name.toLowerCase())) continue;
-      try {
-        await createMessageScript(supabase, creator.id, template);
-      } catch (error) {
-        if (!isDuplicateKeyError(error)) throw error;
-      }
+      await ensureSeedMessageScript(supabase, creator.id, template);
     }
+  }
+}
+
+async function ensureSeedMessageScript(supabase: SupabaseClient, creatorId: string, template: MessageScriptTemplate) {
+  const existing = await findCreatorScriptByName(supabase, creatorId, template.name);
+  if (existing?.id) {
+    await ensureSeedScriptStepsIfMissing(supabase, String(existing.id), template);
+    return existing;
+  }
+
+  try {
+    return await createMessageScript(supabase, creatorId, template);
+  } catch (error) {
+    if (!isDuplicateKeyError(error)) throw error;
+    const racedExisting = await findCreatorScriptByName(supabase, creatorId, template.name);
+    if (!racedExisting?.id) throw error;
+    await ensureSeedScriptStepsIfMissing(supabase, String(racedExisting.id), template);
+    return racedExisting;
+  }
+}
+
+async function findCreatorScriptByName(supabase: SupabaseClient, creatorId: string, name: string) {
+  const result = await supabase
+    .from("of_message_scripts")
+    .select("id, name")
+    .eq("creator_id", creatorId)
+    .ilike("name", name)
+    .order("updated_at", { ascending: false })
+    .limit(1);
+  assertNoError(result.error);
+  return result.data?.[0] ?? null;
+}
+
+async function ensureSeedScriptStepsIfMissing(supabase: SupabaseClient, scriptId: string, template: MessageScriptTemplate) {
+  if (!template.steps?.length) return;
+  const existingSteps = await supabase.from("of_message_script_steps").select("id").eq("script_id", scriptId).limit(1);
+  assertNoError(existingSteps.error);
+  if (existingSteps.data?.length) return;
+
+  try {
+    await insertScriptTemplateSteps(supabase, scriptId, template.steps);
+  } catch (error) {
+    if (!isDuplicateKeyError(error)) throw error;
   }
 }
 
