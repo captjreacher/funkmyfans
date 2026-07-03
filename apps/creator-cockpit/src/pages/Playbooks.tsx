@@ -57,13 +57,27 @@ import {
 } from "@xyflow/react";
 import type {
   OfMessageScript,
+  QueueWorkspaceItemSummary,
   ScriptVisualBuilderConfig,
   ScriptVisualBuilderConnection,
   ScriptVisualBuilderNode,
   ScriptVisualBuilderNodeCategory,
   ScriptVisualBuilderNodeType
 } from "@funkmyfans/of-types";
-import { createCreatorScript, fetchScriptsWorkspace, saveScriptBuilder, updateScript, type ScriptsWorkspaceData } from "../lib/api";
+import {
+  applyQueueItemAction,
+  createCreatorScript,
+  fetchQueueWorkspace,
+  fetchScriptsWorkspace,
+  fetchSimulationDetail,
+  saveScriptBuilder,
+  simulationPurchase,
+  simulationReply,
+  startSimulation,
+  updateScript,
+  type SimulationDetailData,
+  type ScriptsWorkspaceData
+} from "../lib/api";
 import {
   compileBuilderFlow,
   createBuilderNode,
@@ -96,10 +110,20 @@ type FlowNodeData = {
   issues: number;
   validationState: "valid" | "warning" | "error";
   validationMessage?: string;
+  simulationState?: BuilderSimulationStepState;
   onInlineEdit?: (nodeId: string, patch: Partial<ScriptVisualBuilderNode>) => void;
   onQuickAdd?: (sourceNodeId: string, type: ScriptVisualBuilderNodeType, sourceHandle?: string | null) => void;
 };
 type FlowNodeValidationState = FlowNodeData["validationState"];
+type BuilderSimulationStepState = "pending" | "running" | "completed" | "waiting_queue" | "failed";
+type BuilderSimulationTimelineItem = {
+  id: string;
+  stepId: string | null;
+  label: string;
+  detail: string;
+  state: BuilderSimulationStepState;
+  at: string | null;
+};
 
 type FlowNode = Node<FlowNodeData, "flowNode">;
 type FlowEdge = Edge<{ label?: string }>;
@@ -398,16 +422,23 @@ function ConversationFlowBuilder({
   const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
   const [historyPast, setHistoryPast] = useState<FlowHistorySnapshot[]>([]);
   const [historyFuture, setHistoryFuture] = useState<FlowHistorySnapshot[]>([]);
+  const [simulationDetail, setSimulationDetail] = useState<SimulationDetailData | null>(null);
+  const [simulationQueueItem, setSimulationQueueItem] = useState<QueueWorkspaceItemSummary | null>(null);
+  const [simulationBusy, setSimulationBusy] = useState<string | null>(null);
+  const [simulationError, setSimulationError] = useState<string | null>(null);
+  const [manualReplyText, setManualReplyText] = useState("Manual operator reply for this simulation.");
   const { screenToFlowPosition, getViewport } = useReactFlow();
 
   const flow = useMemo(() => fromReactFlow(nodes, edges, selectedNodeId, getViewport()), [edges, getViewport, nodes, selectedNodeId]);
   const validation = useMemo(() => validateBuilderFlow(flow), [flow]);
   const selectedBuilderNode = flow.nodes.find((node) => node.id === selectedNodeId) ?? flow.nodes[0] ?? null;
+  const simulationTimeline = useMemo(() => buildSimulationTimeline(simulationDetail, flow), [flow, simulationDetail]);
+  const simulationStates = useMemo(() => buildSimulationStepStates(flow, simulationDetail, simulationQueueItem), [flow, simulationDetail, simulationQueueItem]);
   const renderedNodes = nodes.map((node) =>
     withAuthoringData(node, validation, {
       onInlineEdit: updateNodeInline,
       onQuickAdd: quickAddStep
-    })
+    }, simulationStates.get(node.id))
   );
 
   const currentSnapshot = useCallback(
@@ -434,6 +465,9 @@ function ConversationFlowBuilder({
     setSelectedEdgeIds([]);
     setHistoryPast([]);
     setHistoryFuture([]);
+    setSimulationDetail(null);
+    setSimulationQueueItem(null);
+    setSimulationError(null);
   }, [session.script]);
 
   const restoreSnapshot = useCallback((snapshot: FlowHistorySnapshot) => {
@@ -602,6 +636,86 @@ function ConversationFlowBuilder({
     setNodes(arranged);
   }
 
+  async function runBuilderSimulation() {
+    setSimulationBusy("run");
+    try {
+      const result = await startSimulation(session.script.creator_id, {
+        scriptId: session.script.id,
+        eventType: triggerEventType(flow, session.script),
+        subscriber: defaultBuilderSimulationSubscriber(),
+        variables: {
+          subscriber_name: "Mason",
+          creator_name: creatorLabel(workspace, session.script.creator_id),
+          fan: { name: "Mason", total_spend: 180, last_purchase: null },
+          creator: { name: creatorLabel(workspace, session.script.creator_id) },
+          journey: { source: "builder_simulation" },
+          conversation: { summary: "Builder simulation run" }
+        }
+      });
+      await setSimulationResult(result);
+      setSimulationError(null);
+      void pollSimulation(result.simulation.id);
+    } catch (runError) {
+      setSimulationError(errorMessage(runError, "Unable to run builder simulation"));
+    } finally {
+      setSimulationBusy(null);
+    }
+  }
+
+  async function runSimulationAction(action: string, runner: () => Promise<SimulationDetailData>) {
+    if (!simulationDetail?.simulation.id) return;
+    setSimulationBusy(action);
+    try {
+      const result = await runner();
+      await setSimulationResult(result);
+      setSimulationError(null);
+      void pollSimulation(result.simulation.id);
+    } catch (actionError) {
+      setSimulationError(errorMessage(actionError, "Unable to update builder simulation"));
+    } finally {
+      setSimulationBusy(null);
+    }
+  }
+
+  async function runQueueAction(action: "approve_ai" | "respond" | "ignore") {
+    if (!simulationQueueItem) {
+      setSimulationError("No active queue approval is available for this simulation.");
+      return;
+    }
+    await runSimulationAction(action, async () => {
+      await applyQueueItemAction(simulationQueueItem.id, action, {
+        actor: "operator",
+        responseText: action === "respond" ? manualReplyText : undefined,
+        note: action === "ignore" ? "Ignored from builder simulation." : undefined
+      });
+      return fetchSimulationDetail(simulationDetail!.simulation.id);
+    });
+  }
+
+  async function setSimulationResult(result: SimulationDetailData) {
+    setSimulationDetail(result);
+    if (result.conversation?.id) {
+      const queueWorkspace = await fetchQueueWorkspace({ status: "visible" });
+      const item = queueWorkspace.items.find((entry) => entry.conversation?.id === result.conversation?.id && entry.status !== "resolved") ?? null;
+      setSimulationQueueItem(item);
+    } else {
+      setSimulationQueueItem(null);
+    }
+  }
+
+  async function pollSimulation(simulationId: string) {
+    for (let index = 0; index < 4; index += 1) {
+      await delay(900);
+      try {
+        const result = await fetchSimulationDetail(simulationId);
+        await setSimulationResult(result);
+        if (result.simulation.status !== "running" && result.conversation?.status !== "running") return;
+      } catch {
+        return;
+      }
+    }
+  }
+
   return (
     <main className="animate-in-soft flex h-full min-h-[calc(100vh-9rem)] flex-col overflow-hidden rounded-lg border border-blue-500/18 bg-[#071423]">
       <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-blue-500/18 bg-[#0B1828]/95 px-4 py-3">
@@ -634,7 +748,11 @@ function ConversationFlowBuilder({
           </button>
           <button type="button" onClick={onSimulate} className="inline-flex items-center gap-2 rounded-lg border border-blue-400/20 bg-[#102338]/72 px-4 py-2 text-sm font-semibold text-blue-50">
             <Play className="h-4 w-4" aria-hidden="true" />
-            Simulate
+            Open Simulations
+          </button>
+          <button type="button" onClick={() => void runBuilderSimulation()} disabled={busy || Boolean(simulationBusy)} className="inline-flex items-center gap-2 rounded-lg border border-cyan-300/25 bg-cyan-400/14 px-4 py-2 text-sm font-semibold text-cyan-100 disabled:opacity-45">
+            <Play className="h-4 w-4" aria-hidden="true" />
+            {simulationBusy === "run" ? "Running..." : "Run Simulation"}
           </button>
           <button type="button" onClick={() => onStatusChange(session.script.status === "active" ? "inactive" : "active")} disabled={busy} className="rounded-lg border border-blue-400/20 bg-[#102338]/72 px-4 py-2 text-sm font-semibold text-blue-50 disabled:opacity-45">
             {session.script.status === "active" ? "Deactivate" : "Activate"}
@@ -698,6 +816,22 @@ function ConversationFlowBuilder({
           onEditingHandled={() => setEditingNodeId(null)}
         />
       </div>
+
+      <BuilderSimulationDebugger
+        detail={simulationDetail}
+        queueItem={simulationQueueItem}
+        timeline={simulationTimeline}
+        busy={simulationBusy}
+        error={simulationError}
+        manualReplyText={manualReplyText}
+        onManualReplyTextChange={setManualReplyText}
+        onApproveAi={() => void runQueueAction("approve_ai")}
+        onManualReply={() => void runQueueAction("respond")}
+        onIgnore={() => void runQueueAction("ignore")}
+        onPurchaseSuccess={() => void runSimulationAction("purchase_success", () => simulationPurchase(simulationDetail!.simulation.id, true))}
+        onPurchaseFailure={() => void runSimulationAction("purchase_failure", () => simulationPurchase(simulationDetail!.simulation.id, false))}
+        onSendReply={() => void runSimulationAction("reply", () => simulationReply(simulationDetail!.simulation.id, manualReplyText))}
+      />
     </main>
   );
 }
@@ -788,6 +922,104 @@ function Inspector({
       {tab === "validation" ? <ValidationPanel validation={validation} /> : null}
       {tab === "variables" ? <VariablesPanel flow={flow} /> : null}
     </aside>
+  );
+}
+
+function BuilderSimulationDebugger({
+  detail,
+  queueItem,
+  timeline,
+  busy,
+  error,
+  manualReplyText,
+  onManualReplyTextChange,
+  onApproveAi,
+  onManualReply,
+  onIgnore,
+  onPurchaseSuccess,
+  onPurchaseFailure,
+  onSendReply
+}: {
+  detail: SimulationDetailData | null;
+  queueItem: QueueWorkspaceItemSummary | null;
+  timeline: BuilderSimulationTimelineItem[];
+  busy: string | null;
+  error: string | null;
+  manualReplyText: string;
+  onManualReplyTextChange: (value: string) => void;
+  onApproveAi: () => void;
+  onManualReply: () => void;
+  onIgnore: () => void;
+  onPurchaseSuccess: () => void;
+  onPurchaseFailure: () => void;
+  onSendReply: () => void;
+}) {
+  const canAct = Boolean(detail?.simulation.id) && !busy;
+  const waitingForPurchase = detail?.conversation?.waiting_reason?.includes("purchase") ?? false;
+  return (
+    <section className="shrink-0 border-t border-blue-500/18 bg-[#081524] p-4">
+      <div className="grid gap-4 xl:grid-cols-[1.25fr_0.75fr]">
+        <div>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div className="text-sm font-semibold text-white">Execution Timeline</div>
+              <div className="mt-1 text-xs text-blue-100/56">
+                {detail ? `${detail.simulation.status} / ${detail.conversation?.status ?? "no conversation"}` : "Run a builder simulation to watch steps execute."}
+              </div>
+            </div>
+            {detail ? <span className={`rounded-full px-3 py-1 text-xs font-semibold uppercase ${simulationStateTone(statusToSimulationState(detail.conversation?.status, detail.simulation.status))}`}>{detail.conversation?.status ?? detail.simulation.status}</span> : null}
+          </div>
+
+          {error ? <div className="mt-3 rounded-lg border border-rose-400/25 bg-rose-500/10 px-3 py-2 text-sm text-rose-100">{error}</div> : null}
+
+          <div className="mt-4 grid max-h-56 gap-2 overflow-y-auto pr-1 md:grid-cols-2 xl:grid-cols-3">
+            {timeline.map((item) => (
+              <div key={item.id} className={`rounded-lg border px-3 py-2 ${simulationTimelineTone(item.state)}`}>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="truncate text-xs font-semibold uppercase tracking-[0.12em]">{item.state.replaceAll("_", " ")}</div>
+                  <div className="shrink-0 text-[11px] opacity-70">{formatSimulationTime(item.at)}</div>
+                </div>
+                <div className="mt-1 truncate text-sm font-semibold">{item.label}</div>
+                <div className="mt-1 line-clamp-2 text-xs opacity-75">{item.detail}</div>
+              </div>
+            ))}
+            {!timeline.length ? <div className="text-sm text-blue-100/58">No execution events yet.</div> : null}
+          </div>
+        </div>
+
+        <div className="rounded-lg border border-blue-500/18 bg-[#0D1B2A]/65 p-3">
+          <div className="text-sm font-semibold text-white">Simulation Controls</div>
+          <div className="mt-3 grid gap-2 sm:grid-cols-2">
+            <button type="button" onClick={onSendReply} disabled={!canAct} className="rounded-lg border border-blue-400/20 bg-[#102338]/72 px-3 py-2 text-sm font-semibold text-blue-50 disabled:opacity-45">
+              Send Reply
+            </button>
+            <button type="button" onClick={onPurchaseSuccess} disabled={!canAct || !waitingForPurchase} className="rounded-lg border border-emerald-300/25 bg-emerald-400/14 px-3 py-2 text-sm font-semibold text-emerald-100 disabled:opacity-45">
+              Purchase Success
+            </button>
+            <button type="button" onClick={onPurchaseFailure} disabled={!canAct || !waitingForPurchase} className="rounded-lg border border-rose-300/25 bg-rose-400/14 px-3 py-2 text-sm font-semibold text-rose-100 disabled:opacity-45">
+              Purchase Failure
+            </button>
+            <button type="button" onClick={onApproveAi} disabled={!canAct || !queueItem} className="rounded-lg border border-cyan-300/25 bg-cyan-400/14 px-3 py-2 text-sm font-semibold text-cyan-100 disabled:opacity-45">
+              Approve AI
+            </button>
+            <button type="button" onClick={onManualReply} disabled={!canAct || !queueItem} className="rounded-lg border border-blue-400/20 bg-[#102338]/72 px-3 py-2 text-sm font-semibold text-blue-50 disabled:opacity-45">
+              Manual Reply
+            </button>
+            <button type="button" onClick={onIgnore} disabled={!canAct || !queueItem} className="rounded-lg border border-amber-300/25 bg-amber-400/14 px-3 py-2 text-sm font-semibold text-amber-100 disabled:opacity-45">
+              Ignore
+            </button>
+          </div>
+          <textarea
+            value={manualReplyText}
+            onChange={(event) => onManualReplyTextChange(event.target.value)}
+            className="nodrag mt-3 min-h-20 w-full resize-none rounded-lg border border-blue-400/18 bg-[#06111d]/80 px-3 py-2 text-sm text-blue-50 outline-none focus:border-cyan-300/50"
+          />
+          <div className="mt-2 text-xs text-blue-100/56">
+            {queueItem ? `Queue item waiting: ${queueItem.title}` : waitingForPurchase ? "Flow is waiting at purchase check." : "Queue controls activate when approval is required."}
+          </div>
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -901,8 +1133,9 @@ function FlowNodeCard({ id, data, selected }: NodeProps<FlowNode>) {
   const canSend = data.type !== "end";
   const [quickAddHandle, setQuickAddHandle] = useState<string | null | false>(false);
   const validationTone = validationToneClass(data.validationState);
+  const simulationClass = data.simulationState ? simulationNodeClass(data.simulationState) : "";
   return (
-    <div className={`relative w-[210px] rounded-lg border p-3 shadow-[0_18px_48px_rgba(0,0,0,.28)] ${selected ? "border-cyan-300 bg-[#15314E]" : "border-blue-500/20 bg-[#0D1B2A]"}`} style={{ borderTopColor: color, borderTopWidth: 3 }}>
+    <div className={`relative w-[210px] rounded-lg border p-3 shadow-[0_18px_48px_rgba(0,0,0,.28)] ${selected ? "border-cyan-300 bg-[#15314E]" : "border-blue-500/20 bg-[#0D1B2A]"} ${simulationClass}`} style={{ borderTopColor: color, borderTopWidth: 3 }}>
       {canReceive ? <Handle type="target" position={Position.Left} className="!h-3 !w-3 !border-2 !border-[#06111d]" style={{ background: color }} /> : null}
       <div className="flex items-center gap-2">
         <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md" style={{ background: `${color}24`, color }}>
@@ -918,6 +1151,11 @@ function FlowNodeCard({ id, data, selected }: NodeProps<FlowNode>) {
           {data.validationState}
         </span>
       </div>
+      {data.simulationState ? (
+        <div className={`mt-2 rounded-md px-2 py-1 text-[11px] font-semibold uppercase tracking-[0.12em] ${simulationStateTone(data.simulationState)}`}>
+          {data.simulationState.replaceAll("_", " ")}
+        </div>
+      ) : null}
       <InlineStepEditor nodeId={id} data={data} />
       {canSend && !isBranch ? (
         <>
@@ -1133,7 +1371,8 @@ function cloneEdges(edges: FlowEdge[]) {
 function withAuthoringData(
   node: FlowNode,
   validation: FlowValidationIssue[],
-  handlers: Pick<FlowNodeData, "onInlineEdit" | "onQuickAdd">
+  handlers: Pick<FlowNodeData, "onInlineEdit" | "onQuickAdd">,
+  simulationState?: BuilderSimulationStepState
 ): FlowNode {
   return {
     ...node,
@@ -1142,7 +1381,8 @@ function withAuthoringData(
       ...handlers,
       issues: validation.filter((issue) => issue.nodeId === node.id).length,
       validationState: nodeValidationState(node.id, validation),
-      validationMessage: validation.find((issue) => issue.nodeId === node.id)?.message
+      validationMessage: validation.find((issue) => issue.nodeId === node.id)?.message,
+      simulationState
     }
   };
 }
@@ -1158,6 +1398,129 @@ function validationToneClass(state: FlowNodeValidationState) {
   if (state === "error") return "bg-rose-500/16 text-rose-100";
   if (state === "warning") return "bg-amber-400/16 text-amber-100";
   return "bg-emerald-500/14 text-emerald-100";
+}
+
+function buildSimulationTimeline(detail: SimulationDetailData | null, flow: ScriptVisualBuilderConfig): BuilderSimulationTimelineItem[] {
+  if (!detail) return [];
+  const nodeById = new Map(flow.nodes.map((node) => [node.id, node]));
+  const historyItems = detail.history.map((entry) => ({
+    id: entry.id,
+    stepId: entry.step_id,
+    label: entry.step_id ? nodeById.get(entry.step_id)?.label ?? entry.event_type : entry.event_type,
+    detail: entry.detail ?? entry.transition_key,
+    state: historyState(entry.to_status, detail.simulation.status),
+    at: entry.created_at
+  }));
+  const outboundItems = detail.outboundMessages.map((message) => ({
+    id: `outbound-${message.id}`,
+    stepId: message.script_step_id,
+    label: message.script_step_id ? nodeById.get(message.script_step_id)?.label ?? "Outbound message" : "Outbound message",
+    detail: message.final_text ?? message.draft_text ?? message.message_body,
+    state: outboundState(message.status, message.approval_status),
+    at: message.created_at
+  }));
+  return [...historyItems, ...outboundItems].sort((a, b) => new Date(a.at ?? 0).getTime() - new Date(b.at ?? 0).getTime());
+}
+
+function buildSimulationStepStates(
+  flow: ScriptVisualBuilderConfig,
+  detail: SimulationDetailData | null,
+  queueItem: QueueWorkspaceItemSummary | null
+) {
+  const states = new Map<string, BuilderSimulationStepState>();
+  if (!detail) return states;
+
+  for (const node of flow.nodes) states.set(node.id, "pending");
+  for (const item of detail.history) {
+    if (item.step_id) states.set(item.step_id, historyState(item.to_status, detail.simulation.status));
+  }
+  for (const message of detail.outboundMessages) {
+    if (message.script_step_id) states.set(message.script_step_id, outboundState(message.status, message.approval_status));
+  }
+  if (detail.conversation?.current_step_id) {
+    states.set(detail.conversation.current_step_id, statusToSimulationState(detail.conversation.status, detail.simulation.status));
+  }
+  if (queueItem && detail.conversation?.current_step_id) states.set(detail.conversation.current_step_id, "waiting_queue");
+  if (detail.simulation.status === "failed" || detail.conversation?.status === "failed") {
+    const failedStepId = detail.conversation?.current_step_id ?? detail.history.at(-1)?.step_id;
+    if (failedStepId) states.set(failedStepId, "failed");
+  }
+  return states;
+}
+
+function historyState(status: string | null, simulationStatus: string): BuilderSimulationStepState {
+  if (simulationStatus === "failed" || status === "failed") return "failed";
+  if (status === "waiting_approval") return "waiting_queue";
+  if (status === "running") return "running";
+  return "completed";
+}
+
+function outboundState(status: string, approvalStatus: string): BuilderSimulationStepState {
+  if (status === "failed" || approvalStatus === "rejected") return "failed";
+  if (status === "pending_approval" || approvalStatus === "pending") return "waiting_queue";
+  if (status === "queued" || status === "sending") return "running";
+  return "completed";
+}
+
+function statusToSimulationState(conversationStatus?: string | null, simulationStatus?: string | null): BuilderSimulationStepState {
+  if (simulationStatus === "failed" || conversationStatus === "failed") return "failed";
+  if (conversationStatus === "waiting_approval") return "waiting_queue";
+  if (conversationStatus === "running" || simulationStatus === "running") return "running";
+  if (conversationStatus === "completed" || simulationStatus === "completed") return "completed";
+  return "pending";
+}
+
+function simulationNodeClass(state: BuilderSimulationStepState) {
+  if (state === "running") return "ring-2 ring-cyan-300/70";
+  if (state === "completed") return "ring-1 ring-emerald-300/55";
+  if (state === "waiting_queue") return "ring-2 ring-amber-300/70";
+  if (state === "failed") return "ring-2 ring-rose-300/75";
+  return "opacity-75";
+}
+
+function simulationStateTone(state: BuilderSimulationStepState) {
+  if (state === "running") return "bg-cyan-400/14 text-cyan-100";
+  if (state === "completed") return "bg-emerald-500/14 text-emerald-100";
+  if (state === "waiting_queue") return "bg-amber-400/14 text-amber-100";
+  if (state === "failed") return "bg-rose-500/16 text-rose-100";
+  return "bg-blue-400/12 text-blue-100";
+}
+
+function simulationTimelineTone(state: BuilderSimulationStepState) {
+  if (state === "running") return "border-cyan-300/25 bg-cyan-400/10 text-cyan-50";
+  if (state === "completed") return "border-emerald-300/25 bg-emerald-500/10 text-emerald-50";
+  if (state === "waiting_queue") return "border-amber-300/25 bg-amber-400/10 text-amber-50";
+  if (state === "failed") return "border-rose-300/25 bg-rose-500/10 text-rose-50";
+  return "border-blue-500/15 bg-[#0D1B2A]/65 text-blue-50";
+}
+
+function triggerEventType(flow: ScriptVisualBuilderConfig, script: OfMessageScript) {
+  const trigger = flow.nodes.find((node) => node.type === "trigger");
+  return stringValue(trigger?.config.eventType) || script.trigger_event_type || "manual";
+}
+
+function defaultBuilderSimulationSubscriber() {
+  return {
+    name: "Mason",
+    username: "builder_mason",
+    subscription_status: "active",
+    renewal_state: "current",
+    spend_level: "high",
+    lifetime_value: 180,
+    message_history_summary: "Warm fan for builder simulation. Replies quickly and is open to premium offers.",
+    custom_variables: {
+      subscriber_name: "Mason",
+      fan: { name: "Mason", total_spend: 180, last_purchase: null }
+    }
+  };
+}
+
+function formatSimulationTime(value: string | null) {
+  return value ? new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "--";
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 function createAuthoringStep(type: ScriptVisualBuilderNodeType, position: { x: number; y: number }): ScriptVisualBuilderNode {
