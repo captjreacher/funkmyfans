@@ -140,6 +140,7 @@ type FlowHistorySnapshot = {
   selectedNodeId: string | null;
   selectedEdgeIds: string[];
 };
+const fallbackRouteKey = "fallback";
 
 const iconMap: Record<string, LucideIcon> = {
   BadgeAlert,
@@ -584,7 +585,7 @@ function ConversationFlowBuilder({
     if (!sourceNode) return;
     const position = {
       x: sourceNode.position.x + 300,
-      y: sourceNode.position.y + (sourceHandle === "yes" ? -110 : sourceHandle === "no" ? 110 : 0)
+      y: sourceNode.position.y + routeHandleOffset(sourceNode.data.config, sourceHandle)
     };
     const builderNode = createAuthoringStep(type, position);
     const edge = buildFlowEdge({
@@ -1110,6 +1111,8 @@ function PropertiesPanel({
         </Field>
       ))}
 
+      {node.type === "switch" ? <SwitchRoutesPanel node={node} onUpdateNode={onUpdateNode} /> : null}
+
       {issues.length ? (
         <div className="mt-4 space-y-2">
           {issues.map((issue) => <IssueRow key={issue.message} issue={issue} />)}
@@ -1158,6 +1161,7 @@ function FlowNodeCard({ id, data, selected }: NodeProps<FlowNode>) {
   const Icon = iconMap[data.icon] ?? Sparkles;
   const color = categoryColor(data.category);
   const isBranch = isBranchNodeType(data.type);
+  const isSwitch = data.type === "switch";
   const canReceive = data.type !== "trigger";
   const canSend = data.type !== "end";
   const [quickAddHandle, setQuickAddHandle] = useState<string | null | false>(false);
@@ -1192,7 +1196,27 @@ function FlowNodeCard({ id, data, selected }: NodeProps<FlowNode>) {
           <QuickAddButton onClick={() => setQuickAddHandle(quickAddHandle === null ? false : null)} className="right-[-34px] top-1/2 -translate-y-1/2" />
         </>
       ) : null}
-      {canSend && isBranch ? (
+      {canSend && isSwitch ? (
+        <>
+          <div className="mt-3 grid gap-1.5 text-[11px] font-semibold uppercase tracking-[0.08em]">
+            {routeCasesFromConfig(data.config).map((routeCase, index) => (
+              <div key={routeCase.key || `case-${index}`} className="relative">
+                <Handle id={routeCase.key} type="source" position={Position.Right} className="!h-3 !w-3 !border-2 !border-[#06111d]" style={{ top: 10 + index * 30, background: "#a78bfa" }} />
+                <button type="button" onClick={() => setQuickAddHandle(quickAddHandle === routeCase.key ? false : routeCase.key)} className="nodrag flex w-full items-center justify-between rounded-md border border-violet-400/20 bg-violet-500/10 px-2 py-1 text-violet-100">
+                  <span className="truncate">{routeCase.label || routeCase.key || "Route"}</span> <Plus className="h-3 w-3 shrink-0" aria-hidden="true" />
+                </button>
+              </div>
+            ))}
+            <div className="relative">
+              <Handle id={fallbackRouteKey} type="source" position={Position.Right} className="!h-3 !w-3 !border-2 !border-[#06111d]" style={{ top: 10 + routeCasesFromConfig(data.config).length * 30, background: "#fb7185" }} />
+              <button type="button" onClick={() => setQuickAddHandle(quickAddHandle === fallbackRouteKey ? false : fallbackRouteKey)} className="nodrag flex w-full items-center justify-between rounded-md border border-rose-400/20 bg-rose-500/10 px-2 py-1 text-rose-100">
+                Fallback <Plus className="h-3 w-3 shrink-0" aria-hidden="true" />
+              </button>
+            </div>
+          </div>
+        </>
+      ) : null}
+      {canSend && isBranch && !isSwitch ? (
         <>
           <Handle id="yes" type="source" position={Position.Right} className="!h-3 !w-3 !border-2 !border-[#06111d]" style={{ top: 26, background: "#22c55e" }} />
           <Handle id="no" type="source" position={Position.Right} className="!h-3 !w-3 !border-2 !border-[#06111d]" style={{ top: 62, background: "#fb7185" }} />
@@ -1221,6 +1245,21 @@ function FlowNodeCard({ id, data, selected }: NodeProps<FlowNode>) {
 function InlineStepEditor({ nodeId, data }: { nodeId: string; data: FlowNodeData }) {
   if (data.type === "trigger" || data.type === "end") {
     return <div className="mt-2 truncate text-xs text-blue-100/58">{data.summary}</div>;
+  }
+
+  if (data.type === "switch") {
+    return (
+      <div className="mt-2 grid gap-2">
+        <input
+          value={stringValue(data.config.conditionKey)}
+          onChange={(event) => data.onInlineEdit?.(nodeId, { config: { ...data.config, conditionKey: event.target.value } })}
+          className="nodrag rounded-md border border-blue-400/14 bg-[#06111d]/80 px-2 py-1.5 text-xs font-semibold text-white outline-none focus:border-cyan-300/50"
+          aria-label="Routing variable"
+          placeholder="response_class"
+        />
+        <div className="text-[11px] text-blue-100/58">{routeCasesFromConfig(data.config).length} cases plus fallback</div>
+      </div>
+    );
   }
 
   if (isBranchNodeType(data.type)) {
@@ -1338,7 +1377,7 @@ function toReactFlowEdges(flow: ScriptVisualBuilderConfig): FlowEdge[] {
     source: connection.from,
     target: connection.to,
     label: connection.label,
-    sourceHandle: connection.label === "yes" || connection.label === "no" ? connection.label : null
+    sourceHandle: connection.label ?? null
   }));
 }
 
@@ -1374,8 +1413,8 @@ function fromReactFlow(
 }
 
 function buildFlowEdge(connection: FlowEdgeInput): FlowEdge {
-  const label = connection.label ?? (connection.sourceHandle === "yes" || connection.sourceHandle === "no" ? connection.sourceHandle : undefined);
-  const displayLabel = label === "yes" ? "YES path" : label === "no" ? "NO path" : undefined;
+  const label = connection.label ?? connection.sourceHandle ?? undefined;
+  const displayLabel = edgeDisplayLabel(label);
   return {
     id: connection.id ?? `edge-${connection.source}-${connection.sourceHandle ?? "out"}-${connection.target}-${Date.now()}`,
     source: connection.source,
@@ -1432,14 +1471,17 @@ function validationToneClass(state: FlowNodeValidationState) {
 function buildSimulationTimeline(detail: SimulationDetailData | null, flow: ScriptVisualBuilderConfig): BuilderSimulationTimelineItem[] {
   if (!detail) return [];
   const nodeById = new Map(flow.nodes.map((node) => [node.id, node]));
-  const historyItems = detail.history.map((entry) => ({
-    id: entry.id,
-    stepId: entry.step_id,
-    label: entry.step_id ? nodeById.get(entry.step_id)?.label ?? entry.event_type : entry.event_type,
-    detail: entry.detail ?? entry.transition_key,
-    state: historyState(entry.to_status, detail.simulation.status),
-    at: entry.created_at
-  }));
+  const historyItems = detail.history.map((entry) => {
+    const outcomeLabel = historyOutcomeLabel(entry.payload) || (entry.event_type === "conversation_completed" && entry.step_id ? outcomeLabelFromNode(nodeById.get(entry.step_id)) : null);
+    return {
+      id: entry.id,
+      stepId: entry.step_id,
+      label: entry.step_id ? nodeById.get(entry.step_id)?.label ?? entry.event_type : entry.event_type,
+      detail: outcomeLabel ? `${entry.detail ?? entry.transition_key} Outcome: ${outcomeLabel}.` : entry.detail ?? entry.transition_key,
+      state: historyState(entry.to_status, detail.simulation.status),
+      at: entry.created_at
+    };
+  });
   const outboundItems = detail.outboundMessages.map((message) => ({
     id: `outbound-${message.id}`,
     stepId: message.script_step_id,
@@ -1539,6 +1581,7 @@ function defaultBuilderSimulationSubscriber() {
     message_history_summary: "Warm fan for builder simulation. Replies quickly and is open to premium offers.",
     custom_variables: {
       subscriber_name: "Mason",
+      response_class: "warm_enthusiastic",
       fan: { name: "Mason", total_spend: 180, last_purchase: null }
     }
   };
@@ -1566,10 +1609,15 @@ function authoringStepTemplate(type: ScriptVisualBuilderNodeType): { label?: str
   if (type === "message") return { label: "Welcome Message", config: { body: "Hey {{subscriber_name}}, welcome in. I am glad you are here." } };
   if (type === "ask_question") return { label: "Ask Question", config: { body: "What kind of content do you want most from me?" } };
   if (type === "draft_reply") return { label: "Draft AI Reply", config: { body: "Draft a warm reply in the creator voice using the latest conversation context." } };
-  if (type === "approve") return { label: "Human Approval", config: { approvalNote: "Review this response before it continues.", destination: "Review Queue" } };
+  if (type === "classify_intent") return { label: "Classify Response", config: { body: "Use Conversation Interpretation output as response_class.", variableKey: "response_class", variableValue: "{{response_class}}" } };
+  if (type === "switch") return { label: "Route Response Class", config: { conditionKey: "response_class", cases: defaultRouteCases() } };
+  if (type === "approve") return { label: "Human Approval", config: { approvalNote: "Review this response before it continues.", destination: "Review Queue", outcomeKey: "human_review_required", outcomeLabel: "Human review required", terminalType: "handoff" } };
+  if (type === "pause") return { label: "Human Handoff", config: { body: "Pause for human review.", outcomeKey: "human_review_required", outcomeLabel: "Human review required", terminalType: "handoff" } };
+  if (type === "assign") return { label: "Assign Review", config: { queueName: "Review Queue", outcomeKey: "human_review_required", outcomeLabel: "Human review required", terminalType: "handoff" } };
+  if (type === "escalate") return { label: "Escalate Review", config: { queueName: "Escalations", outcomeKey: "human_review_required", outcomeLabel: "Human review required", terminalType: "handoff" } };
   if (type === "ppv_offer") return { label: "PPV Offer", config: { title: "Premium drop", price: 20, body: "I have something premium ready if you want it." } };
   if (type === "delay") return { label: "Follow-up", config: { delayMinutes: 180, body: "Check back in if they have not replied." } };
-  if (type === "end") return { label: "End", config: { outcome: "complete" } };
+  if (type === "end") return { label: "End", config: { outcomeKey: "complete", outcomeLabel: "Complete", terminalType: "completed" } };
   return { config: {} };
 }
 
@@ -1641,12 +1689,108 @@ function EmptyInspector({ children }: { children: ReactNode }) {
 
 function nodeSummary(node: ScriptVisualBuilderNode) {
   if (node.type === "trigger") return stringValue(node.config.eventType) || "Manual trigger";
-  if (node.type === "if_else" || node.type === "branch" || node.type === "switch" || node.type === "filter") return `${stringValue(node.config.conditionKey) || "condition"} = ${stringValue(node.config.conditionValue) || "value"}`;
+  if (node.type === "switch") return `${stringValue(node.config.conditionKey) || "response_class"} routes ${routeCasesFromConfig(node.config).length} cases`;
+  if (node.type === "if_else" || node.type === "branch" || node.type === "filter") return `${stringValue(node.config.conditionKey) || "condition"} = ${stringValue(node.config.conditionValue) || "value"}`;
   if (node.type === "delay" || node.type === "expiry") return `${numberValue(node.config.delayMinutes)} minutes`;
   if (node.type === "schedule") return stringValue(node.config.scheduleLabel) || "Scheduled";
   if (node.type === "approve") return stringValue(node.config.destination) || "Approval required";
   if (node.type === "assign" || node.type === "escalate") return stringValue(node.config.queueName) || "Queue";
+  if (node.type === "end") return stringValue(node.config.outcomeLabel) || stringValue(node.config.outcomeKey) || "Complete";
   return stringValue(node.config.body) || stringValue(node.config.title) || "Configured step";
+}
+
+function SwitchRoutesPanel({ node, onUpdateNode }: { node: ScriptVisualBuilderNode; onUpdateNode: (patch: Partial<ScriptVisualBuilderNode>) => void }) {
+  const cases = routeCasesFromConfig(node.config);
+  const updateCase = (index: number, patch: { key?: string; label?: string }) => {
+    onUpdateNode({
+      config: {
+        ...node.config,
+        cases: cases.map((routeCase, routeIndex) => (routeIndex === index ? { ...routeCase, ...patch } : routeCase))
+      }
+    });
+  };
+  return (
+    <div className="mt-4 rounded-lg border border-blue-500/15 bg-[#0D1B2A]/65 p-3">
+      <div className="text-xs font-semibold uppercase tracking-[0.16em] text-cyan-200/80">Routes</div>
+      <div className="mt-3 grid gap-3">
+        {cases.map((routeCase, index) => (
+          <div key={`${routeCase.key}:${index}`} className="grid gap-2">
+            <input value={routeCase.key} onChange={(event) => updateCase(index, { key: slugifyRouteKey(event.target.value) })} className="command-card w-full rounded-lg px-3 py-2 text-xs font-semibold" placeholder="case_key" />
+            <input value={routeCase.label} onChange={(event) => updateCase(index, { label: event.target.value })} className="command-card w-full rounded-lg px-3 py-2 text-xs" placeholder="Case label" />
+          </div>
+        ))}
+      </div>
+      <div className="mt-3 flex gap-2">
+        <button type="button" onClick={() => onUpdateNode({ config: { ...node.config, cases: [...cases, { key: `case_${cases.length + 1}`, label: `Case ${cases.length + 1}` }] } })} className="rounded-lg border border-blue-400/20 bg-[#102338]/72 px-3 py-2 text-xs font-semibold text-blue-50">
+          Add route
+        </button>
+        <button type="button" onClick={() => onUpdateNode({ config: { ...node.config, cases: cases.slice(0, -1) } })} disabled={cases.length <= 1} className="rounded-lg border border-rose-400/20 bg-rose-500/10 px-3 py-2 text-xs font-semibold text-rose-100 disabled:opacity-45">
+          Remove last
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function routeCasesFromConfig(config: Record<string, unknown>) {
+  const rawCases = Array.isArray(config.cases) ? config.cases : [];
+  const cases = rawCases
+    .map((item) => (isRecord(item) ? { key: stringValue(item.key).trim(), label: stringValue(item.label).trim() } : null))
+    .filter((item): item is { key: string; label: string } => Boolean(item));
+  return cases.length ? cases : defaultRouteCases();
+}
+
+function defaultRouteCases() {
+  return [
+    { key: "warm_enthusiastic", label: "Warm / enthusiastic" },
+    { key: "short_low_effort", label: "Short / low effort" },
+    { key: "compliment", label: "Compliment" },
+    { key: "flirtatious", label: "Flirtatious" },
+    { key: "asks_for_content", label: "Asks for content" },
+    { key: "purchase_intent", label: "Purchase intent" },
+    { key: "price_objection", label: "Price objection" },
+    { key: "not_ready", label: "Not ready" },
+    { key: "boundary_testing", label: "Boundary-testing" }
+  ];
+}
+
+function edgeDisplayLabel(label?: string) {
+  if (!label) return undefined;
+  if (label === "yes") return "YES path";
+  if (label === "no") return "NO path";
+  if (label === fallbackRouteKey) return "Fallback";
+  return label.replaceAll("_", " ");
+}
+
+function routeHandleOffset(config: Record<string, unknown>, sourceHandle?: string | null) {
+  if (!sourceHandle || sourceHandle === "yes") return -110;
+  if (sourceHandle === "no" || sourceHandle === fallbackRouteKey) return 110;
+  const index = routeCasesFromConfig(config).findIndex((routeCase) => routeCase.key === sourceHandle);
+  return index >= 0 ? (index - 1) * 110 : 0;
+}
+
+function historyOutcomeLabel(payload: unknown) {
+  if (!isRecord(payload)) return null;
+  const label = stringValue(payload.outcome_label);
+  const key = stringValue(payload.outcome_key);
+  if (label && key) return `${label} (${key})`;
+  return label || key || null;
+}
+
+function outcomeLabelFromNode(node?: ScriptVisualBuilderNode) {
+  if (!node) return null;
+  const label = stringValue(node.config.outcomeLabel);
+  const key = stringValue(node.config.outcomeKey);
+  if (label && key) return `${label} (${key})`;
+  return label || key || null;
+}
+
+function slugifyRouteKey(value: string) {
+  return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
 function operatorIssueMessage(message: string) {

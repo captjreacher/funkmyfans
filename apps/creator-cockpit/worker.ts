@@ -3881,6 +3881,9 @@ function normalizeStepMetadata(value: unknown): ScriptBuilderStepMetadata {
     kind: isBuilderStepKind(value.kind) ? value.kind : undefined,
     label: typeof value.label === "string" && value.label.trim() ? value.label.trim() : undefined,
     nodeKey: typeof value.nodeKey === "string" && value.nodeKey.trim() ? value.nodeKey.trim() : undefined,
+    outcomeKey: typeof value.outcomeKey === "string" && value.outcomeKey.trim() ? value.outcomeKey.trim() : undefined,
+    outcomeLabel: typeof value.outcomeLabel === "string" && value.outcomeLabel.trim() ? value.outcomeLabel.trim() : undefined,
+    terminalType: typeof value.terminalType === "string" && value.terminalType.trim() ? value.terminalType.trim() : undefined,
     variableKey: typeof value.variableKey === "string" && value.variableKey.trim() ? value.variableKey.trim() : undefined,
     variableValue: typeof value.variableValue === "string" ? value.variableValue : undefined,
     waitForReply: typeof value.waitForReply === "boolean" ? value.waitForReply : undefined,
@@ -5301,7 +5304,14 @@ async function processConversationInstance(
       fromStatus: conversation.status,
       toStatus: conversation.status,
       detail: `Entered step ${currentStep.step_order} (${currentStep.step_type}).`,
-      payload: { step_order: currentStep.step_order, step_type: currentStep.step_type, label: metadata.label ?? null }
+      payload: {
+        step_order: currentStep.step_order,
+        step_type: currentStep.step_type,
+        label: metadata.label ?? null,
+        outcome_key: metadata.outcomeKey ?? null,
+        outcome_label: metadata.outcomeLabel ?? null,
+        terminal_type: metadata.terminalType ?? null
+      }
     });
 
     if (currentStep.step_type === "set_variable") {
@@ -5535,7 +5545,10 @@ async function processConversationInstance(
     }
 
     if (currentStep.step_type === "end") {
-      conversation = await markConversationCompleted(supabase, conversation.id, "End conversation step reached.");
+      const outcomeKey = metadata.outcomeKey ?? "complete";
+      const outcomeLabel = metadata.outcomeLabel ?? metadata.label ?? "Complete";
+      const terminalType = metadata.terminalType ?? "completed";
+      conversation = await markConversationCompleted(supabase, conversation.id, `End conversation step reached: ${outcomeLabel}.`);
       await recordConversationHistory(supabase, {
         conversationId: conversation.id,
         creatorId: conversation.creator_id,
@@ -5545,8 +5558,8 @@ async function processConversationInstance(
         eventType: "conversation_completed",
         fromStatus: statusBefore,
         toStatus: "completed",
-        detail: "Conversation completed at end step.",
-        payload: {}
+        detail: `Conversation completed with outcome ${outcomeLabel}.`,
+        payload: { outcome_key: outcomeKey, outcome_label: outcomeLabel, terminal_type: terminalType }
       });
       return conversation;
     }

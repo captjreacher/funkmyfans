@@ -886,6 +886,9 @@ export interface ScriptBuilderStepMetadata {
   kind?: ScriptBuilderStepKind;
   label?: string;
   nodeKey?: string;
+  outcomeKey?: string;
+  outcomeLabel?: string;
+  terminalType?: string;
   variableKey?: string;
   variableValue?: string;
   waitForReply?: boolean;

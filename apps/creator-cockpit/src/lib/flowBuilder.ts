@@ -2,6 +2,7 @@ import type {
   MessageScriptStepType,
   MessageScriptTemplate,
   OfMessageScript,
+  ScriptBuilderBranchRule,
   ScriptBuilderConfig,
   ScriptBuilderCondition,
   ScriptBuilderStepMetadata,
@@ -61,6 +62,12 @@ const conditionFields = [
   { key: "conditionKey", label: "Condition key", input: "text" as const, required: true },
   { key: "conditionValue", label: "Condition value", input: "text" as const }
 ];
+const outcomeFields = [
+  { key: "outcomeKey", label: "Outcome key", input: "text" as const },
+  { key: "outcomeLabel", label: "Outcome label", input: "text" as const },
+  { key: "terminalType", label: "Terminal type", input: "text" as const }
+];
+const fallbackRouteKey = "fallback";
 
 export const nodeRegistry: NodeRegistryEntry[] = [
   registryNode("trigger", "Trigger", "Starts a conversation flow.", "conversation", "Route", { eventType: "manual" }, "message", "send_message", [
@@ -79,18 +86,23 @@ export const nodeRegistry: NodeRegistryEntry[] = [
   registryNode("classify_intent", "Classify Intent", "Classifies fan intent.", "ai", "Tags", { body: "Classify the current fan intent." }, "set_variable", "set_variable", textBodyField),
   registryNode("if_else", "If / Else", "Routes between yes and no paths.", "logic", "GitBranch", { conditionKey: "spend_level", conditionValue: "high" }, "branch", "branch", conditionFields),
   registryNode("branch", "Branch", "Creates labelled flow paths.", "logic", "Split", { conditionKey: "intent", conditionValue: "buy" }, "branch", "branch", conditionFields),
-  registryNode("switch", "Switch", "Routes by a field value.", "logic", "Workflow", { conditionKey: "intent", conditionValue: "custom" }, "branch", "branch", conditionFields),
+  registryNode("switch", "Switch", "Routes by a field value.", "logic", "Workflow", { conditionKey: "response_class", cases: defaultRoutingCases() }, "branch", "branch", [
+    { key: "conditionKey", label: "Routing variable", input: "text", required: true }
+  ]),
   registryNode("filter", "Filter", "Stops or continues by condition.", "logic", "Filter", { conditionKey: "safe_to_continue", conditionValue: "true" }, "branch", "branch", conditionFields),
   registryNode("approve", "Approve", "Requires human approval.", "human", "UserCheck", { approvalNote: "Approve before continuing.", destination: "Review Queue" }, "message", "send_message", [
     { key: "approvalNote", label: "Approval note", input: "textarea", required: true },
-    { key: "destination", label: "Approval destination", input: "text", required: true }
+    { key: "destination", label: "Approval destination", input: "text", required: true },
+    ...outcomeFields
   ]),
   registryNode("assign", "Assign", "Assigns work to a queue or operator.", "human", "UsersRound", { queueName: "Review Queue" }, "message", "send_message", [
-    { key: "queueName", label: "Queue", input: "text", required: true }
+    { key: "queueName", label: "Queue", input: "text", required: true },
+    ...outcomeFields
   ]),
-  registryNode("pause", "Pause", "Pauses the flow for human handling.", "human", "PauseCircle", { approvalNote: "Pause for human review." }, "wait", "wait", textBodyField),
+  registryNode("pause", "Pause", "Pauses the flow for human handling.", "human", "PauseCircle", { body: "Pause for human review." }, "wait", "wait", [...textBodyField, ...outcomeFields]),
   registryNode("escalate", "Escalate", "Escalates to a senior operator.", "human", "BadgeAlert", { queueName: "Escalations" }, "message", "send_message", [
-    { key: "queueName", label: "Escalation queue", input: "text", required: true }
+    { key: "queueName", label: "Escalation queue", input: "text", required: true },
+    ...outcomeFields
   ]),
   registryNode("ppv_offer", "PPV Offer", "Drafts a PPV offer.", "commerce", "BadgeDollarSign", { title: "Premium drop", price: 20, body: "I have something premium for you." }, "message", "send_message", [
     { key: "title", label: "Offer title", input: "text", required: true },
@@ -106,9 +118,7 @@ export const nodeRegistry: NodeRegistryEntry[] = [
   registryNode("expiry", "Expiry", "Expires a path after a window.", "timing", "TimerOff", { delayMinutes: 1440 }, "wait", "wait", [
     { key: "delayMinutes", label: "Expiry minutes", input: "number", required: true }
   ]),
-  registryNode("end", "End", "Ends the conversation flow.", "conversation", "CheckCircle2", { outcome: "complete" }, "end", "end_conversation", [
-    { key: "outcome", label: "Outcome", input: "text" }
-  ])
+  registryNode("end", "End", "Ends the conversation flow.", "conversation", "CheckCircle2", { outcomeKey: "complete", outcomeLabel: "Complete", terminalType: "completed" }, "end", "end_conversation", outcomeFields)
 ];
 
 export const nodeRegistryByType = new Map(nodeRegistry.map((entry) => [entry.type, entry]));
@@ -157,11 +167,17 @@ export function flowFromConversationFlow(script: OfMessageScript): ScriptVisualB
       config: {
         body: step.message_body ?? "",
         delayMinutes: step.delay_minutes ?? 0,
-        conditionKey: step.condition_key ?? "",
+        conditionKey: step.condition_key ?? step.metadata?.branchRules?.[0]?.condition.key ?? "",
         conditionValue: step.condition_value ?? "",
         approvalNote: step.metadata?.notes ?? "",
         destination: step.metadata?.variableValue ?? "Review Queue",
-        queueName: step.metadata?.variableValue ?? "Review Queue"
+        queueName: step.metadata?.variableValue ?? "Review Queue",
+        variableKey: step.metadata?.variableKey ?? "",
+        variableValue: step.metadata?.variableValue ?? "",
+        cases: routeCasesFromMetadata(step.metadata),
+        outcomeKey: step.metadata?.outcomeKey ?? "complete",
+        outcomeLabel: step.metadata?.outcomeLabel ?? step.metadata?.label ?? "Complete",
+        terminalType: step.metadata?.terminalType ?? "completed"
       }
     })
   );
@@ -231,8 +247,12 @@ export function validateBuilderFlow(flow: ScriptVisualBuilderConfig): FlowValida
       issues.push({ severity: "error", nodeId: node.id, message: "Approval node needs an approval destination." });
     }
     if (isBranchNode(node)) {
-      const labelled = new Set(outgoing.map((connection) => connection.label ?? "next"));
-      if (!labelled.has("yes") || !labelled.has("no")) issues.push({ severity: "error", nodeId: node.id, message: "Branch nodes need yes and no paths." });
+      if (node.type === "switch") {
+        issues.push(...validateSwitchNode(node, outgoing));
+      } else {
+        const labelled = new Set(outgoing.map((connection) => connection.label ?? "next"));
+        if (!labelled.has("yes") || !labelled.has("no")) issues.push({ severity: "error", nodeId: node.id, message: "Branch nodes need yes and no paths." });
+      }
     }
   }
 
@@ -300,8 +320,8 @@ function nodeToStepTemplate(
   stepType: MessageScriptStepType,
   kind: ScriptBuilderStepMetadata["kind"]
 ): MessageScriptTemplate["steps"][number] {
-  const next = connections.find((connection) => connection.from === node.id && (!connection.label || connection.label === "yes"));
-  const fallback = connections.find((connection) => connection.from === node.id && connection.label === "no");
+  const next = nextConnection(node, connections);
+  const fallback = fallbackConnection(node, connections);
   return {
     id: node.id,
     order,
@@ -315,22 +335,17 @@ function nodeToStepTemplate(
       kind,
       label: node.label,
       nodeKey: node.id,
+      outcomeKey: outcomeKeyFromNode(node),
+      outcomeLabel: outcomeLabelFromNode(node),
+      terminalType: terminalTypeFromNode(node),
+      variableKey: node.type === "classify_intent" || node.type === "draft_reply" || node.type === "generate_response" || node.type === "analyse_conversation" ? stringValue(node.config.variableKey) || undefined : undefined,
       waitForReply: node.type === "wait",
       messageGenerationMode: isAiNode(node) ? "ai_generated" : "template",
       notes: notesFromNode(node),
-      variableValue: stringValue(node.config.destination) || stringValue(node.config.queueName) || undefined,
+      variableValue: stringValue(node.config.variableValue) || stringValue(node.config.destination) || stringValue(node.config.queueName) || undefined,
       ppvTitle: stringValue(node.config.title) || undefined,
       ppvPrice: node.config.price == null ? undefined : numberValue(node.config.price),
-      branchRules: isBranchNode(node)
-        ? [
-            {
-              id: `${node.id}-yes`,
-              label: "yes",
-              condition: branchCondition(node),
-              nextStepId: next?.to && next.to !== "end" ? next.to : null
-            }
-          ]
-        : undefined
+      branchRules: isBranchNode(node) ? branchRulesFromNode(node, connections) : undefined
     }
   };
 }
@@ -356,6 +371,7 @@ function normalizeNodeType(type: ScriptVisualBuilderNodeType): ScriptVisualBuild
 }
 
 function nodeTypeFromStep(type: MessageScriptStepType, metadata?: ScriptBuilderStepMetadata): ScriptVisualBuilderNodeType {
+  if (metadata?.kind === "branch" && (metadata.branchRules?.length ?? 0) > 1) return "switch";
   if (metadata?.kind === "branch") return "if_else";
   if (metadata?.kind === "set_variable") return "draft_reply";
   if (type === "follow_up" || type === "wait") return "delay";
@@ -372,9 +388,18 @@ function connectionsFromScript(script: OfMessageScript): ScriptVisualBuilderConn
   const connections: ScriptVisualBuilderConnection[] = [{ id: "edge-trigger", from: "trigger", to: steps[0].id }];
   for (let index = 0; index < steps.length; index += 1) {
     const step = steps[index];
+    const metadata = step.metadata;
     const nextStep = step.next_step_id || steps[index + 1]?.id || "end";
-    connections.push({ id: `edge-${step.id}-next`, from: step.id, to: nextStep, label: step.step_type === "branch" ? "yes" : undefined });
-    if (step.fallback_step_id) connections.push({ id: `edge-${step.id}-fallback`, from: step.id, to: step.fallback_step_id, label: "no" });
+    const branchRules = metadata?.branchRules ?? [];
+    if (step.step_type === "branch" && branchRules.length > 1) {
+      for (const rule of branchRules) {
+        if (rule.nextStepId) connections.push({ id: `edge-${step.id}-${routeCaseKey(rule)}`, from: step.id, to: rule.nextStepId, label: routeCaseKey(rule) });
+      }
+      if (step.fallback_step_id) connections.push({ id: `edge-${step.id}-${fallbackRouteKey}`, from: step.id, to: step.fallback_step_id, label: fallbackRouteKey });
+    } else {
+      connections.push({ id: `edge-${step.id}-next`, from: step.id, to: nextStep, label: step.step_type === "branch" ? "yes" : undefined });
+      if (step.fallback_step_id) connections.push({ id: `edge-${step.id}-fallback`, from: step.id, to: step.fallback_step_id, label: "no" });
+    }
   }
   return connections;
 }
@@ -443,12 +468,118 @@ function branchCondition(node: ScriptVisualBuilderNode): ScriptBuilderCondition 
   return { source: "variable", key: stringValue(node.config.conditionKey) || "condition", operator: "equals", value: stringValue(node.config.conditionValue) };
 }
 
+function nextConnection(node: ScriptVisualBuilderNode, connections: ScriptVisualBuilderConnection[]) {
+  const outgoing = connections.filter((connection) => connection.from === node.id);
+  if (node.type === "switch") return outgoing.find((connection) => !connection.label);
+  return outgoing.find((connection) => !connection.label || connection.label === "yes");
+}
+
+function fallbackConnection(node: ScriptVisualBuilderNode, connections: ScriptVisualBuilderConnection[]) {
+  const fallbackLabel = node.type === "switch" ? fallbackRouteKey : "no";
+  return connections.find((connection) => connection.from === node.id && connection.label === fallbackLabel);
+}
+
+function branchRulesFromNode(node: ScriptVisualBuilderNode, connections: ScriptVisualBuilderConnection[]): ScriptBuilderBranchRule[] {
+  if (node.type === "switch") {
+    return routeCasesFromNode(node).map((routeCase) => ({
+      id: `${node.id}-${routeCase.key}`,
+      label: routeCase.label,
+      condition: { source: "variable", key: stringValue(node.config.conditionKey) || "response_class", operator: "equals", value: routeCase.key },
+      nextStepId: connections.find((connection) => connection.from === node.id && connection.label === routeCase.key)?.to ?? null
+    }));
+  }
+  const next = nextConnection(node, connections);
+  return [
+    {
+      id: `${node.id}-yes`,
+      label: "yes",
+      condition: branchCondition(node),
+      nextStepId: next?.to && next.to !== "end" ? next.to : null
+    }
+  ];
+}
+
+function validateSwitchNode(node: ScriptVisualBuilderNode, outgoing: ScriptVisualBuilderConnection[]): FlowValidationIssue[] {
+  const issues: FlowValidationIssue[] = [];
+  const routeCases = routeCasesFromNode(node);
+  const keys = new Set<string>();
+  for (const routeCase of routeCases) {
+    if (!routeCase.key) {
+      issues.push({ severity: "warning", nodeId: node.id, message: "Switch route is missing a case key." });
+      continue;
+    }
+    if (keys.has(routeCase.key)) issues.push({ severity: "warning", nodeId: node.id, message: `Switch route key "${routeCase.key}" is duplicated.` });
+    keys.add(routeCase.key);
+    if (!routeCase.label.trim()) issues.push({ severity: "warning", nodeId: node.id, message: `Switch route "${routeCase.key}" needs a label.` });
+    if (!outgoing.some((connection) => connection.label === routeCase.key)) {
+      issues.push({ severity: "warning", nodeId: node.id, message: `Switch route "${routeCase.label || routeCase.key}" has no target.` });
+    }
+  }
+  if (!outgoing.some((connection) => connection.label === fallbackRouteKey)) {
+    issues.push({ severity: "warning", nodeId: node.id, message: "Switch route needs a fallback path before publishing." });
+  }
+  return issues;
+}
+
+function routeCasesFromMetadata(metadata?: ScriptBuilderStepMetadata) {
+  const branchRules = metadata?.branchRules ?? [];
+  if (!branchRules.length) return defaultRoutingCases();
+  return branchRules.map((rule) => ({ key: routeCaseKey(rule), label: rule.label || routeCaseKey(rule) }));
+}
+
+function routeCasesFromNode(node: ScriptVisualBuilderNode) {
+  const raw = Array.isArray(node.config.cases) ? node.config.cases : [];
+  const cases = raw
+    .map((item) => (isRecord(item) ? { key: stringValue(item.key).trim(), label: stringValue(item.label).trim() } : null))
+    .filter((item): item is { key: string; label: string } => Boolean(item));
+  return cases.length ? cases : defaultRoutingCases();
+}
+
+function routeCaseKey(rule: ScriptBuilderBranchRule) {
+  return rule.condition.value || rule.id;
+}
+
+function defaultRoutingCases() {
+  return [
+    { key: "warm_enthusiastic", label: "Warm / enthusiastic" },
+    { key: "short_low_effort", label: "Short / low effort" },
+    { key: "compliment", label: "Compliment" },
+    { key: "purchase_intent", label: "Purchase intent" }
+  ];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
 function isAiNode(node: ScriptVisualBuilderNode) {
   return node.category === "ai" || ["draft_reply", "generate_response", "analyse_conversation", "classify_intent", "ai_prompt"].includes(node.type);
 }
 
 function isHumanApprovalNode(node: ScriptVisualBuilderNode) {
   return node.type === "approve" || node.type === "human_approval";
+}
+
+function outcomeKeyFromNode(node: ScriptVisualBuilderNode) {
+  if (!isOutcomeNode(node)) return undefined;
+  if (node.type === "end") return stringValue(node.config.outcomeKey) || "complete";
+  return stringValue(node.config.outcomeKey) || undefined;
+}
+
+function outcomeLabelFromNode(node: ScriptVisualBuilderNode) {
+  if (!isOutcomeNode(node)) return undefined;
+  if (node.type === "end") return stringValue(node.config.outcomeLabel) || node.label || "Complete";
+  return stringValue(node.config.outcomeLabel) || undefined;
+}
+
+function terminalTypeFromNode(node: ScriptVisualBuilderNode) {
+  if (!isOutcomeNode(node)) return undefined;
+  if (node.type === "end") return stringValue(node.config.terminalType) || "completed";
+  return stringValue(node.config.terminalType) || undefined;
+}
+
+function isOutcomeNode(node: ScriptVisualBuilderNode) {
+  return node.type === "end" || node.type === "approve" || node.type === "assign" || node.type === "pause" || node.type === "escalate";
 }
 
 function labelFromStep(type: MessageScriptStepType) {
