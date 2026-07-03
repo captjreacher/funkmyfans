@@ -12,6 +12,7 @@ import {
   Gem,
   GitBranch,
   Hourglass,
+  Map as MapIcon,
   MessageCircleMore,
   MessageSquareText,
   Package,
@@ -118,6 +119,7 @@ type FlowNodeData = {
   validationState: "valid" | "warning" | "error";
   validationMessage?: string;
   simulationState?: BuilderSimulationStepState;
+  dimmed?: boolean;
   onInlineEdit?: (nodeId: string, patch: Partial<ScriptVisualBuilderNode>) => void;
   onQuickAdd?: (sourceNodeId: string, type: ScriptVisualBuilderNodeType, sourceHandle?: string | null) => void;
 };
@@ -133,7 +135,7 @@ type BuilderSimulationTimelineItem = {
 };
 
 type FlowNode = Node<FlowNodeData, "flowNode">;
-type FlowEdge = Edge<{ label?: string }>;
+type FlowEdge = Edge<{ label?: string; dimmed?: boolean }>;
 type FlowEdgeInput = {
   id?: string;
   source: string;
@@ -455,13 +457,19 @@ function ConversationFlowBuilder({
   const [simulationError, setSimulationError] = useState<string | null>(null);
   const [manualReplyText, setManualReplyText] = useState("Manual operator reply for this simulation.");
   const [panelState, setPanelState] = useState<BuilderPanelState>(() => readBuilderPanelState());
-  const { screenToFlowPosition, getViewport } = useReactFlow();
+  const [pathFocusEnabled, setPathFocusEnabled] = useState(false);
+  const [miniMapOpen, setMiniMapOpen] = useState(false);
+  const { screenToFlowPosition, getViewport, fitView } = useReactFlow();
 
   const flow = useMemo(() => fromReactFlow(nodes, edges, selectedNodeId, getViewport()), [edges, getViewport, nodes, selectedNodeId]);
   const validation = useMemo(() => validateBuilderFlow(flow), [flow]);
   const selectedBuilderNode = flow.nodes.find((node) => node.id === selectedNodeId) ?? flow.nodes[0] ?? null;
   const simulationTimeline = useMemo(() => buildSimulationTimeline(simulationDetail, flow), [flow, simulationDetail]);
   const simulationStates = useMemo(() => buildSimulationStepStates(flow, simulationDetail, simulationQueueItem), [flow, simulationDetail, simulationQueueItem]);
+  const focusedPathNodeIds = useMemo(
+    () => (pathFocusEnabled ? focusedPathFromSelection(nodes, edges, selectedNodeId, selectedEdgeIds) : null),
+    [edges, nodes, pathFocusEnabled, selectedEdgeIds, selectedNodeId]
+  );
   const deleteKeyCode = useMemo(() => ["Backspace", "Delete"], []);
   const multiSelectionKeyCode = useMemo(() => ["Shift"], []);
   const builderGridTemplate = `${panelState.leftPanelOpen ? "250px " : ""}minmax(0,1fr)${panelState.inspectorOpen ? " 340px" : ""}`;
@@ -649,10 +657,15 @@ function ConversationFlowBuilder({
             onInlineEdit: updateNodeInline,
             onQuickAdd: quickAddStep
           },
-          simulationStates.get(node.id)
+          simulationStates.get(node.id),
+          Boolean(focusedPathNodeIds && !focusedPathNodeIds.has(node.id))
         )
       ),
-    [nodes, quickAddStep, simulationStates, updateNodeInline, validation]
+    [focusedPathNodeIds, nodes, quickAddStep, simulationStates, updateNodeInline, validation]
+  );
+  const renderedEdges = useMemo(
+    () => edges.map((edge) => withEdgeFocusState(edge, focusedPathNodeIds)),
+    [edges, focusedPathNodeIds]
   );
 
   const onBuilderNodeDragStart = useCallback(() => {
@@ -716,6 +729,7 @@ function ConversationFlowBuilder({
     pushHistory();
     const arranged = arrangeFlowNodes(nodes, edges);
     setNodes(arranged);
+    window.requestAnimationFrame(() => fitView({ padding: 0.12, duration: 350 }));
   }
 
   async function runBuilderSimulation() {
@@ -850,6 +864,14 @@ function ConversationFlowBuilder({
           <button type="button" onClick={arrangeSteps} disabled={busy} className="rounded-lg border border-blue-400/20 bg-[#102338]/72 px-3 py-2 text-sm font-semibold text-blue-50 disabled:opacity-45">
             Arrange
           </button>
+          <button type="button" onClick={() => setPathFocusEnabled((current) => !current)} className={`inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-semibold ${pathFocusEnabled ? "border-cyan-300/28 bg-cyan-400/12 text-cyan-100" : "border-blue-400/20 bg-[#102338]/72 text-blue-50"}`}>
+            <Route className="h-4 w-4" aria-hidden="true" />
+            Focus Path
+          </button>
+          <button type="button" onClick={() => setMiniMapOpen((current) => !current)} className={`inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-semibold ${miniMapOpen ? "border-cyan-300/28 bg-cyan-400/12 text-cyan-100" : "border-blue-400/20 bg-[#102338]/72 text-blue-50"}`}>
+            <MapIcon className="h-4 w-4" aria-hidden="true" />
+            Map
+          </button>
           <button type="button" onClick={() => onSave(flow)} disabled={busy} className="inline-flex items-center gap-2 rounded-lg bg-cyan-400 px-4 py-2 text-sm font-semibold text-slate-950 disabled:opacity-45">
             <Save className="h-4 w-4" aria-hidden="true" />
             {busy ? "Saving..." : "Save"}
@@ -880,7 +902,7 @@ function ConversationFlowBuilder({
         <section className="min-h-0 min-w-0 overflow-hidden bg-[#06111d]" onDrop={handleDrop} onDragOver={handleDragOver}>
           <ReactFlow<FlowNode, FlowEdge>
             nodes={renderedNodes}
-            edges={edges}
+            edges={renderedEdges}
             nodeTypes={nodeTypes}
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
@@ -895,7 +917,7 @@ function ConversationFlowBuilder({
             multiSelectionKeyCode={multiSelectionKeyCode}
           >
             <Background variant={BackgroundVariant.Dots} color="rgba(59,130,246,.30)" gap={24} size={1} />
-            <MiniMap pannable zoomable nodeStrokeWidth={3} nodeColor={(node) => categoryColor((node.data as Partial<FlowNodeData>).category)} />
+            {miniMapOpen ? <MiniMap pannable zoomable nodeStrokeWidth={3} nodeColor={(node) => categoryColor((node.data as Partial<FlowNodeData>).category)} /> : null}
             <Controls />
           </ReactFlow>
         </section>
@@ -1276,7 +1298,7 @@ function FlowNodeCard({ id, data, selected }: NodeProps<FlowNode>) {
   const validationTone = validationToneClass(data.validationState);
   const simulationClass = data.simulationState ? simulationNodeClass(data.simulationState) : "";
   return (
-    <div className={`relative w-[210px] rounded-lg border p-3 shadow-[0_18px_48px_rgba(0,0,0,.28)] ${selected ? "border-cyan-300 bg-[#15314E]" : "border-blue-500/20 bg-[#0D1B2A]"} ${simulationClass}`} style={{ borderTopColor: color, borderTopWidth: 3 }}>
+    <div className={`relative w-[260px] rounded-lg border p-3.5 shadow-[0_18px_48px_rgba(0,0,0,.28)] ${selected ? "border-cyan-300 bg-[#15314E]" : "border-blue-500/20 bg-[#0D1B2A]"} ${simulationClass} ${data.dimmed ? "opacity-25" : ""}`} style={{ borderTopColor: color, borderTopWidth: 3 }}>
       {canReceive ? <Handle type="target" position={Position.Left} className="!h-3 !w-3 !border-2 !border-[#06111d]" style={{ background: color }} /> : null}
       <div className="flex items-center gap-2">
         <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md" style={{ background: `${color}24`, color }}>
@@ -1532,6 +1554,10 @@ function buildFlowEdge(connection: FlowEdgeInput): FlowEdge {
     label: displayLabel,
     data: { label },
     style: { stroke: "rgba(34,211,238,.82)", strokeWidth: 2 },
+    labelBgPadding: [8, 4],
+    labelBgBorderRadius: 6,
+    labelBgStyle: { fill: "rgba(8,21,36,.94)", stroke: "rgba(34,211,238,.28)" },
+    labelStyle: { fill: "#dff8ff", fontSize: 12, fontWeight: 700 },
     markerEnd: { type: MarkerType.ArrowClosed, color: "rgba(34,211,238,.82)" }
   };
 }
@@ -1548,7 +1574,8 @@ function withAuthoringData(
   node: FlowNode,
   validation: FlowValidationIssue[],
   handlers: Pick<FlowNodeData, "onInlineEdit" | "onQuickAdd">,
-  simulationState?: BuilderSimulationStepState
+  simulationState?: BuilderSimulationStepState,
+  dimmed = false
 ): FlowNode {
   return {
     ...node,
@@ -1558,8 +1585,29 @@ function withAuthoringData(
       issues: validation.filter((issue) => issue.nodeId === node.id).length,
       validationState: nodeValidationState(node.id, validation),
       validationMessage: validation.find((issue) => issue.nodeId === node.id)?.message,
-      simulationState
+      simulationState,
+      dimmed
     }
+  };
+}
+
+function withEdgeFocusState(edge: FlowEdge, focusedPathNodeIds: Set<string> | null): FlowEdge {
+  const dimmed = Boolean(focusedPathNodeIds && (!focusedPathNodeIds.has(edge.source) || !focusedPathNodeIds.has(edge.target)));
+  const stroke = dimmed ? "rgba(96,165,250,.22)" : "rgba(34,211,238,.86)";
+  return {
+    ...edge,
+    data: { ...edge.data, dimmed },
+    animated: Boolean(focusedPathNodeIds && !dimmed),
+    style: {
+      ...(edge.style ?? {}),
+      stroke,
+      strokeWidth: dimmed ? 1.5 : 2.6
+    },
+    labelStyle: {
+      ...(edge.labelStyle ?? {}),
+      fill: dimmed ? "rgba(191,219,254,.40)" : "#dff8ff"
+    },
+    markerEnd: { type: MarkerType.ArrowClosed, color: stroke }
   };
 }
 
@@ -1730,48 +1778,157 @@ function authoringStepTemplate(type: ScriptVisualBuilderNodeType): { label?: str
 }
 
 function arrangeFlowNodes(nodes: FlowNode[], edges: FlowEdge[]) {
+  const columnWidth = 360;
+  const rowHeight = 190;
+  const left = 80;
+  const top = 120;
   const byId = new Map(nodes.map((node) => [node.id, node]));
-  const outgoing = new Map<string, FlowEdge[]>();
-  for (const edge of edges) outgoing.set(edge.source, [...(outgoing.get(edge.source) ?? []), edge]);
+  const outgoing = buildOutgoingEdges(edges, byId);
+  const incoming = buildIncomingEdges(edges, byId);
 
   const root = nodes.find((node) => node.data.type === "trigger") ?? nodes[0];
   const depth = new Map<string, number>();
-  const queue: string[] = [];
-  if (root) {
-    depth.set(root.id, 0);
-    queue.push(root.id);
-  }
-  while (queue.length) {
-    const nodeId = queue.shift()!;
-    const currentDepth = depth.get(nodeId) ?? 0;
-    for (const edge of outgoing.get(nodeId) ?? []) {
-      if (!byId.has(edge.target) || depth.has(edge.target)) continue;
-      depth.set(edge.target, currentDepth + 1);
-      queue.push(edge.target);
+  if (root) depth.set(root.id, 0);
+
+  for (let pass = 0; pass < Math.max(nodes.length, 1); pass += 1) {
+    let changed = false;
+    for (const edge of edges) {
+      if (!byId.has(edge.source) || !byId.has(edge.target)) continue;
+      const sourceDepth = depth.get(edge.source);
+      if (sourceDepth == null) continue;
+      const targetDepth = Math.max(depth.get(edge.target) ?? 0, sourceDepth + 1);
+      if (targetDepth !== depth.get(edge.target)) {
+        depth.set(edge.target, targetDepth);
+        changed = true;
+      }
     }
-  }
-  for (const node of nodes) {
-    if (!depth.has(node.id)) depth.set(node.id, Math.max(1, Math.floor(node.position.x / 300)));
+    if (!changed) break;
   }
 
-  const columns = new Map<number, FlowNode[]>();
   for (const node of nodes) {
-    const column = depth.get(node.id) ?? 0;
-    columns.set(column, [...(columns.get(column) ?? []), node]);
+    if (!depth.has(node.id)) depth.set(node.id, Math.max(1, Math.round(node.position.x / columnWidth)));
   }
+
+  const terminalIds = new Set(nodes.filter((node) => isTerminalLayoutNode(node, outgoing)).map((node) => node.id));
+  const terminalDepth = Math.max(1, ...Array.from(depth.entries()).filter(([id]) => !terminalIds.has(id)).map(([, value]) => value)) + 1;
+  for (const nodeId of terminalIds) depth.set(nodeId, terminalDepth);
+
+  const lane = assignReadableLanes(nodes, outgoing, incoming, root?.id ?? null);
 
   return nodes.map((node) => {
     const column = depth.get(node.id) ?? 0;
-    const peers = (columns.get(column) ?? []).sort((a, b) => a.position.y - b.position.y || a.position.x - b.position.x);
-    const index = peers.findIndex((peer) => peer.id === node.id);
     return {
       ...node,
       position: {
-        x: 80 + column * 300,
-        y: 120 + Math.max(index, 0) * 170
+        x: left + column * columnWidth,
+        y: top + (lane.get(node.id) ?? 0) * rowHeight
       }
     };
   });
+}
+
+function buildOutgoingEdges(edges: FlowEdge[], byId: Map<string, FlowNode>) {
+  const outgoing = new Map<string, FlowEdge[]>();
+  for (const edge of edges) {
+    if (!byId.has(edge.source) || !byId.has(edge.target)) continue;
+    outgoing.set(edge.source, [...(outgoing.get(edge.source) ?? []), edge]);
+  }
+  for (const [nodeId, items] of outgoing) {
+    const node = byId.get(nodeId);
+    outgoing.set(nodeId, items.sort((a, b) => edgeRouteOrder(node, a) - edgeRouteOrder(node, b) || a.target.localeCompare(b.target)));
+  }
+  return outgoing;
+}
+
+function buildIncomingEdges(edges: FlowEdge[], byId: Map<string, FlowNode>) {
+  const incoming = new Map<string, FlowEdge[]>();
+  for (const edge of edges) {
+    if (!byId.has(edge.source) || !byId.has(edge.target)) continue;
+    incoming.set(edge.target, [...(incoming.get(edge.target) ?? []), edge]);
+  }
+  return incoming;
+}
+
+function assignReadableLanes(
+  nodes: FlowNode[],
+  outgoing: Map<string, FlowEdge[]>,
+  incoming: Map<string, FlowEdge[]>,
+  rootId: string | null
+) {
+  const lane = new Map<string, number>();
+  const reserved = new Set<number>();
+  if (rootId) {
+    lane.set(rootId, 0);
+    reserved.add(0);
+  }
+
+  const queue = rootId ? [rootId] : nodes.map((node) => node.id);
+  const visited = new Set<string>();
+  while (queue.length) {
+    const nodeId = queue.shift()!;
+    if (visited.has(nodeId)) continue;
+    visited.add(nodeId);
+    const baseLane = lane.get(nodeId) ?? nearestFreeLane(reserved, 0);
+    lane.set(nodeId, baseLane);
+    reserved.add(baseLane);
+
+    const children = outgoing.get(nodeId) ?? [];
+    const centeredStart = baseLane - Math.floor((children.length - 1) / 2);
+    children.forEach((edge, index) => {
+      const targetIncoming = incoming.get(edge.target) ?? [];
+      const preferred = targetIncoming.length > 1
+        ? averageLane(targetIncoming.map((item) => lane.get(item.source)).filter((value): value is number => value != null))
+        : centeredStart + index;
+      if (!lane.has(edge.target)) {
+        const nextLane = nearestFreeLane(reserved, preferred);
+        lane.set(edge.target, nextLane);
+        reserved.add(nextLane);
+      }
+      queue.push(edge.target);
+    });
+  }
+
+  for (const node of nodes) {
+    if (lane.has(node.id)) continue;
+    const parentLanes = (incoming.get(node.id) ?? []).map((edge) => lane.get(edge.source)).filter((value): value is number => value != null);
+    const nextLane = nearestFreeLane(reserved, parentLanes.length ? averageLane(parentLanes) : 0);
+    lane.set(node.id, nextLane);
+    reserved.add(nextLane);
+  }
+
+  const sorted = [...lane.entries()].sort((a, b) => a[1] - b[1]);
+  return new Map(sorted.map(([nodeId], index) => [nodeId, index]));
+}
+
+function averageLane(values: number[]) {
+  if (!values.length) return 0;
+  return Math.round(values.reduce((sum, value) => sum + value, 0) / values.length);
+}
+
+function nearestFreeLane(reserved: Set<number>, preferred: number) {
+  if (!reserved.has(preferred)) return preferred;
+  for (let offset = 1; offset < 200; offset += 1) {
+    if (!reserved.has(preferred + offset)) return preferred + offset;
+    if (!reserved.has(preferred - offset)) return preferred - offset;
+  }
+  return reserved.size;
+}
+
+function edgeRouteOrder(node: FlowNode | undefined, edge: FlowEdge) {
+  const label = edge.data?.label ?? edge.sourceHandle ?? "";
+  if (!node) return label === fallbackRouteKey ? 999 : 0;
+  if (node.data.type === "switch") {
+    const routeIndex = routeCasesFromConfig(node.data.config).findIndex((routeCase) => routeCase.key === label);
+    if (routeIndex >= 0) return routeIndex;
+    if (label === fallbackRouteKey) return 998;
+  }
+  if (label === "yes") return 0;
+  if (label === "no" || label === fallbackRouteKey) return 1;
+  return 100;
+}
+
+function isTerminalLayoutNode(node: FlowNode, outgoing: Map<string, FlowEdge[]>) {
+  return node.data.type === "end" || !(outgoing.get(node.id)?.length);
 }
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
@@ -1916,6 +2073,50 @@ function categoryColor(category?: ScriptVisualBuilderNodeCategory) {
 
 function sameStringArray(left: string[], right: string[]) {
   return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function focusedPathFromSelection(nodes: FlowNode[], edges: FlowEdge[], selectedNodeId: string | null, selectedEdgeIds: string[]) {
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const selectedEdge = edges.find((edge) => selectedEdgeIds.includes(edge.id));
+  const anchorNodeId = selectedEdge?.target ?? selectedNodeId;
+  if (!anchorNodeId || !byId.has(anchorNodeId)) return null;
+
+  const focused = new Set<string>();
+  const incoming = new Map<string, FlowEdge[]>();
+  const outgoing = new Map<string, FlowEdge[]>();
+  for (const edge of edges) {
+    incoming.set(edge.target, [...(incoming.get(edge.target) ?? []), edge]);
+    outgoing.set(edge.source, [...(outgoing.get(edge.source) ?? []), edge]);
+  }
+
+  if (selectedEdge) {
+    focused.add(selectedEdge.source);
+    focused.add(selectedEdge.target);
+    collectAncestors(selectedEdge.source, incoming, focused);
+    collectDescendants(selectedEdge.target, outgoing, focused);
+  } else {
+    focused.add(anchorNodeId);
+    collectAncestors(anchorNodeId, incoming, focused);
+    collectDescendants(anchorNodeId, outgoing, focused);
+  }
+
+  return focused;
+}
+
+function collectAncestors(nodeId: string, incoming: Map<string, FlowEdge[]>, focused: Set<string>) {
+  for (const edge of incoming.get(nodeId) ?? []) {
+    if (focused.has(edge.source)) continue;
+    focused.add(edge.source);
+    collectAncestors(edge.source, incoming, focused);
+  }
+}
+
+function collectDescendants(nodeId: string, outgoing: Map<string, FlowEdge[]>, focused: Set<string>) {
+  for (const edge of outgoing.get(nodeId) ?? []) {
+    if (focused.has(edge.target)) continue;
+    focused.add(edge.target);
+    collectDescendants(edge.target, outgoing, focused);
+  }
 }
 
 function readBuilderPanelState(): BuilderPanelState {
