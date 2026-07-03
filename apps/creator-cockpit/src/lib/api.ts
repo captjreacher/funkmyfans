@@ -290,6 +290,11 @@ export async function fetchCreatorScripts(creatorId: string): Promise<{ scripts:
   return apiJson<{ scripts: OfMessageScript[] }>(`/creators/${creatorId}/scripts`);
 }
 
+export async function fetchScript(scriptId: string): Promise<{ script: OfMessageScript }> {
+  assertUuid(scriptId, "script");
+  return apiJson<{ script: OfMessageScript }>(`/scripts/${scriptId}`);
+}
+
 export async function fetchScriptsWorkspace(): Promise<ScriptsWorkspaceData> {
   return apiJson<ScriptsWorkspaceData>("/scripts/workspace");
 }

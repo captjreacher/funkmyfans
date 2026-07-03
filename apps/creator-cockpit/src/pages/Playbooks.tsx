@@ -74,6 +74,7 @@ import {
   applyQueueItemAction,
   createCreatorScript,
   fetchQueueWorkspace,
+  fetchScript,
   fetchScriptsWorkspace,
   fetchSimulationDetail,
   saveScriptBuilder,
@@ -217,7 +218,10 @@ export function Playbooks({ onOpenSimulations }: { onOpenSimulations?: (scriptId
       setWorkspace(result);
       if (preferredId) {
         const script = result.scripts.find((item) => item.id === preferredId);
-        if (script) setBuilderSession({ script, flow: flowFromConversationFlow(script) });
+        if (script) {
+          const detail = await fetchScript(script.id);
+          setBuilderSession({ script: detail.script, flow: flowFromConversationFlow(detail.script) });
+        }
       }
       setError(null);
     } catch (loadError) {
@@ -226,28 +230,29 @@ export function Playbooks({ onOpenSimulations }: { onOpenSimulations?: (scriptId
   }
 
   async function createFlow(template?: OfMessageScript) {
-    const creatorId = template?.creator_id ?? workspace?.creators[0]?.id;
-    if (!creatorId) {
-      setError("Connect a creator before creating a conversation flow.");
-      return;
-    }
     setBusy(true);
     try {
+      const hydratedTemplate = template ? (await fetchScript(template.id)).script : undefined;
+      const creatorId = hydratedTemplate?.creator_id ?? workspace?.creators[0]?.id;
+      if (!creatorId) {
+        setError("Connect a creator before creating a conversation flow.");
+        return;
+      }
       const response = await createCreatorScript(creatorId, {
-        name: template ? `${template.name.replace(/\bScript\b/g, "Flow")} Draft` : "New Conversation Flow",
-        description: template?.description ?? "Conversation flow ready for builder configuration.",
-        triggerEventType: template?.trigger_event_type ?? "manual",
+        name: hydratedTemplate ? `${hydratedTemplate.name.replace(/\bScript\b/g, "Flow")} Draft` : "New Conversation Flow",
+        description: hydratedTemplate?.description ?? "Conversation flow ready for builder configuration.",
+        triggerEventType: hydratedTemplate?.trigger_event_type ?? "manual",
         autoSendEnabled: false,
         requiresApproval: true,
-        actionMode: template?.action_mode ?? "draft_for_approval",
-        cooldownHours: template?.cooldown_hours ?? 24,
-        maxSendsPerFan: template?.max_sends_per_fan ?? 1,
-        folderName: template?.folder_name ?? "Playbooks",
-        category: template?.category ?? "General",
-        tags: template?.tags?.length ? template.tags : ["playbook", "flow"],
+        actionMode: hydratedTemplate?.action_mode ?? "draft_for_approval",
+        cooldownHours: hydratedTemplate?.cooldown_hours ?? 24,
+        maxSendsPerFan: hydratedTemplate?.max_sends_per_fan ?? 1,
+        folderName: hydratedTemplate?.folder_name ?? "Playbooks",
+        category: hydratedTemplate?.category ?? "General",
+        tags: hydratedTemplate?.tags?.length ? hydratedTemplate.tags : ["playbook", "flow"],
         builderConfig: {
           schemaVersion: 1,
-          variables: template?.builder_config?.variables ?? [
+          variables: hydratedTemplate?.builder_config?.variables ?? [
             { key: "subscriber_name", label: "Subscriber Name", defaultValue: "there" },
             { key: "creator_name", label: "Creator Name", defaultValue: "creator" }
           ],
@@ -257,11 +262,11 @@ export function Playbooks({ onOpenSimulations }: { onOpenSimulations?: (scriptId
             ai: { mode: "draft_only" },
             approval: { mode: "always_approve" },
             conditions: [],
-            ...template?.builder_config?.workspace
+            ...hydratedTemplate?.builder_config?.workspace
           }
         },
-        steps: template?.steps?.length
-          ? template.steps.map((step, index) => ({
+        steps: hydratedTemplate?.steps?.length
+          ? hydratedTemplate.steps.map((step, index) => ({
               id: step.id,
               order: index,
               type: step.step_type,
@@ -275,8 +280,7 @@ export function Playbooks({ onOpenSimulations }: { onOpenSimulations?: (scriptId
       });
       const result = await fetchScriptsWorkspace();
       setWorkspace(result);
-      const next = result.scripts.find((script) => script.id === response.script.id) ?? response.script;
-      setBuilderSession({ script: next, flow: flowFromConversationFlow(next) });
+      setBuilderSession({ script: response.script, flow: flowFromConversationFlow(response.script) });
       setError(null);
     } catch (createError) {
       setError(errorMessage(createError, "Unable to create conversation flow"));
@@ -320,6 +324,16 @@ export function Playbooks({ onOpenSimulations }: { onOpenSimulations?: (scriptId
       setError(errorMessage(statusError, "Unable to update flow status"));
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function openBuilder(script: OfMessageScript) {
+    try {
+      const detail = await fetchScript(script.id);
+      setBuilderSession({ script: detail.script, flow: flowFromConversationFlow(detail.script) });
+      setError(null);
+    } catch (openError) {
+      setError(errorMessage(openError, "Unable to open conversation flow"));
     }
   }
 
@@ -381,7 +395,7 @@ export function Playbooks({ onOpenSimulations }: { onOpenSimulations?: (scriptId
         <div className="divide-y divide-blue-500/12">
           {filteredScripts.map((script) => (
             <div key={script.id} className="grid grid-cols-[1.3fr_0.7fr_0.7fr_0.7fr_0.8fr] items-center gap-3 px-4 py-3 text-sm hover:bg-[#102338]/72">
-              <button type="button" onClick={() => setBuilderSession({ script, flow: flowFromConversationFlow(script) })} className="min-w-0 text-left">
+              <button type="button" onClick={() => void openBuilder(script)} className="min-w-0 text-left">
                 <div className="truncate font-semibold text-white">{flowLabel(script.name)}</div>
                 <div className="truncate text-xs text-blue-100/52">{script.description ?? script.category ?? "No description"}</div>
               </button>
@@ -392,7 +406,7 @@ export function Playbooks({ onOpenSimulations }: { onOpenSimulations?: (scriptId
                 <button type="button" onClick={() => void createFlow(script)} disabled={busy} className="rounded-lg border border-blue-400/20 bg-[#102338]/72 px-3 py-2 text-xs font-semibold text-blue-50 disabled:opacity-45">
                   Create from Template
                 </button>
-                <button type="button" onClick={() => setBuilderSession({ script, flow: flowFromConversationFlow(script) })} className="rounded-lg bg-cyan-400 px-3 py-2 text-xs font-semibold text-slate-950">
+                <button type="button" onClick={() => void openBuilder(script)} className="rounded-lg bg-cyan-400 px-3 py-2 text-xs font-semibold text-slate-950">
                   Open Builder
                 </button>
               </div>

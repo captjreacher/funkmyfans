@@ -543,6 +543,14 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
   }
 
   const scriptMatch = url.pathname.match(/^\/api\/scripts\/([^/]+)$/);
+  if (request.method === "GET" && scriptMatch) {
+    if (!isUuid(scriptMatch[1])) {
+      return Response.json({ error: "Script id must be a database UUID" }, { status: 400, headers: jsonHeaders });
+    }
+    const script = await getMessageScript(supabase, scriptMatch[1]);
+    return Response.json({ script }, { headers: jsonHeaders });
+  }
+
   if (request.method === "PATCH" && scriptMatch) {
     if (!isUuid(scriptMatch[1])) {
       return Response.json({ error: "Script id must be a database UUID" }, { status: 400, headers: jsonHeaders });
@@ -2143,43 +2151,50 @@ async function listCreatorScripts(supabase: SupabaseClient, creatorId: string) {
   }));
 }
 
+async function getMessageScript(supabase: SupabaseClient, scriptId: string) {
+  const scriptResult = await supabase
+    .from("of_message_scripts")
+    .select("*, of_creators(id, username, display_name)")
+    .eq("id", scriptId)
+    .single();
+  assertNoError(scriptResult.error);
+  if (!scriptResult.data) throw new Error("Script not found");
+
+  const stepsResult = await supabase
+    .from("of_message_script_steps")
+    .select("*")
+    .eq("script_id", scriptId)
+    .order("step_order", { ascending: true });
+  assertNoError(stepsResult.error);
+
+  return {
+    ...(scriptResult.data as Record<string, unknown>),
+    action_mode: scriptActionMode(scriptResult.data as Record<string, unknown>),
+    steps: (stepsResult.data ?? []) as OfMessageScriptStep[]
+  };
+}
+
 async function getScriptsWorkspace(supabase: SupabaseClient) {
   const creatorsResult = await supabase
     .from("of_creators")
-    .select("*")
+    .select("id, username, display_name, active")
     .eq("active", true)
     .order("display_name", { ascending: true, nullsFirst: false })
     .order("username", { ascending: true });
   assertNoError(creatorsResult.error);
   const creators = (creatorsResult.data ?? []) as OfCreator[];
 
-  await ensureAgencySeedLibrary(supabase, creators);
-
   const scriptsResult = await supabase
     .from("of_message_scripts")
-    .select("*, of_creators(id, username, display_name)")
+    .select("id, creator_id, name, description, trigger_event_type, status, action_mode, auto_send_enabled, requires_approval, cooldown_hours, max_sends_per_fan, folder_name, category, tags, version_number, source_script_id, builder_config, created_at, updated_at, of_creators(id, username, display_name)")
     .order("updated_at", { ascending: false });
   assertNoError(scriptsResult.error);
-  const scripts = (scriptsResult.data ?? []) as Array<Record<string, unknown>>;
-  const scriptIds = scripts.map((script) => String(script.id));
-  const stepsResult = scriptIds.length
-    ? await supabase.from("of_message_script_steps").select("*").in("script_id", scriptIds).order("step_order", { ascending: true })
-    : { data: [], error: null };
-  assertNoError(stepsResult.error);
-
-  const stepsByScript = new Map<string, OfMessageScriptStep[]>();
-  for (const step of (stepsResult.data ?? []) as OfMessageScriptStep[]) {
-    const existing = stepsByScript.get(step.script_id) ?? [];
-    existing.push(step);
-    stepsByScript.set(step.script_id, existing);
-  }
 
   return {
     creators,
-    scripts: scripts.map((script) => ({
+    scripts: ((scriptsResult.data ?? []) as Array<Record<string, unknown>>).map((script) => ({
       ...script,
-      action_mode: scriptActionMode(script),
-      steps: stepsByScript.get(String(script.id)) ?? []
+      action_mode: scriptActionMode(script)
     }))
   };
 }
