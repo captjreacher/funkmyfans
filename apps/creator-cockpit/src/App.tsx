@@ -1,22 +1,24 @@
-import { BarChart3, ClipboardList, FileText, Plus, Search, Settings2, Sparkles, TestTube2, Users } from "lucide-react";
+import { BarChart3, ClipboardList, FileText, Plus, Route, Search, Settings2, Sparkles, TestTube2, Users } from "lucide-react";
 import { useEffect, useState } from "react";
 import { ConnectCreatorModal } from "./components/ConnectCreatorModal";
 import { CreatorDetail } from "./pages/CreatorDetail";
 import { Creators } from "./pages/Creators";
 import { Dashboard } from "./pages/Dashboard";
 import { Playbooks } from "./pages/Playbooks";
+import { Journeys } from "./pages/Journeys";
 import { Queue } from "./pages/Queue";
 import { Settings } from "./pages/Settings";
 import { Simulations } from "./pages/Simulations";
 import { fetchDashboard, type DashboardData } from "./lib/api";
 
-type View = "dashboard" | "creators" | "creator" | "queue" | "playbooks" | "simulations" | "settings";
+type View = "dashboard" | "creators" | "creator" | "queue" | "playbooks" | "journeys" | "simulations" | "settings";
 
 const navItems: Array<{ view: View; label: string; icon: typeof BarChart3 }> = [
   { view: "dashboard", label: "Dashboard", icon: BarChart3 },
   { view: "creators", label: "Creators", icon: Users },
   { view: "queue", label: "Queue", icon: ClipboardList },
   { view: "playbooks", label: "Playbooks", icon: FileText },
+  { view: "journeys", label: "Journeys", icon: Route },
   { view: "simulations", label: "Simulations", icon: TestTube2 },
   { view: "settings", label: "Settings", icon: Settings2 }
 ];
@@ -172,6 +174,8 @@ export function App() {
                 {view === "queue" ? <Queue /> : null}
 
                 {view === "playbooks" ? <Playbooks onOpenSimulations={openSimulations} /> : null}
+
+                {view === "journeys" ? <Journeys /> : null}
 
                 {view === "simulations" ? <Simulations initialScriptId={simulationScriptId} /> : null}
 

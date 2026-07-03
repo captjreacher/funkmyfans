@@ -26,6 +26,7 @@ import type {
   OfOutboundMessage,
   OfRecommendation,
   SettingsWorkspaceData,
+  RevenueJourneyWorkspaceData,
   CreatorPreferenceSettings,
   CreatorAiSafetySettings,
   OfContextEvent,
@@ -114,6 +115,8 @@ export interface AutomationWorkspaceData {
   rules: OfAutomationRule[];
 }
 
+export interface JourneyWorkspaceData extends RevenueJourneyWorkspaceData {}
+
 export interface RegistryWorkspaceData {
   registry: AutomationRegistryWorkspaceData;
 }
@@ -138,6 +141,7 @@ export interface AutomationRunSummary {
 export interface SimulationLaunchPayload {
   scriptId?: string | null;
   scenarioId?: string | null;
+  journeyId?: string | null;
   simulatedSubscriberId?: string | null;
   eventType: string;
   eventPayload?: Record<string, unknown>;
@@ -298,6 +302,10 @@ export async function fetchAutomationRegistry(): Promise<AutomationRegistryWorks
   return apiJson<AutomationRegistryWorkspaceData>("/automation/registry");
 }
 
+export async function fetchJourneyWorkspace(): Promise<JourneyWorkspaceData> {
+  return apiJson<JourneyWorkspaceData>("/journeys/workspace");
+}
+
 export async function fetchSettingsWorkspace(): Promise<SettingsWorkspaceData> {
   return apiJson<SettingsWorkspaceData>("/settings/workspace");
 }
@@ -441,6 +449,11 @@ export async function fetchSimulationDetail(simulationId: string): Promise<Simul
 export async function simulationReply(simulationId: string, text: string): Promise<SimulationDetailData> {
   assertUuid(simulationId, "simulation");
   return apiJson<SimulationDetailData>(`/simulations/${simulationId}/reply`, jsonInit("POST", { text }));
+}
+
+export async function simulationPurchase(simulationId: string, purchased: boolean): Promise<SimulationDetailData> {
+  assertUuid(simulationId, "simulation");
+  return apiJson<SimulationDetailData>(`/simulations/${simulationId}/purchase`, jsonInit("POST", { purchased }));
 }
 
 export async function simulationFastForward(simulationId: string): Promise<SimulationDetailData> {

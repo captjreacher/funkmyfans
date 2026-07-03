@@ -40,6 +40,7 @@ import type {
   OfMessageScript,
   OfMessageScriptStep,
   OfOutboundMessage,
+  OfRevenueJourney,
   OfSimulatedSubscriber,
   OfTask,
   OfSubscriberRelationship,
@@ -55,6 +56,7 @@ import type {
   QueueWorkspaceViewModel,
   SettingsAuditEntry,
   SettingsWorkspaceData,
+  RevenueJourneyWorkspaceData,
   AgencyDefaultsSettings,
   CreatorPreferenceSettings,
   CreatorAiSafetySettings,
@@ -461,6 +463,11 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     return Response.json(registry, { headers: jsonHeaders });
   }
 
+  if (request.method === "GET" && url.pathname === "/api/journeys/workspace") {
+    const workspace = await getJourneyWorkspace(supabase);
+    return Response.json(workspace, { headers: jsonHeaders });
+  }
+
   if (request.method === "GET" && url.pathname === "/api/settings/workspace") {
     const workspace = await getSettingsWorkspace(supabase, env);
     return Response.json(workspace, { headers: jsonHeaders });
@@ -678,7 +685,7 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
   const queueItemActionMatch = url.pathname.match(/^\/api\/queue-items\/([^/]+)\/action$/);
   if (request.method === "POST" && queueItemActionMatch) {
     const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
-    const result = await applyQueueItemAction(supabase, queueItemActionMatch[1], body);
+    const result = await applyQueueItemAction(supabase, env, queueItemActionMatch[1], body);
     return Response.json(result, { headers: jsonHeaders });
   }
 
@@ -765,6 +772,13 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
   if (request.method === "POST" && simulationReplyMatch) {
     const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
     const detail = await replyToSimulation(supabase, env, simulationReplyMatch[1], typeof body.text === "string" ? body.text : "");
+    return Response.json(detail, { headers: jsonHeaders });
+  }
+
+  const simulationPurchaseMatch = url.pathname.match(/^\/api\/simulations\/([^/]+)\/purchase$/);
+  if (request.method === "POST" && simulationPurchaseMatch) {
+    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const detail = await purchaseSimulation(supabase, env, simulationPurchaseMatch[1], Boolean(body.purchased));
     return Response.json(detail, { headers: jsonHeaders });
   }
 
@@ -1847,7 +1861,7 @@ async function updateTask(supabase: SupabaseClient, taskId: string, body: Record
   return result.data;
 }
 
-async function applyQueueItemAction(supabase: SupabaseClient, queueItemId: string, body: Record<string, unknown>) {
+async function applyQueueItemAction(supabase: SupabaseClient, env: Env, queueItemId: string, body: Record<string, unknown>) {
   const action = parseQueueOperatorAction(body.action);
   const actor = typeof body.actor === "string" && body.actor.trim() ? body.actor.trim() : "operator";
   const now = new Date().toISOString();
@@ -1897,7 +1911,9 @@ async function applyQueueItemAction(supabase: SupabaseClient, queueItemId: strin
   const task = row.legacy_task_id ? await updateTask(supabase, row.legacy_task_id, queueActionTaskPatch(action, actor, body)) : null;
 
   if (action === "approve_ai" && row.conversation_id) {
-    await approvePendingConversationOutbound(supabase, row.conversation_id, actor);
+    await approvePendingConversationOutbound(supabase, env, row.conversation_id, actor, body);
+  } else if (action === "respond" && row.conversation_id) {
+    await resumeConversationAfterManualQueueResponse(supabase, env, row.conversation_id, actor, body);
   }
 
   return { action, item: updated.data, task };
@@ -1930,12 +1946,16 @@ function queueActionTaskPatch(action: QueueOperatorAction, actor: string, body: 
   return { status: "completed", resolution_note: note ?? "AI reply approved from queue item workspace", actor };
 }
 
-async function approvePendingConversationOutbound(supabase: SupabaseClient, conversationId: string, actor: string) {
+async function approvePendingConversationOutbound(supabase: SupabaseClient, env: Env, conversationId: string, actor: string, body: Record<string, unknown>) {
   const result = await supabase
     .from("of_outbound_messages")
-    .update({ approval_status: "approved", approved_by: actor })
+    .select("id, draft_text, final_text, message_body, created_at")
     .eq("conversation_instance_id", conversationId)
-    .eq("approval_status", "pending");
+    .eq("approval_status", "pending")
+    .eq("status", "pending_approval")
+    .order("created_at", { ascending: true })
+    .limit(1)
+    .maybeSingle();
 
   if (result.error && (
     isMissingSchemaCacheRelationError(result.error, "of_outbound_messages") ||
@@ -1944,6 +1964,45 @@ async function approvePendingConversationOutbound(supabase: SupabaseClient, conv
     return;
   }
   assertNoError(result.error);
+  if (!result.data?.id) return;
+  const responseText = typeof body.responseText === "string" && body.responseText.trim() ? body.responseText.trim() : null;
+  await updateOutboundMessage(supabase, env, String(result.data.id), {
+    approval_status: "approved",
+    approved_by: actor,
+    edited_by: actor,
+    final_text: responseText ?? result.data.final_text ?? result.data.draft_text ?? result.data.message_body
+  });
+}
+
+async function resumeConversationAfterManualQueueResponse(supabase: SupabaseClient, env: Env, conversationId: string, actor: string, body: Record<string, unknown>) {
+  const conversation = await supabase.from("of_conversation_instances").select("*").eq("id", conversationId).maybeSingle();
+  assertNoError(conversation.error);
+  if (!conversation.data) return;
+  const responseText = typeof body.responseText === "string" && body.responseText.trim()
+    ? body.responseText.trim()
+    : typeof body.note === "string" && body.note.trim()
+      ? body.note.trim()
+      : "Operator replied manually and approved the next step.";
+  await recordConversationHistory(supabase, {
+    conversationId,
+    creatorId: conversation.data.creator_id as string,
+    eventId: conversation.data.last_event_id as string | null,
+    stepId: conversation.data.current_step_id as string | null,
+    transitionKey: `manual:${actor}:${Date.now()}`,
+    eventType: "manual_reply_recorded",
+    fromStatus: conversation.data.status as string,
+    toStatus: "running",
+    detail: "Operator supplied a manual reply and resumed the conversation.",
+    payload: { actor, response_text: responseText }
+  });
+  await updateConversationState(supabase, conversationId, {
+    status: "running",
+    waiting_reason: null,
+    waiting_until: null,
+    processing_started_at: new Date().toISOString(),
+    last_resumed_at: new Date().toISOString()
+  });
+  await processConversationInstance(supabase, env, conversationId, { reason: "approval_sent" });
 }
 
 async function generateCreatorTasks(supabase: SupabaseClient, creatorId: string) {
@@ -2094,13 +2153,7 @@ async function getScriptsWorkspace(supabase: SupabaseClient) {
   assertNoError(creatorsResult.error);
   const creators = (creatorsResult.data ?? []) as OfCreator[];
 
-  try {
-    await ensureAgencySeedLibrary(supabase, creators);
-  } catch (error) {
-    if (!isMissingSchemaCacheColumnError(error, "of_message_scripts", "action_mode")) throw error;
-    // Compatibility / local-schema tolerance: skip seed bootstrap when the local script schema omits action_mode.
-    console.warn("Skipped scripts workspace seed bootstrap due to local schema tolerance for of_message_scripts.action_mode");
-  }
+  await ensureAgencySeedLibrary(supabase, creators);
 
   const scriptsResult = await supabase
     .from("of_message_scripts")
@@ -2123,7 +2176,7 @@ async function getScriptsWorkspace(supabase: SupabaseClient) {
 
   return {
     creators,
-    scripts: (scripts.length ? scripts : fallbackWorkspaceScripts(creators)).map((script) => ({
+    scripts: scripts.map((script) => ({
       ...script,
       action_mode: scriptActionMode(script),
       steps: stepsByScript.get(String(script.id)) ?? []
@@ -2141,25 +2194,8 @@ async function getAutomationWorkspace(supabase: SupabaseClient) {
   assertNoError(creatorsResult.error);
   const creators = (creatorsResult.data ?? []) as OfCreator[];
 
-  try {
-    await ensureAgencySeedLibrary(supabase, creators);
-  } catch (error) {
-    if (!isMissingSchemaCacheColumnError(error, "of_message_scripts", "action_mode")) throw error;
-    // Compatibility / local-schema tolerance: skip seed bootstrap when the local script schema omits action_mode.
-    console.warn("Skipped automation workspace seed bootstrap due to local schema tolerance for of_message_scripts.action_mode");
-  }
-  try {
-    await ensureAutomationSeedRules(supabase, creators);
-  } catch (error) {
-    if (
-      !isMissingSchemaCacheColumnError(error, "of_message_scripts", "action_mode") &&
-      !isMissingSchemaCacheRelationError(error as { message: string; code?: string }, "of_automation_rules")
-    ) {
-      throw error;
-    }
-    // Compatibility / local-schema tolerance: skip automation seed bootstrap when the local schema omits script/action rule tables.
-    console.warn("Skipped automation rule seed bootstrap due to local schema tolerance for scripts or automation rules tables");
-  }
+  await ensureAgencySeedLibrary(supabase, creators);
+  await ensureAutomationSeedRules(supabase, creators);
 
   const scriptsResult = await supabase
     .from("of_message_scripts")
@@ -2174,7 +2210,7 @@ async function getAutomationWorkspace(supabase: SupabaseClient) {
       ...script,
       action_mode: scriptActionMode(script as unknown as Record<string, unknown>)
     })),
-    rules: rules.length ? rules : fallbackAutomationRules(creators)
+    rules
   };
 }
 
@@ -2194,6 +2230,30 @@ async function getAutomationRegistry(supabase: SupabaseClient): Promise<Automati
     playbookGoals: entries.filter((entry) => entry.kind === "playbook_goal") as AutomationRegistryWorkspaceData["playbookGoals"],
     playbookStyles: entries.filter((entry) => entry.kind === "playbook_style") as AutomationRegistryWorkspaceData["playbookStyles"],
     queueStates: entries.filter((entry) => entry.kind === "queue_state") as AutomationRegistryWorkspaceData["queueStates"]
+  };
+}
+
+async function getJourneyWorkspace(supabase: SupabaseClient): Promise<RevenueJourneyWorkspaceData> {
+  const creatorsResult = await supabase
+    .from("of_creators")
+    .select("*")
+    .eq("active", true)
+    .order("display_name", { ascending: true, nullsFirst: false })
+    .order("username", { ascending: true });
+  assertNoError(creatorsResult.error);
+  const creators = (creatorsResult.data ?? []) as OfCreator[];
+
+  await ensureRevenueJourneySeeds(supabase, creators);
+
+  const journeysResult = await supabase
+    .from("of_revenue_journeys")
+    .select("*, conversation_flow:of_message_scripts(id, name, status, action_mode, trigger_event_type, category), creator:of_creators(id, username, display_name)")
+    .order("updated_at", { ascending: false });
+  assertNoError(journeysResult.error);
+
+  return {
+    creators,
+    journeys: (journeysResult.data ?? []) as OfRevenueJourney[]
   };
 }
 
@@ -3150,7 +3210,7 @@ async function ensureAutomationSeedRules(supabase: SupabaseClient, creators: OfC
           description: seed.description,
           creator_scope: "selected_creator",
           creator_id: creator.id,
-          status: "draft",
+          status: seed.status ?? "draft",
           trigger_type: seed.triggerType,
           action_type: "run_script",
           selected_script_id: scriptId,
@@ -3167,29 +3227,71 @@ async function ensureAutomationSeedRules(supabase: SupabaseClient, creators: OfC
   }
 }
 
+async function ensureRevenueJourneySeeds(supabase: SupabaseClient, creators: OfCreator[]) {
+  for (const creator of creators) {
+    const scriptResult = await supabase
+      .from("of_message_scripts")
+      .select("id")
+      .eq("creator_id", creator.id)
+      .eq("name", "New Subscriber Funnel")
+      .order("updated_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    assertNoError(scriptResult.error);
+    if (!scriptResult.data?.id) continue;
+
+    const existing = await supabase
+      .from("of_revenue_journeys")
+      .select("id")
+      .eq("creator_id", creator.id)
+      .eq("name", "Instagram Follower -> OnlyFans Subscriber")
+      .maybeSingle();
+    assertNoError(existing.error);
+
+    const payload = {
+      creator_id: creator.id,
+      name: "Instagram Follower -> OnlyFans Subscriber",
+      description: "Routes Instagram follower replies into the current New Subscriber Funnel while the dedicated IG qualification flow is still future work.",
+      source_channel: "instagram",
+      target_channel: "onlyfans",
+      audience: "instagram_followers",
+      trigger_event: "instagram_story_reply",
+      conversation_flow_id: String(scriptResult.data.id),
+      expected_outcome: "onlyfans_subscribed",
+      success_event: "subscriber_created",
+      failure_event: "journey_timeout",
+      status: "active",
+      metadata: {
+        seed: true,
+        seed_key: "instagram_follower_to_onlyfans_subscriber",
+        alternate_trigger_events: ["instagram_dm_received"],
+        scope_note: "FunkMyFans-local routing shim; Hermes is intentionally out of scope."
+      }
+    };
+
+    if (existing.data?.id) {
+      const updated = await supabase.from("of_revenue_journeys").update(payload).eq("id", existing.data.id);
+      assertNoError(updated.error);
+    } else {
+      const inserted = await supabase.from("of_revenue_journeys").insert(payload);
+      assertNoError(inserted.error);
+    }
+  }
+}
+
 function automationRuleSeeds() {
   return [
     {
-      key: "new_subscriber_welcome",
-      name: "New subscriber -> Welcome New Subscriber",
-      description: "Trigger the standard welcome playbook as soon as a new fan comes in.",
+      key: "new_subscriber_funnel",
+      name: "New subscriber -> New Subscriber Funnel",
+      description: "Runs the production reference funnel for a fresh subscriber from welcome through PPV purchase check.",
       triggerType: "new_subscriber" as const,
-      scriptName: "Welcome New Subscriber",
-      approvalMode: "draft_for_approval" as const,
+      scriptName: "New Subscriber Funnel",
+      approvalMode: "auto_send" as const,
+      status: "active" as const,
       cooldownMinutes: 60,
       frequencyLimit: 1,
       conditions: []
-    },
-    {
-      key: "new_subscriber_ppv",
-      name: "New subscriber -> Welcome + PPV",
-      description: "Queue a stronger monetisation follow-up for new subscribers when you want a warm PPV offer.",
-      triggerType: "new_subscriber" as const,
-      scriptName: "Welcome + PPV",
-      approvalMode: "draft_for_approval" as const,
-      cooldownMinutes: 120,
-      frequencyLimit: 1,
-      conditions: [condition("relationship", "lifetime_spend", "gte", "0")]
     },
     {
       key: "expiring_tomorrow",
@@ -3263,50 +3365,79 @@ function automationRuleSeeds() {
 function agencySeedLibrary(): MessageScriptTemplate[] {
   return [
     seedTemplate({
-      key: "welcome_new_subscriber",
-      name: "Welcome New Subscriber",
-      description: "Warm first-touch playbook for fresh subscribers that starts the relationship without sounding robotic.",
-      triggerEventType: "subscriber_created",
-      category: "Welcome",
-      tags: ["seed", "welcome", "new-subscriber"],
-      execution: { mode: "immediate" },
-      ai: { mode: "draft_only" },
-      approval: { mode: "always_approve" },
-      variables: [
-        variable("subscriber_name", "Subscriber Name", "there"),
-        variable("creator_signature", "Creator Signature", "xo")
-      ],
-      steps: [
-        step("message", "Hey {{subscriber_name}}. Love that you just joined me. You picked a fun time to come in."),
-        step("question", "Tell me what kind of vibe you want most from me so I can spoil you properly."),
-        step("follow_up", "Checking in in case you got busy. I can make your first few days here feel very personal.", {
-          delayMinutes: 720
-        })
-      ]
-    }),
-    seedTemplate({
-      key: "welcome_ppv",
-      name: "Welcome + PPV",
-      description: "Welcomes a new fan, warms them up, then introduces a starter PPV without pushing too hard.",
+      key: "new_subscriber_funnel",
+      name: "New Subscriber Funnel",
+      description: "Production reference flow for welcoming a new subscriber, handling AI confidence approval, offering PPV, and completing on purchase outcome.",
       triggerEventType: "subscriber_created",
       category: "Revenue",
-      tags: ["seed", "welcome", "ppv"],
-      execution: { mode: "delay", delayMinutes: 10 },
-      ai: { mode: "requires_approval" },
-      approval: { mode: "auto_approve_below_threshold", threshold: 35 },
+      tags: ["seed", "new-subscriber", "revenue", "ppv", "reference-flow"],
+      execution: { mode: "immediate" },
+      ai: { mode: "auto_send" },
+      approval: { mode: "never_approve" },
       variables: [
-        variable("subscriber_name", "Subscriber Name", "babe"),
-        variable("starter_ppv_title", "Starter PPV Title", "new girl set"),
+        variable("subscriber_name", "Subscriber Name", "there"),
+        variable("creator_signature", "Creator Signature", "xo"),
+        variable("starter_ppv_title", "Starter PPV Title", "Starter PPV"),
         variable("starter_ppv_price", "Starter PPV Price", "19")
       ],
       steps: [
-        step("message", "Hey {{subscriber_name}}, thanks for subscribing. I always love seeing a new name pop up."),
-        step("follow_up", "I can send you my {{starter_ppv_title}} for {{starter_ppv_price}} if you want a little welcome treat.", {
-          delayMinutes: 20,
+        { id: "welcome_message", type: "message", order: 0, body: "Hey {{subscriber_name}}. I love seeing a new name come in. You picked a fun time to join me.", nextStepId: "short_wait", metadata: { kind: "send_message", nodeKey: "welcome_message", label: "Welcome Message" } },
+        { id: "short_wait", type: "wait", order: 1, body: "Wait before asking the engagement question.", delayMinutes: 2, nextStepId: "engagement_question", metadata: { kind: "wait", nodeKey: "short_wait", label: "Wait" } },
+        { id: "engagement_question", type: "question", order: 2, body: "What kind of vibe do you want most from me first: playful, teasing, or something more personal?", nextStepId: "interpret_reply", metadata: { kind: "ask_question", nodeKey: "engagement_question", label: "Ask Engagement Question" } },
+        { id: "interpret_reply", type: "set_variable", order: 3, body: "Interpret subscriber reply.", nextStepId: "ai_draft", metadata: { kind: "set_variable", nodeKey: "interpret_reply", label: "Interpret Reply", variableKey: "ai_confidence", variableValue: "__derive_from_last_reply__" } },
+        { id: "ai_draft", type: "set_variable", order: 4, body: "Draft AI reply from the subscriber response.", nextStepId: "confidence_check", metadata: { kind: "set_variable", nodeKey: "ai_draft", label: "AI Draft", variableKey: "ai_draft_reply", variableValue: "__draft_from_last_reply__" } },
+        {
+          id: "confidence_check",
+          type: "branch",
+          order: 5,
+          body: "Route by AI confidence.",
+          nextStepId: "auto_reply",
+          fallbackStepId: "approval_reply",
+          metadata: {
+            kind: "branch",
+            nodeKey: "confidence_check",
+            label: "Confidence Check",
+            branchRules: [
+              { id: "high_confidence", label: "High Confidence", condition: condition("variable", "ai_confidence", "gte", "75"), nextStepId: "auto_reply" }
+            ]
+          }
+        },
+        { id: "auto_reply", type: "message", order: 6, body: "{{ai_draft_reply}}", nextStepId: "ppv_offer", metadata: { kind: "send_message", nodeKey: "auto_reply", label: "Auto Send", messageGenerationMode: "ai_generated" } },
+        { id: "approval_reply", type: "message", order: 7, body: "{{ai_draft_reply}}", nextStepId: "ppv_offer", metadata: { kind: "send_message", nodeKey: "approval_reply", label: "Human Approval", messageGenerationMode: "ai_generated", notes: "Approve AI Reply" } },
+        {
+          id: "ppv_offer",
+          type: "message",
+          order: 8,
+          body: "I can send you my {{starter_ppv_title}} for ${{starter_ppv_price}} if you want a little welcome treat.",
+          nextStepId: "purchase_check",
+          metadata: {
+            kind: "send_message",
+            nodeKey: "ppv_offer",
+            label: "Offer PPV",
           ppvTitle: "Starter PPV",
           ppvPrice: 19
-        }),
-        step("end", "")
+          }
+        },
+        { id: "purchase_check", type: "wait", order: 9, body: "Wait for PPV purchase result.", nextStepId: "purchased_branch", metadata: { kind: "wait", nodeKey: "purchase_check", label: "Purchase Check", waitForPurchase: true } },
+        {
+          id: "purchased_branch",
+          type: "branch",
+          order: 10,
+          body: "Purchased?",
+          nextStepId: "follow_up",
+          fallbackStepId: "follow_up",
+          metadata: {
+            kind: "branch",
+            nodeKey: "purchased_branch",
+            label: "Purchased?",
+            branchRules: [
+              { id: "purchased_yes", label: "YES", condition: condition("variable", "purchase_status", "equals", "purchased"), nextStepId: "deliver_content" }
+            ]
+          }
+        },
+        { id: "deliver_content", type: "message", order: 11, body: "Perfect. I unlocked it for you. Enjoy this one and tell me which part got your attention.", nextStepId: "end", metadata: { kind: "send_message", nodeKey: "deliver_content", label: "Deliver Content" } },
+        { id: "follow_up", type: "follow_up", order: 12, body: "No pressure. I will keep the welcome treat ready if you decide you want it.", nextStepId: "end", metadata: { kind: "send_message", nodeKey: "follow_up", label: "Follow-up" } },
+        { id: "end", type: "end", order: 13, body: "", metadata: { kind: "end_conversation", nodeKey: "end", label: "End" } }
       ]
     }),
     seedTemplate({
@@ -3718,6 +3849,7 @@ function normalizeStepMetadata(value: unknown): ScriptBuilderStepMetadata {
     variableKey: typeof value.variableKey === "string" && value.variableKey.trim() ? value.variableKey.trim() : undefined,
     variableValue: typeof value.variableValue === "string" ? value.variableValue : undefined,
     waitForReply: typeof value.waitForReply === "boolean" ? value.waitForReply : undefined,
+    waitForPurchase: typeof value.waitForPurchase === "boolean" ? value.waitForPurchase : undefined,
     branchRules: Array.isArray(value.branchRules) ? value.branchRules.map(normalizeBranchRule).filter((item): item is ScriptBuilderBranchRule => item !== null) : undefined,
     messageGenerationMode: isMessageGenerationMode(value.messageGenerationMode) ? value.messageGenerationMode : undefined,
     mediaUrl: typeof value.mediaUrl === "string" && value.mediaUrl.trim() ? value.mediaUrl.trim() : undefined,
@@ -3838,7 +3970,7 @@ function normalizeSimulatedSubscriberInput(body: Record<string, unknown>) {
 async function listCreatorSimulations(supabase: SupabaseClient, creatorId: string) {
   const result = await supabase
     .from("of_automation_simulations")
-    .select("*, simulated_subscriber:of_simulated_subscribers(*), script:of_message_scripts(id, name, action_mode, trigger_event_type), scenario:of_creator_automation_scenarios(id, scenario_key, label, trigger_event_type)")
+    .select("*, simulated_subscriber:of_simulated_subscribers(*), script:of_message_scripts(id, name, action_mode, trigger_event_type), scenario:of_creator_automation_scenarios(id, scenario_key, label, trigger_event_type), journey:of_revenue_journeys(id, name, source_channel, target_channel, audience, trigger_event, expected_outcome, success_event, failure_event, status)")
     .eq("creator_id", creatorId)
     .order("updated_at", { ascending: false })
     .limit(100);
@@ -3855,6 +3987,7 @@ async function startAutomationSimulation(supabase: SupabaseClient, env: Env, cre
       script_id: prepared.script.id,
       rule_id: prepared.ruleId,
       scenario_id: prepared.scenario?.id ?? null,
+      journey_id: prepared.journey?.id ?? null,
       simulated_subscriber_id: prepared.subscriber.id,
       status: "running",
       event_type: prepared.eventType,
@@ -3879,7 +4012,7 @@ async function startAutomationSimulation(supabase: SupabaseClient, env: Env, cre
       payload: prepared.eventPayload,
       execution_mode: "simulation",
       simulation_run_id: simulation.id,
-      metadata: { simulation: true, script_id: prepared.script.id },
+      metadata: { simulation: true, script_id: prepared.script.id, journey_id: prepared.journey?.id ?? null, expected_outcome: prepared.journey?.expected_outcome ?? null },
       received_at: new Date().toISOString(),
       processed_at: new Date().toISOString(),
       processing_status: "processed",
@@ -3902,7 +4035,9 @@ async function startAutomationSimulation(supabase: SupabaseClient, env: Env, cre
     `simulation:${prepared.subscriber.id}`,
     prepared.scenario,
     prepared.actionModeOverride,
-    prepared.ruleId
+    prepared.ruleId,
+    prepared.journey ? `Journey: ${prepared.journey.name}` : null,
+    prepared.journey
   );
   if (actionResult === "failed") {
     await supabase.from("of_automation_simulations").update({ status: "failed", last_error: "Simulation execution failed." }).eq("id", simulation.id);
@@ -3928,8 +4063,16 @@ async function prepareSimulationLaunch(supabase: SupabaseClient, creatorId: stri
     scenario = scenarioResult.data as OfCreatorAutomationScenario;
   }
 
+  let journey: OfRevenueJourney | null = null;
+  if (typeof body.journeyId === "string" && isUuid(body.journeyId)) {
+    const journeyResult = await supabase.from("of_revenue_journeys").select("*").eq("id", body.journeyId).single();
+    assertNoError(journeyResult.error);
+    journey = journeyResult.data as OfRevenueJourney;
+    if (journey.creator_id !== creatorId) throw new Error("Journey does not belong to the selected creator");
+  }
+
   let script: Record<string, unknown> | null = null;
-  const requestedScriptId = typeof body.scriptId === "string" && isUuid(body.scriptId) ? body.scriptId : scenario?.linked_script_id ?? null;
+  const requestedScriptId = journey?.conversation_flow_id ?? (typeof body.scriptId === "string" && isUuid(body.scriptId) ? body.scriptId : scenario?.linked_script_id ?? null);
   if (requestedScriptId) {
     const scriptResult = await supabase.from("of_message_scripts").select("*, of_message_script_steps(*)").eq("id", requestedScriptId).single();
     assertNoError(scriptResult.error);
@@ -3943,11 +4086,23 @@ async function prepareSimulationLaunch(supabase: SupabaseClient, creatorId: stri
       : null;
   const ruleId = typeof body.ruleId === "string" && isUuid(body.ruleId) ? body.ruleId : null;
 
-  const eventType = stringValue(body.eventType, scenario?.trigger_event_type ?? String(script.trigger_event_type ?? "custom_event"));
+  const eventType = stringValue(body.eventType, journey?.trigger_event ?? scenario?.trigger_event_type ?? String(script.trigger_event_type ?? "custom_event"));
   const eventPayloadInput = isRecord(body.eventPayload) ? body.eventPayload : {};
   const initialVariables = isRecord(body.variables) ? body.variables : {};
-  const eventPayload = buildSimulationEventPayload(subscriber, eventType, eventPayloadInput, initialVariables, creatorId);
-  return { subscriber, scenario, script, eventType, eventPayload, initialVariables, actionModeOverride, ruleId };
+  const eventPayload = buildSimulationEventPayload(subscriber, eventType, {
+    ...(journey ? {
+      source_channel: journey.source_channel,
+      target_channel: journey.target_channel,
+      audience: journey.audience,
+      expected_outcome: journey.expected_outcome,
+      success_event: journey.success_event,
+      failure_event: journey.failure_event,
+      journey_id: journey.id,
+      journey_name: journey.name
+    } : {}),
+    ...eventPayloadInput
+  }, initialVariables, creatorId);
+  return { subscriber, scenario, journey, script, eventType, eventPayload, initialVariables, actionModeOverride, ruleId };
 }
 
 function buildSimulationEventPayload(
@@ -3985,7 +4140,7 @@ function buildSimulationEventPayload(
 async function getSimulationDetail(supabase: SupabaseClient, simulationId: string): Promise<SimulationDetailData> {
   const simulation = await supabase
     .from("of_automation_simulations")
-    .select("*, simulated_subscriber:of_simulated_subscribers(*), script:of_message_scripts(id, name, action_mode, trigger_event_type), scenario:of_creator_automation_scenarios(id, scenario_key, label, trigger_event_type)")
+    .select("*, simulated_subscriber:of_simulated_subscribers(*), script:of_message_scripts(id, name, action_mode, trigger_event_type), scenario:of_creator_automation_scenarios(id, scenario_key, label, trigger_event_type), journey:of_revenue_journeys(id, name, source_channel, target_channel, audience, trigger_event, expected_outcome, success_event, failure_event, status)")
     .eq("id", simulationId)
     .single();
   assertNoError(simulation.error);
@@ -4075,10 +4230,48 @@ async function replyToSimulation(supabase: SupabaseClient, env: Env, simulationI
     .select("*")
     .single();
   assertNoError(eventInsert.error);
-  await processConversationInstance(supabase, env, simulation.conversation_instance_id, {
+  const processed = await processConversationInstance(supabase, env, simulation.conversation_instance_id, {
     resumeEvent: eventInsert.data as Record<string, unknown>,
     reason: "reply_received"
   });
+  if (processed.automation_run_id) await syncAutomationRunToConversation(supabase, processed.automation_run_id, processed);
+  return getSimulationDetail(supabase, simulationId);
+}
+
+async function purchaseSimulation(supabase: SupabaseClient, env: Env, simulationId: string, purchased: boolean) {
+  const simulation = await loadSimulationRecord(supabase, simulationId);
+  if (!simulation.conversation_instance_id || !simulation.source_event_id) return getSimulationDetail(supabase, simulationId);
+  const eventInsert = await supabase
+    .from("of_events")
+    .insert({
+      creator_id: simulation.creator_id,
+      provider: "simulation",
+      provider_event_id: `simulation-purchase:${simulation.id}:${Date.now()}`,
+      event_type: purchased ? "ppv_purchased" : "ppv_not_purchased",
+      payload: {
+        simulation: true,
+        fanId: `simulation:${simulation.simulated_subscriber_id}`,
+        purchase_status: purchased ? "purchased" : "not_purchased",
+        amount: purchased ? 19 : 0,
+        ppv_title: "Starter PPV",
+        simulationSubscriberId: simulation.simulated_subscriber_id
+      },
+      execution_mode: "simulation",
+      simulation_run_id: simulation.id,
+      metadata: { simulation: true, purchase_check: true },
+      received_at: new Date().toISOString(),
+      processed_at: new Date().toISOString(),
+      processing_status: "processed",
+      processing_error: null
+    })
+    .select("*")
+    .single();
+  assertNoError(eventInsert.error);
+  const processed = await processConversationInstance(supabase, env, simulation.conversation_instance_id, {
+    resumeEvent: eventInsert.data as Record<string, unknown>,
+    reason: "reply_received"
+  });
+  if (processed.automation_run_id) await syncAutomationRunToConversation(supabase, processed.automation_run_id, processed);
   return getSimulationDetail(supabase, simulationId);
 }
 
@@ -4162,9 +4355,6 @@ async function testAutomationRule(
   ruleId: string,
   body: Record<string, unknown>
 ): Promise<AutomationRuleSimulationResult> {
-  if (isLocalSeedAutomationRuleId(ruleId)) {
-    return buildLocalSeedAutomationTestResult(ruleId, body);
-  }
   const rule = await getAutomationRuleById(supabase, ruleId);
   const creatorId = typeof body.creatorId === "string" && isUuid(body.creatorId)
     ? body.creatorId
@@ -4239,74 +4429,6 @@ async function testAutomationRule(
     automationSimulationId,
     outboundMessages,
     summary
-  };
-}
-
-function fallbackWorkspaceScripts(creators: OfCreator[]) {
-  return creators.map((creator) => ({
-    id: `local-seed-script:${creator.id}:smoke`,
-    creator_id: creator.id,
-    name: "Smoke Seed Script",
-    description: "Local schema fallback script for smoke verification.",
-    trigger_event_type: "manual",
-    status: "inactive",
-    action_mode: "draft_for_approval",
-    auto_send_enabled: false,
-    requires_approval: true,
-    cooldown_hours: 24,
-    max_sends_per_fan: 1,
-    folder_name: null,
-    category: null,
-    tags: [],
-    version_number: 1,
-    source_script_id: null,
-    builder_config: {},
-    steps: []
-  }));
-}
-
-function fallbackAutomationRules(creators: OfCreator[]) {
-  return creators.map((creator) => ({
-    id: `local-seed-rule:${creator.id}:smoke`,
-    name: "Smoke Seed Rule",
-    description: "Local schema fallback rule for smoke verification.",
-    creator_scope: "selected_creator",
-    creator_id: creator.id,
-    status: "active",
-    trigger_type: "manual",
-    action_type: "run_script",
-    selected_script_id: `local-seed-script:${creator.id}:smoke`,
-    approval_mode: "draft_for_approval",
-    conditions: [],
-    cooldown_minutes: 0,
-    frequency_limit: 1,
-    metadata: { compatibility_fallback: true, local_schema_tolerance: true },
-    last_triggered_at: null
-  }));
-}
-
-function isLocalSeedAutomationRuleId(ruleId: string) {
-  return ruleId.startsWith("local-seed-rule:");
-}
-
-function buildLocalSeedAutomationTestResult(ruleId: string, body: Record<string, unknown>): AutomationRuleSimulationResult {
-  const creatorId = typeof body.creatorId === "string" && body.creatorId ? body.creatorId : ruleId.split(":")[1] ?? "local-schema-fallback";
-  const scriptId = `local-seed-script:${creatorId}:smoke`;
-  const creatorName = typeof body.creatorName === "string" && body.creatorName ? body.creatorName : "Local schema fallback";
-  return {
-    matched: true,
-    triggerMatched: true,
-    action: "run_script",
-    scriptId,
-    scriptName: "Smoke Seed Script",
-    creatorId,
-    creatorName,
-    simulatedAt: new Date().toISOString(),
-    eventType: typeof body.eventType === "string" && body.eventType ? body.eventType : "manual",
-    conditions: [],
-    automationSimulationId: `local-seed-simulation:${ruleId}`,
-    outboundMessages: [],
-    summary: "Local schema fallback automation rule matched and was simulated in-memory."
   };
 }
 
@@ -4416,8 +4538,18 @@ async function runAutomationsForEvent(supabase: SupabaseClient, env: Env, eventI
   }
 
   const eligibleScripts = await resolveEligibleAutomationScripts(supabase, String(event.data.creator_id), event.data.event_type);
+  const eligibleJourneys = await resolveEligibleRevenueJourneys(supabase, String(event.data.creator_id), event.data);
   const eligibleRules = await resolveEligibleAutomationRules(supabase, String(event.data.creator_id), event.data, eventContext);
-  const summary = { eventId, matched: eligibleScripts.length + eligibleRules.length, queued: 0, skipped: 0, errors: [] as string[] };
+  const summary = { eventId, matched: eligibleScripts.length + eligibleJourneys.length + eligibleRules.length, queued: 0, skipped: 0, errors: [] as string[] };
+  for (const item of eligibleJourneys) {
+    try {
+      const result = await runAutomationForScript(supabase, env, item.script, event.data, fanId, null, null, null, `Journey: ${item.journey.name}`, item.journey);
+      if (result === "skipped") summary.skipped++;
+      else summary.queued++;
+    } catch (error) {
+      summary.errors.push(error instanceof Error ? error.message : "Unexpected journey routing error");
+    }
+  }
   for (const item of eligibleScripts) {
     try {
       const result = await runAutomationForScript(supabase, env, item.script, event.data, fanId, item.scenario);
@@ -4448,7 +4580,8 @@ async function runAutomationForScript(
   scenario: OfCreatorAutomationScenario | null,
   actionModeOverride: MessageScriptActionMode | null = null,
   ruleId: string | null = null,
-  ruleName: string | null = null
+  ruleName: string | null = null,
+  journey: OfRevenueJourney | null = null
 ): Promise<AutomationActionResult> {
   const duplicate = await supabase
     .from("of_automation_runs")
@@ -4473,7 +4606,9 @@ async function runAutomationForScript(
       action_mode: actionMode,
       execution_mode: executionMode,
       simulation_run_id: simulationRunId,
-      metadata: executionMode === "simulation" ? { simulation: true, rule_id: ruleId, rule_name: ruleName } : { rule_id: ruleId, rule_name: ruleName },
+      metadata: executionMode === "simulation"
+        ? { simulation: true, rule_id: ruleId, rule_name: ruleName, journey_id: journey?.id ?? null, journey_name: journey?.name ?? null, expected_outcome: journey?.expected_outcome ?? null }
+        : { rule_id: ruleId, rule_name: ruleName, journey_id: journey?.id ?? null, journey_name: journey?.name ?? null, expected_outcome: journey?.expected_outcome ?? null },
       status: skipReason ? "skipped" : "running",
       completed_at: skipReason ? new Date().toISOString() : null,
       error_message: skipReason
@@ -4505,7 +4640,10 @@ async function runAutomationForScript(
       simulationRunId,
       simulationSubscriber: context.simulationSubscriber,
       sourceRuleId: ruleId,
-      sourceRuleName: ruleName
+      sourceRuleName: ruleName,
+      sourceJourneyId: journey?.id ?? null,
+      sourceJourneyName: journey?.name ?? null,
+      expectedOutcome: journey?.expected_outcome ?? null
     });
     if (!conversation) return "skipped";
     if (executionMode === "simulation" && simulationRunId) {
@@ -4516,6 +4654,30 @@ async function runAutomationForScript(
     }
     if (scenario?.id) {
       await touchAutomationScenario(supabase, scenario.id);
+    }
+    if (journey?.id) {
+      await touchRevenueJourney(supabase, journey.id);
+      await recordConversationHistory(supabase, {
+        conversationId: conversation.id,
+        creatorId: String(event.creator_id),
+        eventId: typeof event.id === "string" ? event.id : null,
+        stepId: conversation.current_step_id,
+        transitionKey: `journey:${journey.id}:${String(event.id ?? "none")}`,
+        eventType: "journey_matched",
+        fromStatus: null,
+        toStatus: conversation.status,
+        detail: `Journey matched: ${journey.name}. Expected outcome: ${journey.expected_outcome}.`,
+        payload: {
+          journey_id: journey.id,
+          source_channel: journey.source_channel,
+          target_channel: journey.target_channel,
+          audience: journey.audience,
+          trigger_event: journey.trigger_event,
+          expected_outcome: journey.expected_outcome,
+          success_event: journey.success_event,
+          failure_event: journey.failure_event
+        }
+      });
     }
     await recordConversationHistory(supabase, {
       conversationId: conversation.id,
@@ -4631,6 +4793,9 @@ async function createConversationInstance(
     simulationSubscriber: Record<string, unknown> | null;
     sourceRuleId: string | null;
     sourceRuleName: string | null;
+    sourceJourneyId?: string | null;
+    sourceJourneyName?: string | null;
+    expectedOutcome?: string | null;
   }
 ) {
   const steps = ((input.script.of_message_script_steps as OfMessageScriptStep[] | undefined) ?? []).sort((a, b) => a.step_order - b.step_order);
@@ -4658,12 +4823,18 @@ async function createConversationInstance(
             simulation_run_id: input.simulationRunId,
             source_rule_id: input.sourceRuleId,
             source_rule_name: input.sourceRuleName,
+            source_journey_id: input.sourceJourneyId ?? null,
+            source_journey_name: input.sourceJourneyName ?? null,
+            expected_outcome: input.expectedOutcome ?? null,
             subscriber_snapshot: input.simulationSubscriber,
             event_payload: input.eventPayload
           }
         : {
             source_rule_id: input.sourceRuleId,
-            source_rule_name: input.sourceRuleName
+            source_rule_name: input.sourceRuleName,
+            source_journey_id: input.sourceJourneyId ?? null,
+            source_journey_name: input.sourceJourneyName ?? null,
+            expected_outcome: input.expectedOutcome ?? null
           }
     })
     .select("*")
@@ -4790,6 +4961,34 @@ async function resolveEligibleAutomationScripts(supabase: SupabaseClient, creato
     eligible.push({ script, scenario });
   }
   return eligible;
+}
+
+async function resolveEligibleRevenueJourneys(supabase: SupabaseClient, creatorId: string, event: Record<string, unknown>) {
+  const payload = isRecord(event.payload) ? event.payload : {};
+  const sourceChannel = normalizeRouteToken(stringValue(payload.source_channel, stringValue(payload.sourceChannel, stringValue(payload.channel, String(event.provider ?? "")))));
+  const eventType = String(event.event_type ?? "");
+  if (!sourceChannel || !eventType) return [];
+
+  const journeysResult = await supabase
+    .from("of_revenue_journeys")
+    .select("*, conversation_flow:of_message_scripts(*, of_message_script_steps(*))")
+    .eq("creator_id", creatorId)
+    .eq("status", "active")
+    .eq("source_channel", sourceChannel);
+  assertNoError(journeysResult.error);
+
+  const payloadAudience = normalizeRouteToken(stringValue(payload.audience, stringValue(payload.source_audience, stringValue(payload.sourceAudience, ""))));
+  return ((journeysResult.data ?? []) as Array<OfRevenueJourney & { conversation_flow?: Record<string, unknown> | null }>)
+    .filter((journey) => {
+      const triggers = [journey.trigger_event, ...normalizeStringArray(isRecord(journey.metadata) ? journey.metadata.alternate_trigger_events : [])];
+      const triggerMatches = triggers.includes(eventType);
+      const audienceMatches = !payloadAudience || normalizeRouteToken(journey.audience) === payloadAudience;
+      return triggerMatches && audienceMatches && journey.conversation_flow;
+    })
+    .map((journey) => ({
+      journey,
+      script: journey.conversation_flow as Record<string, unknown>
+    }));
 }
 
 async function resolveEligibleAutomationRules(
@@ -4961,6 +5160,11 @@ async function touchAutomationScenario(supabase: SupabaseClient, scenarioId: str
   assertNoError(result.error);
 }
 
+async function touchRevenueJourney(supabase: SupabaseClient, journeyId: string) {
+  const result = await supabase.from("of_revenue_journeys").update({ last_triggered_at: new Date().toISOString() }).eq("id", journeyId);
+  assertNoError(result.error);
+}
+
 async function resumeReplyConversationsForEvent(
   supabase: SupabaseClient,
   env: Env,
@@ -5011,8 +5215,12 @@ async function processConversationInstance(
   const subscriber = loaded.subscriber;
   const baseEvent = options.resumeEvent ?? loaded.originatingEvent;
   let variables = normalizeConversationVariables(conversation.variables);
+  const resumeWaitingReason = conversation.waiting_reason;
+  const resumeFromStatus = conversation.status;
+  const resumeEventType = typeof options.resumeEvent?.event_type === "string" ? options.resumeEvent.event_type : null;
+  const isPurchaseResumeEvent = resumeEventType === "ppv_purchased" || resumeEventType === "ppv_not_purchased" || resumeEventType === "transaction_created";
   if (options.reason === "reply_received" && options.resumeEvent) {
-    variables = applyReplyVariables(variables, options.resumeEvent);
+    variables = applyResumeEventVariables(variables, options.resumeEvent);
     conversation = await updateConversationState(supabase, conversation.id, {
       variables,
       last_event_id: options.resumeEvent.id ?? null,
@@ -5027,13 +5235,14 @@ async function processConversationInstance(
       creatorId: conversation.creator_id,
       eventId: typeof options.resumeEvent.id === "string" ? options.resumeEvent.id : null,
       stepId: conversation.current_step_id,
-      transitionKey: `reply:${String(options.resumeEvent.id ?? "none")}`,
-      eventType: "reply_received",
-      fromStatus: "waiting_reply",
+      transitionKey: `${isPurchaseResumeEvent ? "purchase" : "reply"}:${String(options.resumeEvent.id ?? "none")}`,
+      eventType: isPurchaseResumeEvent ? "purchase_event_received" : "reply_received",
+      fromStatus: resumeFromStatus,
       toStatus: "running",
-      detail: "Subscriber reply resumed the conversation.",
+      detail: isPurchaseResumeEvent ? "Purchase simulation resumed the conversation." : "Subscriber reply resumed the conversation.",
       payload: {
-        message_text: extractMessageText(isRecord(options.resumeEvent.payload) ? options.resumeEvent.payload : {}) ?? null
+        message_text: extractMessageText(isRecord(options.resumeEvent.payload) ? options.resumeEvent.payload : {}) ?? null,
+        purchase_status: variables.purchase_status ?? null
       }
     });
   }
@@ -5061,7 +5270,7 @@ async function processConversationInstance(
     });
 
     if (currentStep.step_type === "set_variable") {
-      if (metadata.variableKey) variables[metadata.variableKey] = interpolateTemplate(metadata.variableValue ?? "", toVariableMap(variables));
+      if (metadata.variableKey) variables[metadata.variableKey] = resolveRuntimeVariableValue(metadata.variableKey, metadata.variableValue, variables);
       conversation = await updateConversationState(supabase, conversation.id, {
         variables,
         current_step_id: nextStep?.id ?? null,
@@ -5123,6 +5332,65 @@ async function processConversationInstance(
         payload: { current_step_id: currentStep.id, next_step_id: chosen?.id ?? null }
       });
       currentStep = chosen;
+      continue;
+    }
+
+    if (currentStep.step_type === "wait" && metadata.waitForPurchase) {
+      const purchaseStatus = String(variables.purchase_status ?? "");
+      const purchaseResolved = purchaseStatus === "purchased" || purchaseStatus === "not_purchased";
+      const expectedWaitingReason = `purchase:${currentStep.id}`;
+      const resumedPurchaseWait =
+        (conversation.waiting_reason === expectedWaitingReason || resumeWaitingReason === expectedWaitingReason) &&
+        (statusBefore === "waiting_reply" || resumeFromStatus === "waiting_reply") &&
+        purchaseResolved;
+      if (!resumedPurchaseWait) {
+        conversation = await updateConversationState(supabase, conversation.id, {
+          current_step_id: currentStep.id,
+          next_step_id: nextStep?.id ?? null,
+          status: "waiting_reply",
+          waiting_until: null,
+          waiting_reason: `purchase:${currentStep.id}`,
+          variables,
+          processing_started_at: null,
+          last_resumed_at: new Date().toISOString()
+        });
+        await recordConversationHistory(supabase, {
+          conversationId: conversation.id,
+          creatorId: conversation.creator_id,
+          eventId: conversation.last_event_id,
+          stepId: currentStep.id,
+          transitionKey: `purchasewait:${currentStep.id}:${conversation.updated_at}`,
+          eventType: "purchase_check_waiting",
+          fromStatus: statusBefore,
+          toStatus: conversation.status,
+          detail: "Waiting for PPV purchase result.",
+          payload: { next_step_id: nextStep?.id ?? null }
+        });
+        return conversation;
+      }
+      conversation = await updateConversationState(supabase, conversation.id, {
+        status: "running",
+        waiting_until: null,
+        waiting_reason: null,
+        current_step_id: nextStep?.id ?? null,
+        next_step_id: nextStep ? resolveLinkedStep(nextStep.next_step_id, nextByOrder.get(nextStep.id), stepMap)?.id ?? null : null,
+        variables,
+        last_resumed_at: new Date().toISOString(),
+        processing_started_at: new Date().toISOString()
+      });
+      await recordConversationHistory(supabase, {
+        conversationId: conversation.id,
+        creatorId: conversation.creator_id,
+        eventId: conversation.last_event_id,
+        stepId: currentStep.id,
+        transitionKey: `purchaseresume:${currentStep.id}:${conversation.updated_at}`,
+        eventType: "purchase_check_resolved",
+        fromStatus: statusBefore,
+        toStatus: conversation.status,
+        detail: purchaseStatus === "purchased" ? "PPV purchase detected." : "No PPV purchase detected.",
+        payload: { purchase_status: purchaseStatus, last_purchase: variables.last_purchase ?? null }
+      });
+      currentStep = nextStep;
       continue;
     }
 
@@ -5312,10 +5580,54 @@ function applyReplyVariables(variables: Record<string, unknown>, event: Record<s
   };
 }
 
+function applyResumeEventVariables(variables: Record<string, unknown>, event: Record<string, unknown>) {
+  const payload = isRecord(event.payload) ? event.payload : {};
+  const next: Record<string, unknown> = applyReplyVariables(variables, event);
+  const purchaseStatus = typeof payload.purchase_status === "string"
+    ? payload.purchase_status
+    : typeof payload.purchaseStatus === "string"
+      ? payload.purchaseStatus
+      : event.event_type === "ppv_purchased" || event.event_type === "transaction_created"
+        ? "purchased"
+        : event.event_type === "ppv_not_purchased"
+          ? "not_purchased"
+          : null;
+  if (purchaseStatus) {
+    next.purchase_status = purchaseStatus;
+    next.last_purchase = purchaseStatus === "purchased" ? event.received_at ?? new Date().toISOString() : variables.last_purchase ?? null;
+    next.total_spend = Number(payload.total_spend ?? payload.totalSpend ?? variables.total_spend ?? 0);
+    next.last_purchase_amount = Number(payload.amount ?? payload.price ?? payload.last_purchase_amount ?? 0);
+  }
+  return next;
+}
+
 function toVariableMap(variables: Record<string, unknown>) {
   const mapped = new Map<string, string>();
   for (const [key, value] of Object.entries(variables)) mapped.set(key, value == null ? "" : String(value));
   return mapped;
+}
+
+function resolveRuntimeVariableValue(variableKey: string, variableValue: string | undefined, variables: Record<string, unknown>) {
+  if (variableKey === "ai_confidence" && variableValue === "__derive_from_last_reply__") {
+    return deriveReplyConfidence(String(variables.last_reply_text ?? ""));
+  }
+  if (variableKey === "ai_draft_reply" && variableValue === "__draft_from_last_reply__") {
+    const replyText = String(variables.last_reply_text ?? "").trim();
+    if (replyText.toLowerCase().includes("custom")) {
+      return "That sounds like something I should make feel personal. Tell me the vibe you want and I will keep it special.";
+    }
+    if (replyText) return "I like that answer. I can already tell you are going to be fun to have around.";
+    return "I am happy you are here. I can make your first day feel personal.";
+  }
+  return interpolateTemplate(variableValue ?? "", toVariableMap(variables));
+}
+
+function deriveReplyConfidence(replyText: string) {
+  const lower = replyText.toLowerCase();
+  if (!lower.trim()) return 45;
+  if (/\bcustom\b|\bmeet\b|\boff platform\b|\bphone\b|\bprivate info\b|\brefund\b|\bangry\b/.test(lower)) return 48;
+  if (/\bhey\b|\bhi\b|\bhello\b|\bfun\b|\btease\b|\bvideo\b|\bphotos?\b|\bspoil\b|\bsurprise\b/.test(lower)) return 86;
+  return 68;
 }
 
 function chooseBranchStep(
@@ -5389,13 +5701,17 @@ async function queueConversationMessageStep(
   }
 ) {
   const actionMode = scriptActionMode(input.script);
+  const metadata = normalizeStepMetadata(input.step.metadata);
+  const aiConfidence = Number(input.variables.ai_confidence ?? 100);
+  const effectiveActionMode: MessageScriptActionMode =
+    metadata.messageGenerationMode === "ai_generated" && aiConfidence < 75 ? "draft_for_approval" : actionMode;
   const template = interpolateTemplate(input.step.message_body ?? "", toVariableMap(input.variables));
   const renderedVariables = pickTemplateVariables(input.step.message_body ?? "", input.variables);
   const policy = await evaluateOutboundPolicy(supabase, {
     creatorId: input.conversation.creator_id,
     fanId: subscriberFanId(input.context, input.conversation, input.event),
     messageText: template,
-    requestedActionMode: actionMode,
+    requestedActionMode: effectiveActionMode,
     executionMode: input.conversation.execution_mode,
     script: input.script,
     step: input.step,
@@ -5451,6 +5767,8 @@ async function queueConversationMessageStep(
           source_template: input.step.message_body ?? "",
           rendered_variables: renderedVariables,
           action_mode: actionMode,
+          effective_action_mode: effectiveActionMode,
+          ai_confidence: Number.isFinite(aiConfidence) ? aiConfidence : null,
           resolved_action_mode: resolvedActionMode,
           source_script_id: input.conversation.script_id,
           source_script_name: input.script.name ?? "Script",
@@ -5496,6 +5814,7 @@ async function queueConversationMessageStep(
         last_resumed_at: new Date().toISOString(),
         last_error: null
       });
+      await ensureConversationApprovalQueueItem(supabase, conversation, input.step, outbound, policy);
       return { conversation, variables: input.variables, nextStep: null, outcome: "approval" as const };
     }
     const waitingStatus: ConversationRuntimeStatus = "waiting_approval";
@@ -5523,6 +5842,7 @@ async function queueConversationMessageStep(
       detail: policy.reasons.length ? "Draft created because approval guardrails were triggered." : "Draft created and waiting for approval.",
       payload: { outbound_message_id: outbound.id, next_step_id: input.nextStep?.id ?? null, policy_reasons: policy.reasons }
     });
+    await ensureConversationApprovalQueueItem(supabase, conversation, input.step, outbound, policy);
     return { conversation, variables: input.variables, nextStep: null, outcome: "approval" as const };
   }
 
@@ -5598,6 +5918,91 @@ async function findConversationOutboundMessage(supabase: SupabaseClient, convers
     .maybeSingle();
   assertNoError(result.error);
   return (result.data ?? null) as Record<string, unknown> | null;
+}
+
+async function ensureConversationApprovalQueueItem(
+  supabase: SupabaseClient,
+  conversation: OfConversationInstance,
+  step: OfMessageScriptStep,
+  outbound: Record<string, unknown>,
+  policy: { reasons: string[]; summary: string }
+) {
+  const queue = await ensureCreatorConversationQueue(supabase, conversation.creator_id);
+  if (!queue?.id) return;
+
+  const existing = await supabase
+    .from("of_queue_items")
+    .select("id, status")
+    .eq("queue_id", queue.id)
+    .eq("conversation_id", conversation.id)
+    .neq("status", "resolved")
+    .limit(1)
+    .maybeSingle();
+  if (existing.error && isMissingSchemaCacheRelationError(existing.error, "of_queue_items")) return;
+  assertNoError(existing.error);
+  if (existing.data) return;
+
+  const decisionType = queueDecisionTypeForStep(step, policy.reasons);
+  const result = await supabase.from("of_queue_items").insert({
+    queue_id: queue.id,
+    legacy_task_id: null,
+    conversation_id: conversation.id,
+    assigned_operator_id: null,
+    priority: policy.reasons.length ? "high" : "medium",
+    status: "visible",
+    moved_at: null,
+    resolved_at: null,
+    metadata: {
+      source: "conversation_runtime",
+      decision_type: decisionType,
+      outbound_message_id: outbound.id ?? null,
+      script_step_id: step.id,
+      step_type: step.step_type,
+      priority_reason: policy.summary,
+      policy_reasons: policy.reasons,
+      title: decisionType
+    }
+  });
+  if (result.error && isMissingSchemaCacheRelationError(result.error, "of_queue_items")) return;
+  assertNoError(result.error);
+}
+
+async function ensureCreatorConversationQueue(supabase: SupabaseClient, creatorId: string) {
+  const existing = await supabase
+    .from("of_queues")
+    .select("id, creator_id, name, label, description, operational_status, visibility_state, priority, assigned_operator_id, created_at, updated_at, metadata")
+    .eq("creator_id", creatorId)
+    .eq("queue_key", "conversation_queue")
+    .maybeSingle();
+  if (existing.error && isMissingSchemaCacheRelationError(existing.error, "of_queues")) return null;
+  assertNoError(existing.error);
+  if (existing.data) return existing.data as CanonicalQueueWorkspaceQueueRow;
+
+  const inserted = await supabase
+    .from("of_queues")
+    .insert({
+      creator_id: creatorId,
+      queue_key: "conversation_queue",
+      name: "conversation_queue",
+      label: "Conversation Queue",
+      description: "Canonical queue for conversation work items.",
+      operational_status: "active",
+      visibility_state: "visible",
+      priority: "medium",
+      assigned_operator_id: null,
+      metadata: { source: "conversation_runtime" }
+    })
+    .select("id, creator_id, name, label, description, operational_status, visibility_state, priority, assigned_operator_id, created_at, updated_at, metadata")
+    .single();
+  assertNoError(inserted.error);
+  return inserted.data as CanonicalQueueWorkspaceQueueRow;
+}
+
+function queueDecisionTypeForStep(step: OfMessageScriptStep, reasons: string[]) {
+  const metadata = normalizeStepMetadata(step.metadata);
+  if (metadata.ppvTitle || metadata.ppvPrice || reasons.some((reason) => reason.toLowerCase().includes("ppv"))) return "Review PPV Offer";
+  if (step.step_type === "question" || metadata.messageGenerationMode === "ai_generated") return "Approve AI Reply";
+  return "Manual Reply Required";
 }
 
 function subscriberFanId(context: EventActionContext, conversation: OfConversationInstance, event: Record<string, unknown> | null) {
@@ -6177,7 +6582,7 @@ async function updateAutomationScenario(supabase: SupabaseClient, scenarioId: st
 async function listCreatorConversations(supabase: SupabaseClient, creatorId: string) {
   const result = await supabase
     .from("of_conversation_instances")
-    .select("*, of_message_scripts(name, trigger_event_type, folder_name, version_number), source_event:of_events!of_conversation_instances_originating_event_id_fkey(id, event_type, received_at)")
+    .select("*, of_message_scripts!of_conversation_instances_script_id_fkey(name, trigger_event_type, folder_name, version_number), source_event:of_events!of_conversation_instances_originating_event_id_fkey(id, event_type, received_at)")
     .eq("creator_id", creatorId)
     .order("updated_at", { ascending: false })
     .limit(200);
@@ -6207,13 +6612,9 @@ async function listCreatorConversations(supabase: SupabaseClient, creatorId: str
 async function getConversationDetail(supabase: SupabaseClient, conversationId: string) {
   const conversation = await supabase
     .from("of_conversation_instances")
-    .select("*, of_message_scripts(name, trigger_event_type, folder_name, version_number), of_creators(id, username, display_name), source_event:of_events!of_conversation_instances_originating_event_id_fkey(id, event_type, received_at)")
+    .select("*, of_message_scripts!of_conversation_instances_script_id_fkey(name, trigger_event_type, folder_name, version_number), of_creators(id, username, display_name), source_event:of_events!of_conversation_instances_originating_event_id_fkey(id, event_type, received_at)")
     .eq("id", conversationId)
     .single();
-  if (conversation.error && isMissingSchemaCacheRelationError(conversation.error, "of_conversation_instances")) {
-    // Compatibility / local-schema tolerance: return a shape-safe placeholder when the conversation table is absent locally.
-    return fallbackConversationDetail(conversationId);
-  }
   assertNoError(conversation.error);
   const history = await supabase
     .from("of_conversation_history")
@@ -6228,67 +6629,6 @@ async function getConversationDetail(supabase: SupabaseClient, conversationId: s
   return {
     conversation: mappedConversation,
     history: historyRows as OfConversationHistoryItem[]
-  };
-}
-
-function fallbackConversationDetail(conversationId: string): ConversationOperationsDetail {
-  const now = new Date().toISOString();
-  const conversation: Conversation = {
-    id: conversationId,
-    creator_id: "local-schema-fallback",
-    subscriber_id: null,
-    relationship_id: null,
-    script_id: conversationId,
-    source_script_id: null,
-    script_version: 0,
-    automation_run_id: null,
-    originating_event_id: null,
-    last_event_id: null,
-    current_step_id: null,
-    next_step_id: null,
-    status: "failed",
-    execution_mode: "simulation",
-    variables: {},
-    retry_count: 0,
-    waiting_until: null,
-    waiting_reason: null,
-    cancellation_reason: "local-schema-tolerance",
-    completion_reason: null,
-    last_error: "Conversation table unavailable in local schema cache.",
-    processing_started_at: null,
-    last_resumed_at: null,
-    completed_at: null,
-    cancelled_at: null,
-    failed_at: now,
-    created_at: now,
-    updated_at: now,
-    lifecycle_state: "archived",
-    ownership: {
-      owner_type: "unassigned",
-      owner_id: null,
-      owner_label: "Local schema fallback",
-      creator_id: "local-schema-fallback",
-      subscriber_id: null,
-      relationship_id: null
-    },
-    participants: [],
-    history: [],
-    related_events: [],
-    metadata: {
-      compatibility_fallback: true,
-      local_schema_tolerance: true
-    }
-  };
-
-  return {
-    conversation,
-    history: [],
-    outboundMessages: [],
-    auditTrail: [],
-    relatedSimulation: null,
-    subscriber: null,
-    relationship: null,
-    creator: null
   };
 }
 
@@ -6508,7 +6848,7 @@ async function loadQueueWorkspaceConversationSummariesByIds(supabase: SupabaseCl
 
   const result = await supabase
     .from("of_conversation_instances")
-    .select("id, creator_id, subscriber_id, relationship_id, status, execution_mode, updated_at, waiting_until, waiting_reason, cancellation_reason, completion_reason, failed_at, cancelled_at, of_message_scripts(name), of_creators(id, username, display_name)")
+    .select("id, creator_id, subscriber_id, relationship_id, status, execution_mode, updated_at, waiting_until, waiting_reason, cancellation_reason, completion_reason, failed_at, cancelled_at, of_message_scripts!of_conversation_instances_script_id_fkey(name), of_creators(id, username, display_name)")
     .in("id", conversationIds);
   assertNoError(result.error);
 
@@ -6673,9 +7013,10 @@ function buildCanonicalQueueWorkspaceItems(
           ? subscribers.get(task.subscriber_id) ?? null
           : null;
       const priorityScore = task?.priority_score ?? deriveTaskPriorityScore({ priority: row.priority });
+      const metadataTitle = stringValue(row.metadata.title) || stringValue(row.metadata.decision_type);
       return {
         ...row,
-        title: task?.title ?? queue?.label ?? conversation?.script_name ?? humanizeIdentifier(row.queue_id),
+        title: task?.title ?? metadataTitle ?? queue?.label ?? conversation?.script_name ?? humanizeIdentifier(row.queue_id),
         queue_name: queue?.name ?? task?.rule_name ?? row.queue_id,
         queue_label: queue?.label ?? task?.rule_name ?? humanizeIdentifier(row.queue_id),
         assignment_label: row.assigned_operator_id ?? queue?.assigned_operator_id ?? task?.assigned_to ?? null,
@@ -6988,7 +7329,7 @@ async function loadQueueWorkspaceConversationSummaries(supabase: SupabaseClient,
 
   const result = await supabase
     .from("of_conversation_instances")
-    .select("id, creator_id, subscriber_id, relationship_id, status, execution_mode, updated_at, waiting_until, waiting_reason, cancellation_reason, completion_reason, failed_at, cancelled_at, of_message_scripts(name), of_creators(id, username, display_name)")
+    .select("id, creator_id, subscriber_id, relationship_id, status, execution_mode, updated_at, waiting_until, waiting_reason, cancellation_reason, completion_reason, failed_at, cancelled_at, of_message_scripts!of_conversation_instances_script_id_fkey(name), of_creators(id, username, display_name)")
     .in("id", conversationIds);
   assertNoError(result.error);
 
@@ -7145,7 +7486,7 @@ function isQueueItemOverdue(item: QueueWorkspaceItemSummary) {
 async function listOperationsConversations(supabase: SupabaseClient, url: URL) {
   const result = await supabase
     .from("of_conversation_instances")
-    .select("*, of_message_scripts(name, trigger_event_type, folder_name, version_number), of_creators(username, display_name), source_event:of_events!of_conversation_instances_originating_event_id_fkey(id, event_type, received_at)")
+    .select("*, of_message_scripts!of_conversation_instances_script_id_fkey(name, trigger_event_type, folder_name, version_number), of_creators(username, display_name), source_event:of_events!of_conversation_instances_originating_event_id_fkey(id, event_type, received_at)")
     .order("updated_at", { ascending: false })
     .limit(300);
   assertNoError(result.error);
@@ -8701,6 +9042,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function stringValue(value: unknown, fallback = "") {
   return typeof value === "string" && value.trim() ? value : fallback;
+}
+
+function normalizeRouteToken(value: unknown) {
+  return stringValue(value).toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
 }
 
 function findString(record: Record<string, unknown>, ...keys: string[]) {

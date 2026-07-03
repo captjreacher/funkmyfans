@@ -4,26 +4,37 @@ import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import {
   fetchCreatorAutomationScenarios,
+  fetchJourneyWorkspace,
+  fetchQueueWorkspace,
   fetchScriptsWorkspace,
   fetchSimulatedSubscribers,
+  fetchSimulationDetail,
+  simulationFastForward,
+  simulationPurchase,
+  simulationReply,
   startSimulation,
+  applyQueueItemAction,
   type SimulationDetailData,
+  type JourneyWorkspaceData,
   type ScriptsWorkspaceData
 } from "../lib/api";
-import type { OfCreatorAutomationScenario, OfSimulatedSubscriber } from "@funkmyfans/of-types";
+import type { OfCreatorAutomationScenario, OfRevenueJourney, OfSimulatedSubscriber } from "@funkmyfans/of-types";
 
 export function Simulations({ initialScriptId }: { initialScriptId?: string }) {
   const [workspace, setWorkspace] = useState<ScriptsWorkspaceData | null>(null);
+  const [journeyWorkspace, setJourneyWorkspace] = useState<JourneyWorkspaceData | null>(null);
   const [creatorId, setCreatorId] = useState<string>("");
   const [scenarios, setScenarios] = useState<OfCreatorAutomationScenario[]>([]);
   const [simulatedSubscribers, setSimulatedSubscribers] = useState<OfSimulatedSubscriber[]>([]);
   const [selectedScriptId, setSelectedScriptId] = useState<string>("");
+  const [selectedJourneyId, setSelectedJourneyId] = useState<string>("");
   const [selectedScenarioId, setSelectedScenarioId] = useState<string>("");
   const [selectedSubscriberId, setSelectedSubscriberId] = useState<string>("");
   const [simulation, setSimulation] = useState<SimulationDetailData | null>(null);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [replyText, setReplyText] = useState("Playful teasing sounds fun.");
 
   useEffect(() => {
     void loadWorkspace();
@@ -47,7 +58,14 @@ export function Simulations({ initialScriptId }: { initialScriptId?: string }) {
       setSelectedScriptId(initialScriptId);
       if (script && script.creator_id !== creatorId) setCreatorId(script.creator_id);
     } else if (!selectedScriptId) {
-      setSelectedScriptId(workspace.scripts.find((script) => script.creator_id === (selectedCreator?.id ?? creatorId))?.id ?? workspace.scripts[0]?.id ?? "");
+      const creatorScripts = workspace.scripts.filter((script) => script.creator_id === (selectedCreator?.id ?? creatorId));
+      setSelectedScriptId(
+        creatorScripts.find((script) => script.name === "New Subscriber Funnel")?.id ??
+        creatorScripts[0]?.id ??
+        workspace.scripts.find((script) => script.name === "New Subscriber Funnel")?.id ??
+        workspace.scripts[0]?.id ??
+        ""
+      );
     }
   }, [creatorId, initialScriptId, selectedScriptId, workspace]);
 
@@ -66,11 +84,22 @@ export function Simulations({ initialScriptId }: { initialScriptId?: string }) {
     [selectedSubscriberId, simulatedSubscribers]
   );
 
+  const creatorJourneys = useMemo(
+    () => (journeyWorkspace?.journeys ?? []).filter((journey) => journey.creator_id === creatorId),
+    [creatorId, journeyWorkspace?.journeys]
+  );
+
+  const selectedJourney = useMemo(
+    () => creatorJourneys.find((journey) => journey.id === selectedJourneyId) ?? null,
+    [creatorJourneys, selectedJourneyId]
+  );
+
   async function loadWorkspace() {
     setLoading(true);
     try {
-      const result = await fetchScriptsWorkspace();
+      const [result, journeys] = await Promise.all([fetchScriptsWorkspace(), fetchJourneyWorkspace()]);
       setWorkspace(result);
+      setJourneyWorkspace(journeys);
       setError(null);
       const firstCreator = result.creators[0];
       if (firstCreator && !creatorId) {
@@ -95,8 +124,13 @@ export function Simulations({ initialScriptId }: { initialScriptId?: string }) {
       setSelectedScenarioId((current) => current || scenarioResult.scenarios[0]?.id || "");
       setSelectedSubscriberId((current) => current || subscriberResult.subscribers[0]?.id || "");
       if (!selectedScriptId) {
+        const creatorScripts = workspace?.scripts.filter((script) => script.creator_id === nextCreatorId) ?? [];
         setSelectedScriptId(
-          workspace?.scripts.find((script) => script.creator_id === nextCreatorId)?.id ?? workspace?.scripts[0]?.id ?? ""
+          creatorScripts.find((script) => script.name === "New Subscriber Funnel")?.id ??
+          creatorScripts[0]?.id ??
+          workspace?.scripts.find((script) => script.name === "New Subscriber Funnel")?.id ??
+          workspace?.scripts[0]?.id ??
+          ""
         );
       }
     } catch (loadError) {
@@ -108,11 +142,14 @@ export function Simulations({ initialScriptId }: { initialScriptId?: string }) {
     if (!creatorId || !selectedScript) return;
     setBusy(true);
     try {
+      const journeyFlow = selectedJourney ? flowForJourney(selectedJourney, workspace) : null;
+      const scriptForRun = journeyFlow ?? selectedScript;
       const result = await startSimulation(creatorId, {
-        scriptId: selectedScript.id,
+        scriptId: scriptForRun.id,
         scenarioId: selectedScenario?.id ?? null,
+        journeyId: selectedJourney?.id ?? null,
         simulatedSubscriberId: selectedSubscriber?.id ?? null,
-        eventType: selectedScenario?.trigger_event_type ?? selectedScript.trigger_event_type,
+        eventType: selectedJourney?.trigger_event ?? selectedScenario?.trigger_event_type ?? scriptForRun.trigger_event_type,
         subscriber: selectedSubscriber
           ? {
               name: selectedSubscriber.name,
@@ -130,6 +167,38 @@ export function Simulations({ initialScriptId }: { initialScriptId?: string }) {
       setError(null);
     } catch (runError) {
       setError(errorMessage(runError));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function runSimulationAction(action: () => Promise<SimulationDetailData>) {
+    if (!simulation?.simulation.id) return;
+    setBusy(true);
+    try {
+      const result = await action();
+      setSimulation(result);
+      setError(null);
+    } catch (actionError) {
+      setError(errorMessage(actionError));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function approveLatestQueueItem() {
+    if (!simulation?.conversation?.id) return;
+    setBusy(true);
+    try {
+      const workspace = await fetchQueueWorkspace({ itemId: "", status: "visible" });
+      const item = workspace.items.find((entry) => entry.conversation?.id === simulation.conversation?.id && entry.status !== "resolved");
+      if (!item) throw new Error("No active queue item was generated for this simulation.");
+      await applyQueueItemAction(item.id, "approve_ai", { actor: "operator" });
+      const refreshed = await fetchSimulationDetail(simulation.simulation.id);
+      setSimulation(refreshed);
+      setError(null);
+    } catch (approveError) {
+      setError(errorMessage(approveError));
     } finally {
       setBusy(false);
     }
@@ -206,6 +275,17 @@ export function Simulations({ initialScriptId }: { initialScriptId?: string }) {
               </select>
             </Field>
 
+            <Field label="Journey">
+              <select value={selectedJourneyId} onChange={(event) => setSelectedJourneyId(event.target.value)} className="command-card w-full rounded-2xl px-4 py-3 text-sm">
+                <option value="">No journey route</option>
+                {creatorJourneys.map((journey) => (
+                  <option key={journey.id} value={journey.id}>
+                    {journey.name}
+                  </option>
+                ))}
+              </select>
+            </Field>
+
             <Field label="Scenario">
               <select value={selectedScenarioId} onChange={(event) => setSelectedScenarioId(event.target.value)} className="command-card w-full rounded-2xl px-4 py-3 text-sm">
                 <option value="">Choose a scenario</option>
@@ -232,8 +312,9 @@ export function Simulations({ initialScriptId }: { initialScriptId?: string }) {
           <div className="mt-5 grid gap-3 md:grid-cols-2">
             <MetricCard label="Conversation Flows" value={workspace.scripts.length} icon={Sparkles} />
             <MetricCard label="Scenarios" value={scenarios.length} icon={TestTube2} />
+            <MetricCard label="Journeys" value={creatorJourneys.length} icon={PlaySquare} />
             <MetricCard label="Subscribers" value={simulatedSubscribers.length} icon={PlaySquare} />
-            <MetricCard label="Selected" value={selectedScript ? flowLabel(selectedScript.name) : "none"} icon={Sparkles} />
+            <MetricCard label="Selected" value={selectedJourney ? selectedJourney.name : selectedScript ? flowLabel(selectedScript.name) : "none"} icon={Sparkles} />
           </div>
         </div>
 
@@ -244,10 +325,31 @@ export function Simulations({ initialScriptId }: { initialScriptId?: string }) {
               <div className="mt-4 space-y-3">
                 <OutcomeRow label="Status" value={simulation.simulation.status} />
                 <OutcomeRow label="Event type" value={simulation.simulation.event_type} />
+                <OutcomeRow label="Journey" value={simulation.simulation.journey?.name ?? selectedJourney?.name ?? "none"} />
+                <OutcomeRow label="Source channel" value={simulation.simulation.journey?.source_channel ?? selectedJourney?.source_channel ?? "n/a"} />
+                <OutcomeRow label="Expected outcome" value={simulation.simulation.journey?.expected_outcome ?? selectedJourney?.expected_outcome ?? "n/a"} />
                 <OutcomeRow label="Flow" value={flowLabel(simulation.simulation.script?.name ?? selectedScript?.name ?? "unknown")} />
                 <OutcomeRow label="Scenario" value={simulation.simulation.scenario?.label ?? selectedScenario?.label ?? "unknown"} />
                 <OutcomeRow label="Subscriber" value={simulation.simulation.simulated_subscriber?.name ?? selectedSubscriber?.name ?? "default"} />
                 <OutcomeRow label="Last error" value={simulation.simulation.last_error ?? "none"} />
+                <div className="grid gap-2 pt-2 sm:grid-cols-2">
+                  <button type="button" onClick={() => void runSimulationAction(() => simulationFastForward(simulation.simulation.id))} disabled={busy} className="rounded-xl border border-blue-400/20 bg-[#102338]/72 px-3 py-2 text-sm font-semibold text-blue-50 disabled:opacity-45">
+                    Fast-forward wait
+                  </button>
+                  <button type="button" onClick={() => void runSimulationAction(() => simulationReply(simulation.simulation.id, replyText))} disabled={busy} className="rounded-xl border border-blue-400/20 bg-[#102338]/72 px-3 py-2 text-sm font-semibold text-blue-50 disabled:opacity-45">
+                    Send reply
+                  </button>
+                  <button type="button" onClick={() => void approveLatestQueueItem()} disabled={busy} className="rounded-xl border border-blue-400/20 bg-[#102338]/72 px-3 py-2 text-sm font-semibold text-blue-50 disabled:opacity-45">
+                    Approve queue item
+                  </button>
+                  <button type="button" onClick={() => void runSimulationAction(() => simulationPurchase(simulation.simulation.id, true))} disabled={busy} className="rounded-xl border border-blue-400/20 bg-[#102338]/72 px-3 py-2 text-sm font-semibold text-blue-50 disabled:opacity-45">
+                    Purchase success
+                  </button>
+                  <button type="button" onClick={() => void runSimulationAction(() => simulationPurchase(simulation.simulation.id, false))} disabled={busy} className="rounded-xl border border-blue-400/20 bg-[#102338]/72 px-3 py-2 text-sm font-semibold text-blue-50 disabled:opacity-45 sm:col-span-2">
+                    Purchase failure
+                  </button>
+                </div>
+                <textarea value={replyText} onChange={(event) => setReplyText(event.target.value)} className="command-card min-h-20 w-full rounded-2xl px-4 py-3 text-sm" />
               </div>
             ) : (
               <div className="mt-3 text-sm text-blue-100/58">Run a simulation to see the outcome here.</div>
@@ -322,6 +424,10 @@ function formatDate(value: string | null | undefined) {
 
 function flowLabel(value: string) {
   return value.replace(/\bScripts\b/g, "Conversation Flows").replace(/\bScript\b/g, "Flow");
+}
+
+function flowForJourney(journey: OfRevenueJourney, workspace: ScriptsWorkspaceData | null) {
+  return workspace?.scripts.find((script) => script.id === journey.conversation_flow_id) ?? null;
 }
 
 function errorMessage(error: unknown) {

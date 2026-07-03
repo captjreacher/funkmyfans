@@ -1,6 +1,6 @@
 import "dotenv/config";
 
-import type { AutomationRuleSimulationResult, OfOutboundMessage } from "@funkmyfans/of-types";
+import type { OfOutboundMessage } from "@funkmyfans/of-types";
 
 type JsonRecord = Record<string, unknown>;
 type SmokeFetchResult = {
@@ -38,6 +38,12 @@ async function main() {
     console.log(`[api] /api/automation/workspace rules=${arrayLength(automationWorkspace.rules)}`);
   }
 
+  const journeyWorkspace = await readJson("/api/journeys/workspace", failures);
+  if (journeyWorkspace) {
+    validateJourneyWorkspaceShape(journeyWorkspace, failures);
+    console.log(`[api] /api/journeys/workspace journeys=${arrayLength(journeyWorkspace.journeys)}`);
+  }
+
   const settingsWorkspace = await readJson("/api/settings/workspace", failures);
   if (settingsWorkspace) {
     validateSettingsWorkspaceShape(settingsWorkspace, failures);
@@ -53,7 +59,7 @@ async function main() {
   }
 
   if (dashboard && scriptsWorkspace && automationWorkspace) {
-    await validateBusinessFlow(dashboard, scriptsWorkspace, automationWorkspace, failures, notes);
+    await validateBusinessFlow(dashboard, scriptsWorkspace, automationWorkspace, journeyWorkspace, failures, notes);
   }
 
   if (dashboard) {
@@ -109,8 +115,8 @@ async function readJson(path: string, failures: string[]): Promise<JsonRecord | 
   return result.body;
 }
 
-async function fetchEndpoint(path: string): Promise<SmokeFetchResult> {
-  const response = await fetch(new URL(path, baseUrl));
+async function fetchEndpoint(path: string, init?: RequestInit): Promise<SmokeFetchResult> {
+  const response = await fetch(new URL(path, baseUrl), init);
   const text = await response.text();
   let body: unknown = null;
 
@@ -275,6 +281,36 @@ function validateAutomationWorkspaceShape(body: JsonRecord, failures: string[]) 
   );
 }
 
+function validateJourneyWorkspaceShape(body: JsonRecord, failures: string[]) {
+  const creators = requireArray(body, "creators", "/api/journeys/workspace", failures);
+  const journeys = requireArray(body, "journeys", "/api/journeys/workspace", failures);
+
+  validateSampleObjects(
+    "/api/journeys/workspace",
+    [
+      [creators, (item) => {
+        requireString(item, "id", "/api/journeys/workspace.creators[]", failures);
+        requireString(item, "username", "/api/journeys/workspace.creators[]", failures);
+      }],
+      [journeys, (item) => {
+        requireString(item, "id", "/api/journeys/workspace.journeys[]", failures);
+        requireString(item, "creator_id", "/api/journeys/workspace.journeys[]", failures);
+        requireString(item, "name", "/api/journeys/workspace.journeys[]", failures);
+        requireString(item, "source_channel", "/api/journeys/workspace.journeys[]", failures);
+        requireString(item, "target_channel", "/api/journeys/workspace.journeys[]", failures);
+        requireString(item, "audience", "/api/journeys/workspace.journeys[]", failures);
+        requireString(item, "trigger_event", "/api/journeys/workspace.journeys[]", failures);
+        requireString(item, "conversation_flow_id", "/api/journeys/workspace.journeys[]", failures);
+        requireString(item, "expected_outcome", "/api/journeys/workspace.journeys[]", failures);
+        requireString(item, "success_event", "/api/journeys/workspace.journeys[]", failures);
+        requireString(item, "failure_event", "/api/journeys/workspace.journeys[]", failures);
+        requireString(item, "status", "/api/journeys/workspace.journeys[]", failures);
+      }]
+    ],
+    failures
+  );
+}
+
 function validateSettingsWorkspaceShape(body: JsonRecord, failures: string[]) {
   const agency = requireRecord(body, "agency", "/api/settings/workspace", failures);
   const creators = requireArray(body, "creators", "/api/settings/workspace", failures);
@@ -408,6 +444,7 @@ async function validateBusinessFlow(
   dashboard: JsonRecord,
   scriptsWorkspace: JsonRecord,
   automationWorkspace: JsonRecord,
+  journeyWorkspace: JsonRecord | null,
   failures: string[],
   notes: string[]
 ) {
@@ -428,18 +465,143 @@ async function validateBusinessFlow(
     failures.push(`/api/scripts/workspace: expected scripts for selected creator ${connectedCreator.id}`);
   }
 
-  const candidateRules = automationRules.filter((rule) => !rule.creator_id || rule.creator_id === connectedCreator.id);
-  const chosenRule = candidateRules.find((rule) => rule.selected_script_id && (rule.action_type === "run_script" || rule.action_type === "queue_outbound_draft")) ?? candidateRules[0];
-
-  if (!chosenRule) {
-    failures.push(`/api/automation/workspace: expected at least one automation rule to exercise simulation smoke for creator ${connectedCreator.id}`);
+  const funnelScript = creatorScripts.find((script) => stringValue(script.name) === "New Subscriber Funnel");
+  if (!funnelScript) {
+    failures.push(`/api/scripts/workspace: expected seeded New Subscriber Funnel for creator ${connectedCreator.id}`);
     return;
   }
 
-  const testInput = buildAutomationSmokeInput(connectedCreator, chosenRule);
-  notes.push(`[flow] testing rule ${stringValue(chosenRule.name)} (${stringValue(chosenRule.trigger_type)})`);
+  const funnelSteps = arrayOfObjects(funnelScript.steps);
+  if (funnelSteps.length !== 14) {
+    failures.push(`/api/scripts/workspace: expected New Subscriber Funnel to have 14 runtime steps, got ${funnelSteps.length}`);
+  }
 
-  await runAutomationSimulationTest(chosenRule, testInput, failures, notes);
+  const chosenRule = automationRules.find((rule) =>
+    rule.creator_id === connectedCreator.id &&
+    stringValue(rule.name) === "New subscriber -> New Subscriber Funnel" &&
+    stringValue(rule.status) === "active" &&
+    stringValue(rule.selected_script_id) === stringValue(funnelScript.id)
+  );
+  if (!chosenRule) {
+    failures.push(`/api/automation/workspace: expected active New subscriber -> New Subscriber Funnel rule linked to script ${stringValue(funnelScript.id)}`);
+    return;
+  }
+
+  notes.push(`[flow] testing rule ${stringValue(chosenRule.name)} (${stringValue(chosenRule.trigger_type)})`);
+  notes.push(`[flow] canonical script ${stringValue(funnelScript.id)} steps=${funnelSteps.length}`);
+
+  await runNewSubscriberFunnelAcceptance({
+    creator: connectedCreator,
+    script: funnelScript,
+    rule: chosenRule
+  }, failures, notes);
+
+  if (journeyWorkspace) {
+    await validateJourneyAlignment(connectedCreator, funnelScript, journeyWorkspace, failures, notes);
+  }
+}
+
+async function validateJourneyAlignment(
+  creator: JsonRecord,
+  funnelScript: JsonRecord,
+  journeyWorkspace: JsonRecord,
+  failures: string[],
+  notes: string[]
+) {
+  const creatorId = stringValue(creator.id);
+  const journeys = arrayOfObjects(journeyWorkspace.journeys) as JsonRecord[];
+  const journey = journeys.find((item) =>
+    stringValue(item.creator_id) === creatorId &&
+    stringValue(item.name) === "Instagram Follower -> OnlyFans Subscriber" &&
+    stringValue(item.status) === "active"
+  );
+  if (!journey) {
+    failures.push(`/api/journeys/workspace: expected active Instagram Follower -> OnlyFans Subscriber Journey for creator ${creatorId}`);
+    return;
+  }
+
+  const expected = {
+    source_channel: "instagram",
+    target_channel: "onlyfans",
+    audience: "instagram_followers",
+    trigger_event: "instagram_story_reply",
+    expected_outcome: "onlyfans_subscribed",
+    success_event: "subscriber_created",
+    failure_event: "journey_timeout"
+  };
+  for (const [key, value] of Object.entries(expected)) {
+    if (stringValue(journey[key]) !== value) {
+      failures.push(`/api/journeys/workspace: expected Journey ${key}=${value}, got ${describeValue(journey[key])}`);
+    }
+  }
+  if (stringValue(journey.conversation_flow_id) !== stringValue(funnelScript.id)) {
+    failures.push(`/api/journeys/workspace: expected Journey linked flow ${stringValue(funnelScript.id)}, got ${describeValue(journey.conversation_flow_id)}`);
+  }
+
+  notes.push(`[journey] route=${stringValue(journey.name)} ${stringValue(journey.source_channel)} -> ${stringValue(journey.target_channel)} trigger=${stringValue(journey.trigger_event)} expected=${stringValue(journey.expected_outcome)}`);
+
+  const runKey = `${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
+  const result = await fetchEndpoint(`/api/creators/${encodeURIComponent(creatorId)}/simulations`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      journeyId: stringValue(journey.id),
+      eventType: "instagram_story_reply",
+      eventPayload: {
+        source_channel: "instagram",
+        target_channel: "onlyfans",
+        audience: "instagram_followers",
+        fanId: `ig_story_${runKey}`,
+        message_text: "That story made me curious.",
+        expected_outcome: "onlyfans_subscribed"
+      },
+      subscriber: {
+        name: "Instagram Story Fan",
+        username: `ig_story_${runKey}`,
+        subscription_status: "lead",
+        renewal_state: "prospect",
+        spend_level: "unknown",
+        lifetime_value: 0,
+        message_history_summary: "Smoke journey alignment lead",
+        custom_variables: {
+          source_channel: "instagram",
+          relationship_stage: "Prospect",
+          conversation_summary: "Instagram story reply"
+        }
+      },
+      variables: {
+        subscriber_name: "Instagram Story Fan",
+        starter_ppv_title: "Starter PPV",
+        starter_ppv_price: "19"
+      }
+    })
+  });
+
+  if (result.status !== 201) {
+    failures.push(`[journey] simulation expected HTTP 201, got ${result.status} - ${trim(result.text)}`);
+    return;
+  }
+  if (!isRecord(result.body)) {
+    failures.push("[journey] simulation expected detail object");
+    return;
+  }
+  const simulation = requireRecord(result.body, "simulation", "[journey] simulation", failures);
+  const conversation = requireRecord(result.body, "conversation", "[journey] simulation", failures);
+  const history = arrayOfObjects(result.body.history);
+  const matched = history.some((entry) => stringValue(entry.event_type) === "journey_matched");
+  if (!matched) {
+    failures.push("[journey] expected runtime history to include journey_matched");
+  }
+  if (simulation && stringValue(simulation.journey_id) !== stringValue(journey.id)) {
+    failures.push(`[journey] expected simulation journey_id ${stringValue(journey.id)}, got ${describeValue(simulation.journey_id)}`);
+  }
+  if (simulation && stringValue(simulation.event_type) !== "instagram_story_reply") {
+    failures.push(`[journey] expected simulation event_type instagram_story_reply, got ${describeValue(simulation.event_type)}`);
+  }
+  if (conversation && stringValue(conversation.script_id) !== stringValue(funnelScript.id)) {
+    failures.push(`[journey] expected matched Journey to launch New Subscriber Funnel ${stringValue(funnelScript.id)}, got ${describeValue(conversation.script_id)}`);
+  }
+  notes.push(`[journey] simulation=${simulation ? stringValue(simulation.id) : "unknown"} matched=${matched ? "yes" : "no"} flow_started=${conversation ? stringValue(conversation.status) : "unknown"}`);
 }
 
 async function validateCop1QueueWorkspaceFlow(dashboard: JsonRecord, failures: string[], notes: string[]) {
@@ -494,106 +656,254 @@ async function validateCop1QueueWorkspaceFlow(dashboard: JsonRecord, failures: s
   await validateConversationLifecycle(selectedItem, failures, notes);
 }
 
-async function runAutomationSimulationTest(
-  rule: JsonRecord,
-  testInput: {
-    creatorId: string;
-    eventType: string;
-    subscriber: JsonRecord;
-    relationship: JsonRecord;
-  },
+async function runNewSubscriberFunnelAcceptance(
+  input: { creator: JsonRecord; script: JsonRecord; rule: JsonRecord },
   failures: string[],
   notes: string[]
 ) {
-  const path = `/api/automation/rules/${stringValue(rule.id)}/test`;
-  const result = await fetchEndpoint(path, {
+  const creatorId = stringValue(input.creator.id);
+  const scriptId = stringValue(input.script.id);
+  const runKey = `${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
+
+  const high = await startFunnelSimulation(creatorId, scriptId, {
+    username: `smoke_high_${runKey}`,
+    name: "Smoke High Confidence Fan",
+    reply: "Playful teasing sounds fun.",
+    purchase: true
+  }, failures);
+  if (high) {
+    await driveHighConfidenceFunnel(high, failures, notes);
+  }
+
+  const low = await startFunnelSimulation(creatorId, scriptId, {
+    username: `smoke_low_${runKey}`,
+    name: "Smoke Low Confidence Fan",
+    reply: "I want a custom thing and maybe we can move off platform.",
+    purchase: false
+  }, failures);
+  if (low) {
+    await driveLowConfidenceFunnel(low, creatorId, failures, notes);
+  }
+}
+
+async function startFunnelSimulation(
+  creatorId: string,
+  scriptId: string,
+  input: { username: string; name: string; reply: string; purchase: boolean },
+  failures: string[]
+) {
+  const result = await fetchEndpoint(`/api/creators/${encodeURIComponent(creatorId)}/simulations`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      creatorId: testInput.creatorId,
-      eventType: testInput.eventType,
-      subscriber: testInput.subscriber,
-      relationship: testInput.relationship
+      scriptId,
+      eventType: "subscriber_created",
+      eventPayload: {
+        fanId: input.username,
+        subscriber: {
+          display_name: input.name,
+          username: input.username,
+          subscription_date: new Date().toISOString(),
+          total_spend: 0,
+          last_purchase: null,
+          relationship_stage: "New",
+          conversation_summary: "Smoke acceptance new subscriber"
+        }
+      },
+      subscriber: {
+        name: input.name,
+        username: input.username,
+        subscription_status: "active",
+        renewal_state: "new",
+        spend_level: "new",
+        lifetime_value: 0,
+        message_history_summary: "Smoke acceptance new subscriber",
+        custom_variables: {
+          display_name: input.name,
+          nickname: input.name.split(" ")[1] ?? input.name,
+          subscription_date: new Date().toISOString(),
+          total_spend: 0,
+          last_purchase: null,
+          relationship_stage: "New",
+          conversation_summary: "Smoke acceptance new subscriber"
+        }
+      },
+      variables: {
+        subscriber_name: input.name,
+        starter_ppv_title: "Starter PPV",
+        starter_ppv_price: "19"
+      }
     })
   });
 
-  if (result.status === 404 || result.status === 405) {
-    notes.push(`[flow] ${path} unavailable; skipped simulation-only rule test`);
-    return;
+  if (result.status !== 201) {
+    failures.push(`/api/creators/:id/simulations: expected HTTP 201, got ${result.status} - ${trim(result.text)}`);
+    return null;
   }
-
-  if (result.status !== 200) {
-    failures.push(`${path}: expected HTTP 200, got ${result.status} - ${trim(result.text)}`);
-    return;
-  }
-
   if (!isRecord(result.body)) {
-    failures.push(`${path}: expected JSON object, got ${describeValue(result.body)}`);
+    failures.push("/api/creators/:id/simulations: expected simulation detail object");
+    return null;
+  }
+  const simulation = requireRecord(result.body, "simulation", "/api/creators/:id/simulations", failures);
+  const conversation = requireRecord(result.body, "conversation", "/api/creators/:id/simulations", failures);
+  if (simulation) {
+    requireString(simulation, "id", "/api/creators/:id/simulations.simulation", failures);
+    requireString(simulation, "status", "/api/creators/:id/simulations.simulation", failures);
+  }
+  if (conversation) {
+    requireString(conversation, "id", "/api/creators/:id/simulations.conversation", failures);
+    requireString(conversation, "status", "/api/creators/:id/simulations.conversation", failures);
+  }
+  return {
+    detail: result.body,
+    simulationId: simulation ? stringValue(simulation.id) : "",
+    conversationId: conversation ? stringValue(conversation.id) : "",
+    reply: input.reply,
+    purchase: input.purchase
+  };
+}
+
+async function driveHighConfidenceFunnel(
+  run: { detail: JsonRecord; simulationId: string; conversationId: string; reply: string; purchase: boolean },
+  failures: string[],
+  notes: string[]
+) {
+  notes.push(`[acceptance:high] simulation=${run.simulationId} conversation=${run.conversationId}`);
+  let detail = await simulationAction(run.simulationId, "fast-forward", {}, failures);
+  detail = await simulationAction(run.simulationId, "reply", { text: run.reply }, failures) ?? detail;
+  if (!detail) return;
+
+  const afterReply = summarizeSimulationDetail(detail);
+  notes.push(`[acceptance:high] after reply status=${afterReply.conversationStatus} outbound=${afterReply.outboundSummary}`);
+  if (afterReply.conversationStatus !== "waiting_reply" || afterReply.waitingReason !== "purchase_check") {
+    failures.push(`[acceptance:high] expected high-confidence path to auto-send through PPV and wait for purchase, got status=${afterReply.conversationStatus} waiting=${afterReply.waitingReason}`);
+  }
+  if (afterReply.queueLikeOutboundCount !== 0) {
+    failures.push(`[acceptance:high] expected no pending approval outbound messages, got ${afterReply.queueLikeOutboundCount}`);
+  }
+
+  detail = await simulationAction(run.simulationId, "purchase", { purchased: true }, failures) ?? detail;
+  const completed = summarizeSimulationDetail(detail);
+  notes.push(`[acceptance:high] purchase success final status=${completed.conversationStatus} simulation=${completed.simulationStatus}`);
+  notes.push(`[acceptance:high] timeline=${completed.timeline}`);
+  if (completed.conversationStatus !== "completed" || completed.simulationStatus !== "completed") {
+    failures.push(`[acceptance:high] expected completed conversation and simulation after purchase success, got conversation=${completed.conversationStatus} simulation=${completed.simulationStatus}`);
+  }
+  if (!completed.variableSummary.includes("purchase_status=purchased")) {
+    failures.push("[acceptance:high] expected subscriber state variables to include purchase_status=purchased");
+  }
+}
+
+async function driveLowConfidenceFunnel(
+  run: { detail: JsonRecord; simulationId: string; conversationId: string; reply: string; purchase: boolean },
+  creatorId: string,
+  failures: string[],
+  notes: string[]
+) {
+  notes.push(`[acceptance:low] simulation=${run.simulationId} conversation=${run.conversationId}`);
+  let detail = await simulationAction(run.simulationId, "fast-forward", {}, failures);
+  detail = await simulationAction(run.simulationId, "reply", { text: run.reply }, failures) ?? detail;
+  if (!detail) return;
+
+  const afterReply = summarizeSimulationDetail(detail);
+  notes.push(`[acceptance:low] after reply status=${afterReply.conversationStatus} waiting=${afterReply.waitingReason} outbound=${afterReply.outboundSummary}`);
+  if (afterReply.conversationStatus !== "waiting_approval") {
+    failures.push(`[acceptance:low] expected low-confidence path to pause for approval, got ${afterReply.conversationStatus}`);
+  }
+
+  const queue = await readJson(`/api/queue-workspace?creatorId=${encodeURIComponent(creatorId)}&status=visible`, failures);
+  const queueItem = queue ? arrayOfObjects(queue.items).find((item) => isRecord(item.conversation) && stringValue(item.conversation.id) === run.conversationId) : null;
+  if (!queueItem) {
+    failures.push(`[acceptance:low] expected visible Queue Item for conversation ${run.conversationId}`);
     return;
   }
-  if ("error" in result.body) {
-    failures.push(`${path}: unexpected error payload - ${describeValue(result.body.error)}`);
+  notes.push(`[acceptance:low] queue item=${stringValue(queueItem.id)} title=${stringValue(queueItem.title)} status=${stringValue(queueItem.status)}`);
+
+  const approval = await fetchEndpoint(`/api/queue-items/${encodeURIComponent(stringValue(queueItem.id))}/action`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action: "approve_ai", actor: "smoke" })
+  });
+  if (approval.status !== 200) {
+    failures.push(`[acceptance:low] queue approval expected HTTP 200, got ${approval.status} - ${trim(approval.text)}`);
     return;
   }
+  notes.push(`[acceptance:low] queue item resolved via approve_ai`);
 
-  const simulation = result.body as Partial<AutomationRuleSimulationResult> & JsonRecord;
-  requireBoolean(simulation, "matched", path, failures);
-  requireBoolean(simulation, "triggerMatched", path, failures);
-  requireString(simulation, "action", path, failures);
-  requireString(simulation, "creatorId", path, failures);
-  requireString(simulation, "creatorName", path, failures);
-  requireString(simulation, "eventType", path, failures);
-  requireString(simulation, "simulatedAt", path, failures);
-  requireArray(simulation, "conditions", path, failures);
-  const outboundMessages = requireArray(simulation, "outboundMessages", path, failures);
-  requireString(simulation, "summary", path, failures);
-
-  validateSampleObjects(
-    path,
-    [[outboundMessages, (item) => {
-      requireString(item, "id", `${path}.outboundMessages[]`, failures);
-      requireString(item, "creator_id", `${path}.outboundMessages[]`, failures);
-      requireString(item, "status", `${path}.outboundMessages[]`, failures);
-      requireString(item, "execution_mode", `${path}.outboundMessages[]`, failures);
-      if (stringValue(item.status) === "sent" || stringValue(item.execution_mode) !== "simulation") {
-        failures.push(`${path}.outboundMessages[]: expected simulation-only outbound messages, got status=${describeValue(item.status)} execution_mode=${describeValue(item.execution_mode)}`);
-      }
-    }]],
-    failures
-  );
-
-  const conditions = arrayOfObjects(simulation.conditions);
-  validateSampleObjects(
-    path,
-    [[conditions, (item) => {
-      requireString(item, "key", `${path}.conditions[]`, failures);
-      requireString(item, "label", `${path}.conditions[]`, failures);
-      requireBoolean(item, "matched", `${path}.conditions[]`, failures);
-      requireString(item, "actual", `${path}.conditions[]`, failures);
-      requireString(item, "expected", `${path}.conditions[]`, failures);
-    }]],
-    failures
-  );
-
-  const matched = Boolean(simulation.matched);
-  const triggerMatched = Boolean(simulation.triggerMatched);
-  const summary = stringValue(simulation.summary).toLowerCase();
-  if (!matched && !triggerMatched && !summary.includes("did not match")) {
-    failures.push(`${path}: expected a matched simulation or a clearly reported no-match summary; got summary=${describeValue(simulation.summary)}`);
+  detail = await readSimulationDetail(run.simulationId, failures) ?? detail;
+  const resumed = summarizeSimulationDetail(detail);
+  notes.push(`[acceptance:low] after approval status=${resumed.conversationStatus} waiting=${resumed.waitingReason} outbound=${resumed.outboundSummary}`);
+  if (resumed.conversationStatus !== "waiting_reply" || resumed.waitingReason !== "purchase_check") {
+    failures.push(`[acceptance:low] expected approval to resume flow through PPV offer to purchase check, got status=${resumed.conversationStatus} waiting=${resumed.waitingReason}`);
   }
 
-  if ((simulation.action === "run_script" || simulation.action === "queue_outbound_draft") && matched && simulation.scriptId) {
-    if (!stringValue(simulation.automationSimulationId)) {
-      failures.push(`${path}: expected automationSimulationId for matched script-backed simulation`);
-    }
+  detail = await simulationAction(run.simulationId, "purchase", { purchased: false }, failures) ?? detail;
+  const completed = summarizeSimulationDetail(detail);
+  notes.push(`[acceptance:low] purchase failure final status=${completed.conversationStatus} simulation=${completed.simulationStatus}`);
+  notes.push(`[acceptance:low] timeline=${completed.timeline}`);
+  if (completed.conversationStatus !== "completed" || completed.simulationStatus !== "completed") {
+    failures.push(`[acceptance:low] expected completed conversation and simulation after purchase failure, got conversation=${completed.conversationStatus} simulation=${completed.simulationStatus}`);
   }
+  if (!completed.variableSummary.includes("purchase_status=not_purchased")) {
+    failures.push("[acceptance:low] expected subscriber state variables to include purchase_status=not_purchased");
+  }
+}
 
-  if (outboundMessages.length) {
-    const sentMessages = outboundMessages.filter((item) => stringValue(item.status) === "sent");
-    if (sentMessages.length) {
-      failures.push(`${path}: simulation generated sent outbound messages, which is not allowed in smoke tests`);
-    }
+async function simulationAction(simulationId: string, action: "fast-forward" | "reply" | "purchase", body: JsonRecord, failures: string[]) {
+  const result = await fetchEndpoint(`/api/simulations/${encodeURIComponent(simulationId)}/${action}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  if (result.status !== 200) {
+    failures.push(`/api/simulations/:id/${action}: expected HTTP 200, got ${result.status} - ${trim(result.text)}`);
+    return null;
   }
+  if (!isRecord(result.body)) {
+    failures.push(`/api/simulations/:id/${action}: expected simulation detail object`);
+    return null;
+  }
+  return result.body;
+}
+
+async function readSimulationDetail(simulationId: string, failures: string[]) {
+  const result = await fetchEndpoint(`/api/simulations/${encodeURIComponent(simulationId)}`);
+  if (result.status !== 200) {
+    failures.push(`/api/simulations/:id: expected HTTP 200, got ${result.status} - ${trim(result.text)}`);
+    return null;
+  }
+  return isRecord(result.body) ? result.body : null;
+}
+
+function summarizeSimulationDetail(detail: JsonRecord) {
+  const simulation = isRecord(detail.simulation) ? detail.simulation : {};
+  const conversation = isRecord(detail.conversation) ? detail.conversation : {};
+  const outbound = arrayOfObjects(detail.outboundMessages);
+  const history = arrayOfObjects(detail.history);
+  const variables = isRecord(conversation.variables) ? conversation.variables : {};
+  return {
+    simulationStatus: stringValue(simulation.status),
+    conversationStatus: stringValue(conversation.status),
+    waitingReason: normalizeWaitingReason(stringValue(conversation.waiting_reason)),
+    queueLikeOutboundCount: outbound.filter((message) => stringValue(message.status) === "pending_approval" || stringValue(message.approval_status) === "pending").length,
+    outboundSummary: outbound.map((message) => `${stringValue(message.status)}/${stringValue(message.approval_status)}`).join(",") || "none",
+    timeline: history.map((item) => stringValue(item.event_type)).join(" > "),
+    variableSummary: [
+      `ai_confidence=${String(variables.ai_confidence ?? "")}`,
+      `purchase_status=${String(variables.purchase_status ?? "")}`,
+      `last_purchase=${String(variables.last_purchase ?? "")}`,
+      `total_spend=${String(variables.total_spend ?? "")}`,
+      `conversation_summary=${String(variables.conversation_summary ?? variables.last_reply_text ?? "")}`
+    ].join(" ")
+  };
+}
+
+function normalizeWaitingReason(value: string) {
+  if (value.startsWith("purchase:")) return "purchase_check";
+  if (value.startsWith("approval:")) return "approval";
+  if (value.startsWith("reply:")) return "reply";
+  if (value.startsWith("delay:")) return "delay";
+  return value;
 }
 
 function validateQueueWorkspaceShape(body: JsonRecord, endpoint: string, failures: string[]) {

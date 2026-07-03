@@ -35,6 +35,7 @@ export type ConversationLifecycleState = "new" | "open" | "waiting" | "escalated
 export type ConversationParticipantRole = "creator" | "subscriber" | "operator" | "system";
 export type AutomationExecutionMode = "production" | "simulation";
 export type AutomationSimulationStatus = "draft" | "running" | "paused" | "completed" | "cancelled" | "failed";
+export type RevenueJourneyStatus = "draft" | "active" | "paused" | "archived";
 export type AutomationRegistryKind =
   | "event_type"
   | "conversation_classification"
@@ -888,6 +889,7 @@ export interface ScriptBuilderStepMetadata {
   variableKey?: string;
   variableValue?: string;
   waitForReply?: boolean;
+  waitForPurchase?: boolean;
   branchRules?: ScriptBuilderBranchRule[];
   messageGenerationMode?: ScriptMessageGenerationMode;
   mediaUrl?: string;
@@ -1087,6 +1089,33 @@ export interface OfCreatorAutomationScenario {
   running_count?: number;
   failed_count?: number;
   recent_events?: Array<Pick<OfEvent, "id" | "event_type" | "received_at">>;
+}
+
+export interface OfRevenueJourney {
+  id: string;
+  creator_id: string;
+  name: string;
+  description: string | null;
+  source_channel: string;
+  target_channel: string;
+  audience: string;
+  trigger_event: string;
+  conversation_flow_id: string;
+  expected_outcome: string;
+  success_event: string;
+  failure_event: string;
+  status: RevenueJourneyStatus;
+  metadata: Record<string, unknown>;
+  last_triggered_at: string | null;
+  created_at: string;
+  updated_at: string;
+  conversation_flow?: Pick<OfMessageScript, "id" | "name" | "status" | "action_mode" | "trigger_event_type" | "category"> | null;
+  creator?: Pick<OfCreator, "id" | "username" | "display_name"> | null;
+}
+
+export interface RevenueJourneyWorkspaceData {
+  creators: OfCreator[];
+  journeys: OfRevenueJourney[];
 }
 
 export interface ScriptBuilderConfig {
@@ -1346,6 +1375,7 @@ export interface OfAutomationSimulation {
   creator_id: string;
   script_id: string | null;
   scenario_id: string | null;
+  journey_id?: string | null;
   simulated_subscriber_id: string | null;
   conversation_instance_id: string | null;
   automation_run_id: string | null;
@@ -1364,6 +1394,7 @@ export interface OfAutomationSimulation {
   simulated_subscriber?: OfSimulatedSubscriber | null;
   script?: Pick<OfMessageScript, "id" | "name" | "action_mode" | "trigger_event_type"> | null;
   scenario?: Pick<OfCreatorAutomationScenario, "id" | "scenario_key" | "label" | "trigger_event_type"> | null;
+  journey?: Pick<OfRevenueJourney, "id" | "name" | "source_channel" | "target_channel" | "audience" | "trigger_event" | "expected_outcome" | "success_event" | "failure_event" | "status"> | null;
   conversation?: OfConversationInstance | null;
   history?: OfConversationHistoryItem[];
   outbound_messages?: OfOutboundMessage[];
