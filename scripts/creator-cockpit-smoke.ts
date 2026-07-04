@@ -473,6 +473,7 @@ async function validateBusinessFlow(
 
   const funnelSteps = arrayOfObjects(funnelScript.steps);
   validateNsp4FunnelShape(creatorScripts, funnelScript, funnelSteps, failures);
+  const shortPlaybook = validateNsp6ShortPlaybookShape(creatorScripts, automationRules, connectedCreator.id, failures);
 
   const chosenRule = automationRules.find((rule) =>
     rule.creator_id === connectedCreator.id &&
@@ -493,6 +494,14 @@ async function validateBusinessFlow(
     script: funnelScript,
     rule: chosenRule
   }, failures, notes);
+
+  if (shortPlaybook) {
+    await runNewSubscriberShortPlaybookAcceptance({
+      creator: connectedCreator,
+      script: shortPlaybook.script,
+      rule: shortPlaybook.rule
+    }, failures, notes);
+  }
 
   if (journeyWorkspace) {
     await validateJourneyAlignment(connectedCreator, funnelScript, journeyWorkspace, failures, notes);
@@ -719,6 +728,201 @@ async function runNewSubscriberFunnelAcceptance(
   }
 }
 
+function validateNsp6ShortPlaybookShape(
+  creatorScripts: JsonRecord[],
+  automationRules: JsonRecord[],
+  creatorId: string,
+  failures: string[]
+) {
+  const matches = creatorScripts.filter((script) => stringValue(script.name) === "New Subscriber Short Playbook");
+  if (matches.length !== 1) {
+    failures.push(`/api/scripts/workspace: expected exactly one New Subscriber Short Playbook for selected creator, got ${matches.length}`);
+    return null;
+  }
+
+  const script = matches[0];
+  const steps = arrayOfObjects(script.steps);
+  if (steps.length < 5 || steps.length > 12) {
+    failures.push(`/api/scripts/workspace: expected New Subscriber Short Playbook to have 5-12 runtime steps, got ${steps.length}`);
+  }
+  if (stringValue(script.status) !== "inactive") {
+    failures.push(`/api/scripts/workspace: expected New Subscriber Short Playbook to be inactive, got ${describeValue(script.status)}`);
+  }
+  if (stringValue(script.action_mode) !== "auto_send" || script.auto_send_enabled !== true) {
+    failures.push("/api/scripts/workspace: expected New Subscriber Short Playbook to be auto_send with auto_send_enabled=true");
+  }
+
+  const workspace = isRecord(script.builder_config) && isRecord(script.builder_config.workspace) ? script.builder_config.workspace : {};
+  if (stringValue(workspace.templateKey) !== "new_subscriber_short_playbook") {
+    failures.push(`/api/scripts/workspace: expected New Subscriber Short Playbook templateKey=new_subscriber_short_playbook, got ${describeValue(workspace.templateKey)}`);
+  }
+  if (stringValue(workspace.templateVersion) !== "nsp-6a") {
+    failures.push(`/api/scripts/workspace: expected New Subscriber Short Playbook templateVersion=nsp-6a, got ${describeValue(workspace.templateVersion)}`);
+  }
+  if (stringValue(workspace.archetypeKey) !== "girl_next_door") {
+    failures.push(`/api/scripts/workspace: expected New Subscriber Short Playbook archetypeKey=girl_next_door, got ${describeValue(workspace.archetypeKey)}`);
+  }
+
+  const routeStep = steps.find((step) =>
+    stringValue(step.step_type) === "branch" &&
+    (stringValue(step.step_order) === "2" || stringValue(step.metadata?.label) === "Route Opening Reply")
+  );
+  const branchRules = isRecord(routeStep?.metadata) && Array.isArray(routeStep.metadata.branchRules) ? routeStep.metadata.branchRules : [];
+  for (const routeKey of ["engaged", "buying_signal", "exception", "no_response"]) {
+    if (!branchRules.some((rule) => isRecord(rule) && isRecord(rule.condition) && stringValue(rule.condition.value) === routeKey)) {
+      failures.push(`/api/scripts/workspace: New Subscriber Short Playbook missing route ${routeKey}`);
+    }
+  }
+
+  const rule = automationRules.find((item) =>
+    item.creator_id === creatorId &&
+    stringValue(item.name) === "New subscriber -> New Subscriber Short Playbook"
+  );
+  if (!rule) {
+    failures.push(`/api/automation/workspace: expected draft rule for New Subscriber Short Playbook creator ${creatorId}`);
+    return { script, rule: null };
+  }
+  if (stringValue(rule.status) !== "draft") {
+    failures.push(`/api/automation/workspace: expected New Subscriber Short Playbook rule to be draft, got ${describeValue(rule.status)}`);
+  }
+  if (stringValue(rule.selected_script_id) !== stringValue(script.id)) {
+    failures.push(`/api/automation/workspace: expected New Subscriber Short Playbook rule linked to script ${stringValue(script.id)}, got ${describeValue(rule.selected_script_id)}`);
+  }
+  return { script, rule };
+}
+
+async function runNewSubscriberShortPlaybookAcceptance(
+  input: { creator: JsonRecord; script: JsonRecord; rule: JsonRecord | null },
+  failures: string[],
+  notes: string[]
+) {
+  const creatorId = stringValue(input.creator.id);
+  const scriptId = stringValue(input.script.id);
+  const runKey = `${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
+
+  const paths = [
+    {
+      key: "engaged",
+      username: `smoke_short_engaged_${runKey}`,
+      name: "Smoke Short Engaged Fan",
+      reply: "I just wanted to say hey and see what you are about.",
+      expectedOutcome: "engaged",
+      expectedQueueTitle: "Relationship continuation",
+      expectedDecisionType: "relationship_continuation",
+      expectedOpportunityForced: false,
+      expectedOpportunityClassification: null
+    },
+    {
+      key: "buying_signal",
+      username: `smoke_short_buy_${runKey}`,
+      name: "Smoke Short Buyer Fan",
+      reply: "How much is the paid welcome treat?",
+      expectedOutcome: "buying_signal",
+      expectedQueueTitle: "Buying signal opportunity",
+      expectedDecisionType: "buying_signal",
+      expectedOpportunityForced: true,
+      expectedOpportunityClassification: "buying_signal"
+    },
+    {
+      key: "exception",
+      username: `smoke_short_exception_${runKey}`,
+      name: "Smoke Short Exception Fan",
+      reply: "Can we move off platform for something explicit?",
+      expectedOutcome: "exception",
+      expectedQueueTitle: "Human review",
+      expectedDecisionType: "human_review",
+      expectedOpportunityForced: false,
+      expectedOpportunityClassification: null
+    },
+    {
+      key: "silence",
+      username: `smoke_short_silent_${runKey}`,
+      name: "Smoke Short Silent Fan",
+      reply: null,
+      expectedOutcome: "no_response",
+      expectedOutboundMessages: 2
+    }
+  ];
+
+  for (const path of paths) {
+    const run = await startFunnelSimulation(creatorId, scriptId, {
+      username: path.username,
+      name: path.name
+    }, failures);
+    if (!run) continue;
+
+    let detail = await readSimulationDetail(run.simulationId, failures);
+    if (!detail) continue;
+    let summary = summarizeSimulationDetail(detail);
+    if (summary.conversationStatus !== "waiting_reply") {
+      failures.push(`[short:${path.key}] expected waiting_reply after launch, got ${summary.conversationStatus}`);
+      continue;
+    }
+
+    if (path.reply) {
+      detail = await simulationAction(run.simulationId, "reply", { text: path.reply }, failures) ?? detail;
+      summary = summarizeSimulationDetail(detail);
+
+      if (path.expectedQueueTitle) {
+        if (summary.conversationStatus !== "waiting_approval") {
+          failures.push(`[short:${path.key}] expected waiting_approval after reply, got ${summary.conversationStatus}`);
+        }
+        const queue = await readJson(`/api/queue-workspace?creatorId=${encodeURIComponent(creatorId)}&status=visible`, failures);
+        const queueItem = queue ? arrayOfObjects(queue.items).find((item) => isRecord(item.conversation) && stringValue(item.conversation.id) === run.conversationId) : null;
+        if (!queueItem) {
+          failures.push(`[short:${path.key}] expected visible Queue Item for conversation ${run.conversationId}`);
+          continue;
+        }
+        if (stringValue(queueItem.title) !== path.expectedQueueTitle) {
+          failures.push(`[short:${path.key}] expected queue title ${path.expectedQueueTitle}, got ${describeValue(queueItem.title)}`);
+        }
+        if (stringValue(queueItem.metadata?.decision_type) !== path.expectedDecisionType) {
+          failures.push(`[short:${path.key}] expected queue decision_type ${path.expectedDecisionType}, got ${describeValue(queueItem.metadata?.decision_type)}`);
+        }
+        if (Boolean(queueItem.metadata?.opportunity_forced) !== path.expectedOpportunityForced) {
+          failures.push(`[short:${path.key}] expected opportunity_forced=${String(path.expectedOpportunityForced)}, got ${describeValue(queueItem.metadata?.opportunity_forced)}`);
+        }
+        if ((queueItem.metadata?.opportunity_classification ?? null) !== path.expectedOpportunityClassification) {
+          failures.push(`[short:${path.key}] expected opportunity_classification ${describeValue(path.expectedOpportunityClassification)}, got ${describeValue(queueItem.metadata?.opportunity_classification)}`);
+        }
+        const respond = await fetchEndpoint(`/api/queue-items/${encodeURIComponent(stringValue(queueItem.id))}/action`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ action: "respond", actor: "smoke", responseText: `Reviewed ${path.expectedOutcome}` })
+        });
+        if (respond.status !== 200) {
+          failures.push(`[short:${path.key}] queue respond expected HTTP 200, got ${respond.status} - ${trim(respond.text)}`);
+          continue;
+        }
+        detail = await readSimulationDetail(run.simulationId, failures) ?? detail;
+        summary = summarizeSimulationDetail(detail);
+        if (summary.conversationStatus !== "completed") {
+          failures.push(`[short:${path.key}] expected completed after queue respond, got ${summary.conversationStatus}`);
+        }
+      }
+    } else {
+      detail = await simulationAction(run.simulationId, "fast-forward", {}, failures) ?? detail;
+      summary = summarizeSimulationDetail(detail);
+      if (summary.conversationStatus !== "completed") {
+        failures.push(`[short:${path.key}] expected completed after reply timeout fast-forward, got ${summary.conversationStatus}`);
+      }
+      if (arrayOfObjects(detail.outboundMessages).length !== path.expectedOutboundMessages) {
+        failures.push(`[short:${path.key}] expected ${path.expectedOutboundMessages} outbound messages, got ${arrayOfObjects(detail.outboundMessages).length}`);
+      }
+      const queue = await readJson(`/api/queue-workspace?creatorId=${encodeURIComponent(creatorId)}&status=visible`, failures);
+      const queueItem = queue ? arrayOfObjects(queue.items).find((item) => isRecord(item.conversation) && stringValue(item.conversation.id) === run.conversationId) : null;
+      if (queueItem) {
+        failures.push(`[short:${path.key}] expected no queue item for no-response path, got ${describeValue(queueItem.id)}`);
+      }
+    }
+
+    if (!summary.outcomeSummary.includes(path.expectedOutcome)) {
+      failures.push(`[short:${path.key}] expected outcome ${path.expectedOutcome}, got ${summary.outcomeSummary}`);
+    }
+    notes.push(`[short:${path.key}] status=${summary.conversationStatus} outcome=${summary.outcomeSummary} timeline=${summary.timeline}`);
+  }
+}
+
 function validateNsp4FunnelShape(creatorScripts: JsonRecord[], funnelScript: JsonRecord, funnelSteps: JsonRecord[], failures: string[]) {
   const duplicates = creatorScripts.filter((script) => stringValue(script.name) === "New Subscriber Funnel");
   if (duplicates.length !== 1) {
@@ -739,7 +943,10 @@ function validateNsp4FunnelShape(creatorScripts: JsonRecord[], funnelScript: Jso
     failures.push(`/api/scripts/workspace: expected New Subscriber Funnel archetypeKey=girl_next_door, got ${describeValue(workspace.archetypeKey)}`);
   }
 
-  const routeInitial = funnelSteps.find((step) => isRecord(step.metadata) && stringValue(step.metadata.nodeKey) === "route_initial");
+  const routeInitial = funnelSteps.find((step) =>
+    stringValue(step.step_type) === "branch" &&
+    (stringValue(step.step_order) === "2" || stringValue(step.metadata?.label) === "Route Initial Response")
+  );
   const routeRules = isRecord(routeInitial?.metadata) && Array.isArray(routeInitial.metadata.branchRules) ? routeInitial.metadata.branchRules : [];
   const requiredRoutes = [
     "warm_enthusiastic",
@@ -977,6 +1184,7 @@ function normalizeWaitingReason(value: string) {
   if (value.startsWith("purchase:")) return "purchase_check";
   if (value.startsWith("approval:")) return "approval";
   if (value.startsWith("reply:")) return "reply";
+  if (value === "reply_timeout") return "reply";
   if (value.startsWith("delay:")) return "delay";
   return value;
 }

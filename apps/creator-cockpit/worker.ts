@@ -2005,8 +2005,8 @@ async function resumeConversationAfterManualQueueResponse(supabase: SupabaseClie
   });
   await updateConversationState(supabase, conversationId, {
     status: "running",
-    waiting_reason: null,
-    waiting_until: null,
+    waiting_reason: conversation.data.waiting_reason as string | null,
+    waiting_until: conversation.data.waiting_until as string | null,
     processing_started_at: new Date().toISOString(),
     last_resumed_at: new Date().toISOString()
   });
@@ -2184,9 +2184,11 @@ async function getScriptsWorkspace(supabase: SupabaseClient) {
   assertNoError(creatorsResult.error);
   const creators = (creatorsResult.data ?? []) as OfCreator[];
 
+  await ensureAgencySeedLibrary(supabase, creators);
+
   const scriptsResult = await supabase
     .from("of_message_scripts")
-    .select("id, creator_id, name, description, trigger_event_type, status, action_mode, auto_send_enabled, requires_approval, cooldown_hours, max_sends_per_fan, folder_name, category, tags, version_number, source_script_id, builder_config, created_at, updated_at, of_creators(id, username, display_name)")
+    .select("id, creator_id, name, description, trigger_event_type, status, action_mode, auto_send_enabled, requires_approval, cooldown_hours, max_sends_per_fan, folder_name, category, tags, version_number, source_script_id, builder_config, created_at, updated_at, of_creators(id, username, display_name), of_message_script_steps(*)")
     .order("updated_at", { ascending: false });
   assertNoError(scriptsResult.error);
 
@@ -2194,7 +2196,8 @@ async function getScriptsWorkspace(supabase: SupabaseClient) {
     creators,
     scripts: ((scriptsResult.data ?? []) as Array<Record<string, unknown>>).map((script) => ({
       ...script,
-      action_mode: scriptActionMode(script)
+      action_mode: scriptActionMode(script),
+      steps: Array.isArray(script.of_message_script_steps) ? script.of_message_script_steps : []
     }))
   };
 }
@@ -2214,7 +2217,7 @@ async function getAutomationWorkspace(supabase: SupabaseClient) {
 
   const scriptsResult = await supabase
     .from("of_message_scripts")
-    .select("*, of_creators(id, username, display_name)")
+    .select("*, of_creators(id, username, display_name), of_message_script_steps(*)")
     .order("updated_at", { ascending: false });
   assertNoError(scriptsResult.error);
 
@@ -2223,7 +2226,8 @@ async function getAutomationWorkspace(supabase: SupabaseClient) {
     creators,
     scripts: ((scriptsResult.data ?? []) as OfMessageScript[]).map((script) => ({
       ...script,
-      action_mode: scriptActionMode(script as unknown as Record<string, unknown>)
+      action_mode: scriptActionMode(script as unknown as Record<string, unknown>),
+      steps: Array.isArray((script as unknown as Record<string, unknown>).of_message_script_steps) ? (script as unknown as Record<string, unknown>).of_message_script_steps : []
     })),
     rules
   };
@@ -3221,7 +3225,7 @@ async function ensureSeedMessageScript(supabase: SupabaseClient, creatorId: stri
 async function refreshSeedMessageScriptIfOutdated(supabase: SupabaseClient, scriptId: string, template: MessageScriptTemplate) {
   const templateKey = template.builderConfig?.workspace?.templateKey;
   const templateVersion = template.builderConfig?.workspace?.templateVersion;
-  if (templateKey !== "new_subscriber_funnel" || !templateVersion) return;
+  if (!templateKey || !templateVersion) return;
 
   const existing = await supabase.from("of_message_scripts").select("id, builder_config").eq("id", scriptId).single();
   assertNoError(existing.error);
@@ -3365,6 +3369,18 @@ function automationRuleSeeds() {
       scriptName: "New Subscriber Funnel",
       approvalMode: "auto_send" as const,
       status: "active" as const,
+      cooldownMinutes: 60,
+      frequencyLimit: 1,
+      conditions: []
+    },
+    {
+      key: "new_subscriber_short_playbook",
+      name: "New subscriber -> New Subscriber Short Playbook",
+      description: "Runs the short new subscriber playbook for reply routing and queue handoff checks.",
+      triggerType: "new_subscriber" as const,
+      scriptName: "New Subscriber Short Playbook",
+      approvalMode: "draft_for_approval" as const,
+      status: "draft" as const,
       cooldownMinutes: 60,
       frequencyLimit: 1,
       conditions: []
@@ -3563,6 +3579,64 @@ function newSubscriberFunnelTemplate(): MessageScriptTemplate {
   });
 }
 
+function newSubscriberShortPlaybookTemplate(): MessageScriptTemplate {
+  const routeCases = [
+    ["engaged", "Engaged", "end_engaged"],
+    ["buying_signal", "Buying signal", "end_buying_signal"],
+    ["exception", "Exception", "end_exception"],
+    ["no_response", "No response", "no_response_followup"]
+  ] as const;
+
+  return seedTemplate({
+    key: "new_subscriber_short_playbook",
+    name: "New Subscriber Short Playbook",
+    description: "Short new subscriber playbook that classifies the opening reply, hands off buying signals and exceptions, and closes silent paths cleanly.",
+    triggerEventType: "subscriber_created",
+    category: "Revenue",
+    tags: ["seed", "new-subscriber", "short-playbook", "queue-handoff", "nsp-6"],
+    execution: { mode: "immediate" },
+    ai: { mode: "auto_send" },
+    approval: { mode: "never_approve" },
+    variables: [
+      variable("subscriber_name", "Subscriber Name", "there"),
+      variable("creator_name", "Creator Name", "MoonSiren"),
+      variable("response_class", "Response Class", "")
+    ],
+    workspace: {
+      archetypeKey: "girl_next_door",
+      archetypeSource: "nsp_5_short_playbook",
+      templateVersion: "nsp-6a"
+    },
+    steps: [
+      step("question", "Hey {{subscriber_name}}, I'm glad you made it in. What should I know about you first?", {
+        waitForReplyMinutes: 30
+      }),
+      nspClassify("classify_opening", "Classify Opening Reply", "response_class", "route_opening", "__classify_nsp6_response__"),
+      nspBranch("route_opening", "Route Opening Reply", "response_class", routeCases, "end_exception"),
+      nspEnd("end_engaged", "engaged", "Relationship continuation", "handoff", {
+        queueHandoff: true,
+        handoffKind: "relationship_continuation",
+        handoffObjective: "Continue the relationship naturally and keep the subscriber warm.",
+        handoffTitle: "Relationship continuation"
+      }),
+      nspEnd("end_buying_signal", "buying_signal", "Buying signal", "handoff", {
+        queueHandoff: true,
+        handoffKind: "buying_signal",
+        handoffObjective: "Review the buying signal and send the next sales follow-up.",
+        handoffTitle: "Buying signal opportunity"
+      }),
+      nspEnd("end_exception", "exception", "Exception", "handoff", {
+        queueHandoff: true,
+        handoffKind: "human_review",
+        handoffObjective: "Review the exception and decide whether a safe manual reply is needed.",
+        handoffTitle: "Human review"
+      }),
+      nspMessage("no_response_followup", "No Response Follow-up", "I’ll leave this here for now. Come back when you’re ready and I’ll pick it up from there.", "end_no_response"),
+      nspEnd("end_no_response", "no_response", "No response", "completed")
+    ]
+  });
+}
+
 function nspMessage(id: string, label: string, body: string, nextStepId: string, extra?: Pick<ScriptBuilderStepMetadata, "ppvTitle" | "ppvPrice">): ScriptStepTemplate {
   return { id, type: "message", order: 0, body, nextStepId, metadata: { kind: "send_message", nodeKey: id, label, ...extra } };
 }
@@ -3571,8 +3645,8 @@ function nspQuestion(id: string, label: string, body: string, nextStepId: string
   return { id, type: "question", order: 0, body, nextStepId, metadata: { kind: "ask_question", nodeKey: id, label, ...extra } };
 }
 
-function nspClassify(id: string, label: string, variableKey: string, nextStepId: string): ScriptStepTemplate {
-  return { id, type: "set_variable", order: 0, body: "Classify subscriber reply using the New Subscriber response-class map.", nextStepId, metadata: { kind: "set_variable", nodeKey: id, label, variableKey, variableValue: "__classify_nsp_response__" } };
+function nspClassify(id: string, label: string, variableKey: string, nextStepId: string, variableValue = "__classify_nsp_response__"): ScriptStepTemplate {
+  return { id, type: "set_variable", order: 0, body: "Classify subscriber reply using the New Subscriber response-class map.", nextStepId, metadata: { kind: "set_variable", nodeKey: id, label, variableKey, variableValue } };
 }
 
 function nspBranch(
@@ -3602,13 +3676,34 @@ function nspBranch(
   };
 }
 
-function nspEnd(id: string, outcomeKey: string, outcomeLabel: string, terminalType: string): ScriptStepTemplate {
-  return { id, type: "end", order: 0, body: "", metadata: { kind: "end_conversation", nodeKey: id, label: outcomeLabel, outcomeKey, outcomeLabel, terminalType } };
+function nspEnd(
+  id: string,
+  outcomeKey: string,
+  outcomeLabel: string,
+  terminalType: string,
+  extra: Partial<Pick<ScriptBuilderStepMetadata, "queueHandoff" | "handoffKind" | "handoffObjective" | "handoffTitle">> = {}
+): ScriptStepTemplate {
+  return {
+    id,
+    type: "end",
+    order: 0,
+    body: "",
+    metadata: {
+      kind: "end_conversation",
+      nodeKey: id,
+      label: outcomeLabel,
+      outcomeKey,
+      outcomeLabel,
+      terminalType,
+      ...extra
+    }
+  };
 }
 
 function agencySeedLibrary(): MessageScriptTemplate[] {
   return [
     newSubscriberFunnelTemplate(),
+    newSubscriberShortPlaybookTemplate(),
     seedTemplate({
       key: "renewal_reminder",
       name: "Renewal Reminder",
@@ -3830,6 +3925,7 @@ function step(
   body: string,
   options?: {
     delayMinutes?: number;
+    waitForReplyMinutes?: number;
     messageGenerationMode?: ScriptMessageGenerationMode;
     mediaKind?: ScriptMediaKind;
     mediaUrl?: string;
@@ -3838,13 +3934,17 @@ function step(
     stopConditions?: ScriptBuilderCondition[];
   }
 ): ScriptStepTemplate {
+  const waitForReplyMinutes = options?.waitForReplyMinutes == null ? undefined : nonNegativeInteger(options.waitForReplyMinutes, 0);
   return {
     type,
     order: 0,
     body: body || undefined,
     delayMinutes: options?.delayMinutes,
+    waitForReplyMinutes,
     metadata: {
       kind: type === "question" ? "ask_question" : type === "wait" ? "wait" : type === "end" ? "end_conversation" : "send_message",
+      waitForReply: typeof waitForReplyMinutes === "number" ? true : undefined,
+      waitForReplyMinutes,
       messageGenerationMode: options?.messageGenerationMode,
       mediaKind: options?.mediaKind,
       mediaUrl: options?.mediaUrl,
@@ -3862,7 +3962,7 @@ async function insertScriptTemplateSteps(supabase: SupabaseClient, scriptId: str
   }
 
   const rows = steps.map((step) => {
-    const id = step.id ? idMap.get(step.id) : undefined;
+    const id = step.id ? idMap.get(step.id) ?? (isUuid(step.id) ? step.id : crypto.randomUUID()) : crypto.randomUUID();
     const metadata = normalizeStepMetadata(step.metadata);
     const branchRules = metadata.branchRules?.map((rule) => ({
       ...rule,
@@ -4026,9 +4126,14 @@ function normalizeStepMetadata(value: unknown): ScriptBuilderStepMetadata {
     outcomeKey: typeof value.outcomeKey === "string" && value.outcomeKey.trim() ? value.outcomeKey.trim() : undefined,
     outcomeLabel: typeof value.outcomeLabel === "string" && value.outcomeLabel.trim() ? value.outcomeLabel.trim() : undefined,
     terminalType: typeof value.terminalType === "string" && value.terminalType.trim() ? value.terminalType.trim() : undefined,
+    queueHandoff: typeof value.queueHandoff === "boolean" ? value.queueHandoff : undefined,
+    handoffKind: typeof value.handoffKind === "string" && value.handoffKind.trim() ? value.handoffKind.trim() : undefined,
+    handoffObjective: typeof value.handoffObjective === "string" && value.handoffObjective.trim() ? value.handoffObjective.trim() : undefined,
+    handoffTitle: typeof value.handoffTitle === "string" && value.handoffTitle.trim() ? value.handoffTitle.trim() : undefined,
     variableKey: typeof value.variableKey === "string" && value.variableKey.trim() ? value.variableKey.trim() : undefined,
     variableValue: typeof value.variableValue === "string" ? value.variableValue : undefined,
     waitForReply: typeof value.waitForReply === "boolean" ? value.waitForReply : undefined,
+    waitForReplyMinutes: value.waitForReplyMinutes == null ? undefined : nonNegativeInteger(value.waitForReplyMinutes, 0),
     waitForPurchase: typeof value.waitForPurchase === "boolean" ? value.waitForPurchase : undefined,
     branchRules: Array.isArray(value.branchRules) ? value.branchRules.map(normalizeBranchRule).filter((item): item is ScriptBuilderBranchRule => item !== null) : undefined,
     messageGenerationMode: isMessageGenerationMode(value.messageGenerationMode) ? value.messageGenerationMode : undefined,
@@ -4365,6 +4470,9 @@ async function resumeSimulation(supabase: SupabaseClient, env: Env, simulationId
 async function fastForwardSimulation(supabase: SupabaseClient, env: Env, simulationId: string) {
   const simulation = await loadSimulationRecord(supabase, simulationId);
   if (!simulation.conversation_instance_id) return getSimulationDetail(supabase, simulationId);
+  const conversationResult = await supabase.from("of_conversation_instances").select("status").eq("id", simulation.conversation_instance_id).maybeSingle();
+  assertNoError(conversationResult.error);
+  const conversationStatus = String(conversationResult.data?.status ?? "");
   await updateConversationState(supabase, simulation.conversation_instance_id, { waiting_until: new Date(Date.now() - 1000).toISOString() });
   await recordConversationHistory(supabase, {
     conversationId: simulation.conversation_instance_id,
@@ -4373,12 +4481,16 @@ async function fastForwardSimulation(supabase: SupabaseClient, env: Env, simulat
     stepId: null,
     transitionKey: `fastforward:${new Date().toISOString()}`,
     eventType: "wait_fast_forwarded",
-    fromStatus: "waiting_delay",
+    fromStatus: conversationStatus === "waiting_reply" ? "waiting_reply" : "waiting_delay",
     toStatus: "running",
-    detail: "Simulation operator fast-forwarded the current delay.",
+    detail: conversationStatus === "waiting_reply"
+      ? "Simulation operator fast-forwarded the reply window."
+      : "Simulation operator fast-forwarded the current delay.",
     payload: { simulation_run_id: simulationId }
   });
-  await processConversationInstance(supabase, env, simulation.conversation_instance_id, { reason: "delay_due" });
+  await processConversationInstance(supabase, env, simulation.conversation_instance_id, {
+    reason: conversationStatus === "waiting_reply" ? "reply_timeout" : "delay_due"
+  });
   return getSimulationDetail(supabase, simulationId);
 }
 
@@ -5063,7 +5175,7 @@ async function processDueConversations(supabase: SupabaseClient, env: Env, optio
   const dueWaiting = await supabase
     .from("of_conversation_instances")
     .select("*")
-    .eq("status", "waiting_delay")
+    .in("status", ["waiting_delay", "waiting_reply"])
     .lte("waiting_until", now)
     .order("updated_at", { ascending: true })
     .limit(options.limit);
@@ -5083,7 +5195,7 @@ async function processDueConversations(supabase: SupabaseClient, env: Env, optio
   for (const item of unique) {
     try {
       if (await isConversationPausedForSimulation(supabase, item)) continue;
-      const reason = item.status === "waiting_delay" ? "delay_due" : "recovery_resume";
+      const reason = item.status === "waiting_delay" ? "delay_due" : "reply_timeout";
       const conversation = await processConversationInstance(supabase, env, item.id, { reason });
       if (item.automation_run_id) await syncAutomationRunToConversation(supabase, item.automation_run_id, conversation);
       processed += 1;
@@ -5380,7 +5492,7 @@ async function processConversationInstance(
   options: {
     resumeEvent?: Record<string, unknown> | null;
     resumeContext?: EventActionContext | null;
-    reason: "launch" | "delay_due" | "reply_received" | "approval_sent" | "recovery_resume" | "retry_send";
+    reason: "launch" | "delay_due" | "reply_received" | "reply_timeout" | "approval_sent" | "recovery_resume" | "retry_send";
   }
 ) {
   const loaded = await loadConversationRuntimeState(supabase, conversationId);
@@ -5424,6 +5536,29 @@ async function processConversationInstance(
         message_text: extractMessageText(isRecord(options.resumeEvent.payload) ? options.resumeEvent.payload : {}) ?? null,
         purchase_status: variables.purchase_status ?? null
       }
+    });
+  }
+  if (options.reason === "reply_timeout") {
+    variables = applyReplyTimeoutVariables(variables);
+    conversation = await updateConversationState(supabase, conversation.id, {
+      variables,
+      waiting_reason: null,
+      waiting_until: null,
+      status: "running",
+      last_resumed_at: new Date().toISOString(),
+      processing_started_at: new Date().toISOString()
+    });
+    await recordConversationHistory(supabase, {
+      conversationId: conversation.id,
+      creatorId: conversation.creator_id,
+      eventId: conversation.last_event_id,
+      stepId: conversation.current_step_id,
+      transitionKey: `replytimeout:${conversation.updated_at}`,
+      eventType: "reply_timeout",
+      fromStatus: resumeFromStatus,
+      toStatus: "running",
+      detail: "Reply window expired and the conversation resumed on the timeout path.",
+      payload: { waiting_reason: resumeWaitingReason }
     });
   }
 
@@ -5690,6 +5825,60 @@ async function processConversationInstance(
       const outcomeKey = metadata.outcomeKey ?? "complete";
       const outcomeLabel = metadata.outcomeLabel ?? metadata.label ?? "Complete";
       const terminalType = metadata.terminalType ?? "completed";
+      if (terminalType === "handoff" && metadata.queueHandoff) {
+        const handoffReason = `handoff:${outcomeKey}`;
+        const resumedHandoff =
+          conversation.waiting_reason === handoffReason || resumeWaitingReason === handoffReason;
+        if (resumedHandoff) {
+          conversation = await markConversationCompleted(supabase, conversation.id, `Terminal handoff completed for ${outcomeLabel}.`);
+          await recordConversationHistory(supabase, {
+            conversationId: conversation.id,
+            creatorId: conversation.creator_id,
+            eventId: conversation.last_event_id,
+            stepId: currentStep.id,
+            transitionKey: `handoff-resolved:${currentStep.id}`,
+            eventType: "conversation_completed",
+            fromStatus: statusBefore,
+            toStatus: "completed",
+            detail: `Conversation completed after the ${outcomeLabel} handoff was resolved.`,
+            payload: { outcome_key: outcomeKey, outcome_label: outcomeLabel, terminal_type: terminalType, queue_handoff: true }
+          });
+          return conversation;
+        }
+
+        conversation = await updateConversationState(supabase, conversation.id, {
+          status: "waiting_approval",
+          current_step_id: currentStep.id,
+          next_step_id: null,
+          waiting_reason: handoffReason,
+          waiting_until: null,
+          processing_started_at: null,
+          last_resumed_at: new Date().toISOString()
+        });
+        await ensureConversationHandoffQueueItem(supabase, conversation, currentStep, {
+          outcomeKey,
+          outcomeLabel,
+          handoffKind: metadata.handoffKind ?? outcomeKey,
+          handoffObjective: metadata.handoffObjective ?? outcomeLabel,
+          title: metadata.handoffTitle ?? outcomeLabel,
+          reason: `Terminal handoff for ${outcomeLabel}.`,
+          terminalType
+        });
+        await recordConversationHistory(supabase, {
+          conversationId: conversation.id,
+          creatorId: conversation.creator_id,
+          eventId: conversation.last_event_id,
+          stepId: currentStep.id,
+          transitionKey: `handoff:${currentStep.id}`,
+          eventType: "conversation_handoff_queued",
+          fromStatus: statusBefore,
+          toStatus: conversation.status,
+          detail: `Conversation handed off for ${outcomeLabel}.`,
+          payload: { outcome_key: outcomeKey, outcome_label: outcomeLabel, terminal_type: terminalType, queue_handoff: true }
+        });
+        return conversation;
+      }
+
       conversation = await markConversationCompleted(supabase, conversation.id, `End conversation step reached: ${outcomeLabel}.`);
       await recordConversationHistory(supabase, {
         conversationId: conversation.id,
@@ -5770,6 +5959,16 @@ function applyReplyVariables(variables: Record<string, unknown>, event: Record<s
   };
 }
 
+function applyReplyTimeoutVariables(variables: Record<string, unknown>) {
+  return {
+    ...variables,
+    last_reply_event_id: null,
+    last_reply_text: "",
+    last_reply_received_at: new Date().toISOString(),
+    last_reply_actor: null
+  };
+}
+
 function applyResumeEventVariables(variables: Record<string, unknown>, event: Record<string, unknown>) {
   const payload = isRecord(event.payload) ? event.payload : {};
   const next: Record<string, unknown> = applyReplyVariables(variables, event);
@@ -5800,6 +5999,9 @@ function toVariableMap(variables: Record<string, unknown>) {
 function resolveRuntimeVariableValue(variableKey: string, variableValue: string | undefined, variables: Record<string, unknown>) {
   if ((variableKey === "response_class" || variableKey === "next_response_class") && variableValue === "__classify_nsp_response__") {
     return classifyNewSubscriberReply(String(variables.last_reply_text ?? ""));
+  }
+  if ((variableKey === "response_class" || variableKey === "next_response_class") && variableValue === "__classify_nsp6_response__") {
+    return classifyShortNewSubscriberReply(String(variables.last_reply_text ?? ""));
   }
   if (variableKey === "ai_confidence" && variableValue === "__derive_from_last_reply__") {
     return deriveReplyConfidence(String(variables.last_reply_text ?? ""));
@@ -5833,6 +6035,17 @@ function classifyNewSubscriberReply(replyText: string) {
   if (/\b(happy|excited|glad|finally|here|found you|love this)\b/.test(lower)) return "warm_enthusiastic";
   if (/^(hey|hi|hello|ok|nice|lol|k|yo)\b/.test(lower) || lower.length <= 8) return "short_low_effort";
   return "off_topic";
+}
+
+function classifyShortNewSubscriberReply(replyText: string) {
+  const lower = replyText.toLowerCase().trim();
+  if (!lower) return "no_response";
+  if (/\b(stop|no thanks|not interested|leave me|go away|unsubscribe)\b/.test(lower)) return "exception";
+  if (/\b(can't do that|cannot do that|again|push|meet|off platform|phone|private info|illegal|unsupported|explicit|boundary|rule|bypass|safety)\b/.test(lower)) return "exception";
+  if (/\b(custom|one.?to.?one|1.?1|personal just for me|private set|made for me|how much|price|buy|paid|ppv|send it|extra treat|want it|i'll take|ill take|purchase|unlock|menu|bundle)\b/.test(lower)) {
+    return "buying_signal";
+  }
+  return "engaged";
 }
 
 function deriveReplyConfidence(replyText: string) {
@@ -5915,6 +6128,7 @@ async function queueConversationMessageStep(
 ) {
   const actionMode = scriptActionMode(input.script);
   const metadata = normalizeStepMetadata(input.step.metadata);
+  const questionTimeoutMinutes = input.step.step_type === "question" && metadata.waitForReply ? (metadata.waitForReplyMinutes ?? 60) : null;
   const aiConfidence = Number(input.variables.ai_confidence ?? 100);
   const effectiveActionMode: MessageScriptActionMode =
     metadata.messageGenerationMode === "ai_generated" && aiConfidence < 75 ? "draft_for_approval" : actionMode;
@@ -5943,7 +6157,7 @@ async function queueConversationMessageStep(
       current_step_id: input.step.step_type === "question" ? input.nextStep?.id ?? null : input.nextStep?.id ?? null,
       next_step_id: input.nextStep?.id ?? null,
       waiting_reason: input.step.step_type === "question" ? `reply:${input.step.id}` : null,
-      waiting_until: null,
+      waiting_until: input.step.step_type === "question" && questionTimeoutMinutes ? new Date(Date.now() + questionTimeoutMinutes * 60000).toISOString() : null,
       variables: input.variables,
       processing_started_at: input.step.step_type === "question" ? null : new Date().toISOString(),
       last_resumed_at: new Date().toISOString(),
@@ -6098,7 +6312,7 @@ async function queueConversationMessageStep(
     current_step_id: input.step.step_type === "question" ? input.nextStep?.id ?? null : input.nextStep?.id ?? null,
     next_step_id: input.nextStep?.id ?? null,
     waiting_reason: input.step.step_type === "question" ? `reply:${input.step.id}` : null,
-    waiting_until: null,
+    waiting_until: input.step.step_type === "question" && questionTimeoutMinutes ? new Date(Date.now() + questionTimeoutMinutes * 60000).toISOString() : null,
     variables: input.variables,
     retry_count: 0,
     last_error: null,
@@ -6174,6 +6388,77 @@ async function ensureConversationApprovalQueueItem(
       priority_reason: policy.summary,
       policy_reasons: policy.reasons,
       title: decisionType
+    }
+  });
+  if (result.error && isMissingSchemaCacheRelationError(result.error, "of_queue_items")) return;
+  assertNoError(result.error);
+}
+
+async function ensureConversationHandoffQueueItem(
+  supabase: SupabaseClient,
+  conversation: OfConversationInstance,
+  step: OfMessageScriptStep,
+  input: {
+    outcomeKey: string;
+    outcomeLabel: string;
+    handoffKind: string;
+    handoffObjective: string;
+    reason: string;
+    terminalType: string;
+    title?: string;
+  }
+) {
+  const queue = await ensureCreatorConversationQueue(supabase, conversation.creator_id);
+  if (!queue?.id) return;
+
+  const existing = await supabase
+    .from("of_queue_items")
+    .select("id, status")
+    .eq("queue_id", queue.id)
+    .eq("conversation_id", conversation.id)
+    .neq("status", "resolved")
+    .limit(1)
+    .maybeSingle();
+  if (existing.error && isMissingSchemaCacheRelationError(existing.error, "of_queue_items")) return;
+  assertNoError(existing.error);
+  if (existing.data) return;
+
+  const result = await supabase.from("of_queue_items").insert({
+    queue_id: queue.id,
+    legacy_task_id: null,
+    conversation_id: conversation.id,
+    assigned_operator_id: null,
+    priority: "high",
+    status: "visible",
+    moved_at: null,
+    resolved_at: null,
+    metadata: {
+      source: "conversation_runtime",
+      queue_handoff: true,
+      decision_type: input.handoffKind,
+      title: input.title ?? input.outcomeLabel,
+      outcome_key: input.outcomeKey,
+      outcome_label: input.outcomeLabel,
+      recommended_next_objective: input.handoffObjective,
+      handoff_reason: input.reason,
+      handoff_kind: input.handoffKind,
+      terminal_type: input.terminalType,
+      opportunity_forced: input.handoffKind === "buying_signal",
+      opportunity_classification: input.handoffKind === "buying_signal" ? "buying_signal" : null,
+      conversation_reference: {
+        conversation_id: conversation.id,
+        creator_id: conversation.creator_id,
+        script_id: conversation.script_id
+      },
+      subscriber_reference: isRecord(conversation.metadata) && isRecord(conversation.metadata.subscriber_snapshot)
+        ? conversation.metadata.subscriber_snapshot
+        : {
+            subscriber_id: conversation.subscriber_id,
+            relationship_id: conversation.relationship_id
+          },
+      script_step_id: step.id,
+      step_type: step.step_type,
+      priority_reason: input.reason
     }
   });
   if (result.error && isMissingSchemaCacheRelationError(result.error, "of_queue_items")) return;

@@ -892,9 +892,14 @@ export interface ScriptBuilderStepMetadata {
   outcomeKey?: string;
   outcomeLabel?: string;
   terminalType?: string;
+  queueHandoff?: boolean;
+  handoffKind?: string;
+  handoffObjective?: string;
+  handoffTitle?: string;
   variableKey?: string;
   variableValue?: string;
   waitForReply?: boolean;
+  waitForReplyMinutes?: number;
   waitForPurchase?: boolean;
   branchRules?: ScriptBuilderBranchRule[];
   messageGenerationMode?: ScriptMessageGenerationMode;
@@ -1430,6 +1435,7 @@ export interface ScriptStepTemplate {
   type: MessageScriptStepType;
   body?: string;
   delayMinutes?: number;
+  waitForReplyMinutes?: number;
   condition?: {
     key: string;
     value: string;
