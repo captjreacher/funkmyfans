@@ -407,6 +407,15 @@ async function handleApi(request: Request, env: Env, url: URL, ctx: ExecutionCon
     return Response.json({ proposal }, { headers: jsonHeaders });
   }
 
+  const builderDraftFromProposalMatch = url.pathname.match(/^\/api\/playbook-proposals\/([^/]+)\/builder-draft$/);
+  if ((request.method === "POST" || request.method === "GET") && builderDraftFromProposalMatch) {
+    if (!isUuid(builderDraftFromProposalMatch[1])) {
+      return Response.json({ error: "Proposal id must be a database UUID" }, { status: 400, headers: jsonHeaders });
+    }
+    const draft = await createOrGetBuilderDraftFromProposal(supabase, builderDraftFromProposalMatch[1]);
+    return Response.json({ script: draft }, { status: 201, headers: jsonHeaders });
+  }
+
   if (request.method === "GET" && url.pathname === "/api/events") {
     const result = await supabase
       .from("of_events")
@@ -651,6 +660,88 @@ async function updatePlaybookProposalState(
     .single();
   assertNoError(result.error);
   return result.data as CreatorPlaybookProposal;
+}
+
+async function createOrGetBuilderDraftFromProposal(
+  supabase: SupabaseClient,
+  proposalId: string
+): Promise<OfMessageScript> {
+  // Guard: proposal must exist and be accepted
+  const proposalResult = await supabase
+    .from("creator_playbook_proposals")
+    .select("*")
+    .eq("id", proposalId)
+    .single();
+  assertNoError(proposalResult.error);
+  if (!proposalResult.data) throw new ApiError(404, "Proposal not found");
+
+  const proposal = proposalResult.data as CreatorPlaybookProposal;
+  if (proposal.proposal_state !== "accepted") {
+    throw new ApiError(422, "Only accepted proposals can create a builder draft");
+  }
+
+  // Idempotency: if a draft already exists for this proposal, return it
+  const existingDraft = await supabase
+    .from("of_message_scripts")
+    .select("*")
+    .eq("creator_id", proposal.creator_id)
+    .not("builder_config", "is", null)
+    .order("created_at", { ascending: false })
+    .limit(50);
+
+  assertNoError(existingDraft.error);
+  if (existingDraft.data) {
+    for (const script of existingDraft.data) {
+      const config = script.builder_config as ScriptBuilderConfig | null;
+      if (config?.source_proposal_id === proposalId) {
+        return script as OfMessageScript;
+      }
+    }
+  }
+
+  // Build draft name: prepend "[Draft]" for clarity
+  const draftName = `[Draft] ${proposal.proposal_title}`;
+
+  // Build builder_config with source metadata
+  const builderConfig: ScriptBuilderConfig = {
+    schemaVersion: 1,
+    variables: [],
+    workspace: {
+      archetypeKey: undefined,
+      execution: { mode: "manual_only" },
+      ai: { mode: "disabled" },
+      approval: { mode: "always_approve" }
+    },
+    source_proposal_id: proposal.id,
+    intelligence_snapshot_id: proposal.intelligence_snapshot_id,
+    opportunity_projection_id: proposal.creator_intelligence_opportunity_projection_id,
+    cip_version: "cip-3",
+    created_from_proposal_at: new Date().toISOString()
+  };
+
+  // Insert the draft script — always inactive, manual_only
+  const insertPayload = {
+    creator_id: proposal.creator_id,
+    name: draftName,
+    description: `Builder draft created from accepted proposal: ${proposal.proposal_title}`,
+    trigger_event_type: proposal.proposal_payload.entry_trigger ?? "new_subscriber",
+    status: "inactive" as const,
+    action_mode: "draft_for_approval" as const,
+    auto_send_enabled: false,
+    requires_approval: true,
+    cooldown_hours: 24,
+    max_sends_per_fan: 1,
+    version_number: 1,
+    builder_config: builderConfig
+  };
+
+  const inserted = await supabase
+    .from("of_message_scripts")
+    .insert(insertPayload)
+    .select("*")
+    .single();
+  assertNoError(inserted.error);
+  return inserted.data as OfMessageScript;
 }
 
 function payloadTitleForOpportunity(opportunity: CreatorIntelligenceOpportunityProjection) {

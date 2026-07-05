@@ -1,8 +1,9 @@
-import { Bot, ClipboardList, PlaySquare, RefreshCw, Send, Sparkles, UserRound, Users } from "lucide-react";
+import { Bot, ClipboardList, PlaySquare, RefreshCw, Send, Sparkles, UserRound, Users, Zap } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type { CreatorPlaybookProposal, SyncType } from "@funkmyfans/of-types";
 import {
+  createBuilderDraftFromProposal,
   createPlaybookProposal,
   fetchCreatorDetail,
   fetchCreatorIntelligence,
@@ -124,6 +125,21 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
     }
   }
 
+  async function handleCreateBuilderDraft(proposalId: string) {
+    setProposalBusy(proposalId);
+    setError(null);
+    try {
+      await createBuilderDraftFromProposal(proposalId);
+      const scripts = await fetchCreatorScripts(creatorId);
+      setPlaybooks(scripts.scripts);
+      setTab("Playbooks");
+    } catch (draftError) {
+      setError(draftError instanceof Error ? draftError.message : "Unable to create builder draft from proposal");
+    } finally {
+      setProposalBusy(null);
+    }
+  }
+
   async function resolveTask(taskId: string, status: "in_progress" | "completed" | "ignored") {
     await updateTask(taskId, { status });
     await refresh();
@@ -187,6 +203,7 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
           importingFixture={importingFixture}
           onCreateProposal={handleCreateProposal}
           onProposalState={handleProposalState}
+          onCreateBuilderDraft={handleCreateBuilderDraft}
           proposalBusy={proposalBusy}
         />
       ) : null}
@@ -322,6 +339,7 @@ function IntelligenceTab({
   importingFixture,
   onCreateProposal,
   onProposalState,
+  onCreateBuilderDraft,
   proposalBusy
 }: {
   data: CreatorIntelligenceData | null;
@@ -330,6 +348,7 @@ function IntelligenceTab({
   importingFixture: boolean;
   onCreateProposal: (opportunityId: string) => Promise<void>;
   onProposalState: (proposalId: string, state: "accepted" | "dismissed") => Promise<void>;
+  onCreateBuilderDraft: (proposalId: string) => Promise<void>;
   proposalBusy: string | null;
 }) {
   const summary = data?.summary ?? null;
@@ -465,6 +484,7 @@ function IntelligenceTab({
               proposal={proposal}
               busy={proposalBusy === proposal.id}
               onState={onProposalState}
+              onCreateBuilderDraft={onCreateBuilderDraft}
             />
           ))}
           {!proposals.length ? <div className="text-sm text-blue-100/58">No playbook proposals drafted yet.</div> : null}
@@ -519,11 +539,13 @@ function ActivityTab({ data }: { data: CreatorDetailData }) {
 function ProposalReviewCard({
   proposal,
   busy,
-  onState
+  onState,
+  onCreateBuilderDraft
 }: {
   proposal: CreatorPlaybookProposal;
   busy: boolean;
   onState: (proposalId: string, state: "accepted" | "dismissed") => Promise<void>;
+  onCreateBuilderDraft: (proposalId: string) => Promise<void>;
 }) {
   const payload = proposal.proposal_payload;
   return (
@@ -546,6 +568,17 @@ function ProposalReviewCard({
           >
             Accept Proposal
           </button>
+          {proposal.proposal_state === "accepted" ? (
+            <button
+              type="button"
+              onClick={() => void onCreateBuilderDraft(proposal.id)}
+              disabled={busy}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-cyan-400/30 bg-cyan-500/10 px-3 py-2 text-sm font-semibold text-cyan-100 hover:bg-cyan-500/20 disabled:opacity-45"
+            >
+              <Zap className="h-3.5 w-3.5" aria-hidden="true" />
+              Create Builder Draft
+            </button>
+          ) : null}
           <button
             type="button"
             onClick={() => void onState(proposal.id, "dismissed")}

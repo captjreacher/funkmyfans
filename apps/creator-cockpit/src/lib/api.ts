@@ -228,6 +228,11 @@ export async function updatePlaybookProposal(proposalId: string, state: Extract<
   return apiJson<{ proposal: CreatorPlaybookProposal }>(`/playbook-proposals/${proposalId}`, jsonInit("PATCH", { state }));
 }
 
+export async function createBuilderDraftFromProposal(proposalId: string): Promise<{ script: OfMessageScript }> {
+  assertUuid(proposalId, "playbook proposal");
+  return apiJson<{ script: OfMessageScript }>(`/playbook-proposals/${proposalId}/builder-draft`, jsonInit("POST", {}));
+}
+
 export type QueueItemAction = "approve_ai" | "respond" | "assign" | "ignore" | "pause";
 
 export async function createCreator(payload: CreatorCreatePayload): Promise<{ creator: OfCreator }> {

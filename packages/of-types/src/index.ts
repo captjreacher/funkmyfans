@@ -1310,6 +1310,11 @@ export interface ScriptBuilderConfig {
   schemaVersion?: number;
   variables?: ScriptBuilderVariable[];
   workspace?: ScriptWorkspaceConfig;
+  source_proposal_id?: string;
+  intelligence_snapshot_id?: string;
+  opportunity_projection_id?: string;
+  cip_version?: string;
+  created_from_proposal_at?: string;
 }
 
 export interface OfAutomationRun {
