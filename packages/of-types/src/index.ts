@@ -84,6 +84,17 @@ export type QueueStateType =
   | "waiting_ai_approval"
   | "completed"
   | "archived";
+export type OpeningPosture = "standard" | "familiar" | "warm";
+export interface RelationshipContextProjection {
+  identity_status: string | null;
+  identity_confidence: number | null;
+  downstream_usability: string | null;
+  known_sources: string[];
+  relationship_posture: string | null;
+  relationship_signals: string[];
+  commercial_signal_summary: string | null;
+  warnings: string[];
+}
 export type RelationshipState = "prospect" | "new_subscriber" | "welcomed" | "engaged" | "vip" | "cooling" | "at_risk" | "expired" | "reactivated";
 export type SubscriberPersonaKey =
   | "new_fan"
@@ -1486,6 +1497,8 @@ export interface ConversationWorkspaceViewModel {
   subscriber_context: QueueWorkspaceSubscriberSummary | null;
   recent_events: QueueWorkspaceRecentEvent[];
   attachments: ConversationWorkspaceAttachment[];
+  relationship_context?: RelationshipContextProjection | null;
+  selected_opening_posture?: OpeningPosture;
 }
 
 export interface ConversationOperationsMetrics {

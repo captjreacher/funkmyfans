@@ -41,10 +41,12 @@ import type {
   OfMessageScript,
   OfMessageScriptStep,
   OfOutboundMessage,
+  OpeningPosture,
   OfRevenueJourney,
   OfSimulatedSubscriber,
   OfTask,
   OfSubscriberRelationship,
+  RelationshipContextProjection,
   Queue,
   QueueItem,
   QueueWorkspaceConversationSummary,
@@ -117,6 +119,17 @@ interface EventActionContext {
   simulationRunId: string | null;
 }
 
+interface RelationshipContextInput {
+  identity_status?: string | null;
+  identity_confidence?: number | null;
+  downstream_usability?: string | null;
+  known_sources?: string[] | null;
+  relationship_posture?: string | null;
+  relationship_signals?: string[] | null;
+  commercial_signal_summary?: string | null;
+  warnings?: string[] | null;
+}
+
 interface OutboundPolicyContext {
   creatorId: string;
   fanId: string;
@@ -145,6 +158,8 @@ interface SimulationDetailData {
   conversation: OfConversationInstance | null;
   history: OfConversationHistoryItem[];
   outboundMessages: OfOutboundMessage[];
+  relationship_context?: RelationshipContextProjection | null;
+  selected_opening_posture?: OpeningPosture;
 }
 
 interface ConversationMessage {
@@ -4128,15 +4143,16 @@ function newSubscriberShortPlaybookTemplate(): MessageScriptTemplate {
     variables: [
       variable("subscriber_name", "Subscriber Name", "there"),
       variable("creator_name", "Creator Name", "MoonSiren"),
+      variable("opening_posture", "Opening Posture", "standard"),
       variable("response_class", "Response Class", "")
     ],
     workspace: {
       archetypeKey: "girl_next_door",
       archetypeSource: "nsp_5_short_playbook",
-      templateVersion: "nsp-6a"
+      templateVersion: "nsp-6c"
     },
     steps: [
-      step("question", "Hey {{subscriber_name}}, I'm glad you made it in. What should I know about you first?", {
+      step("question", "{{opening_line}} What should I know about you first?", {
         waitForReplyMinutes: 30
       }),
       nspClassify("classify_opening", "Classify Opening Reply", "response_class", "route_opening", "__classify_nsp6_response__"),
@@ -4806,7 +4822,11 @@ async function startAutomationSimulation(supabase: SupabaseClient, env: Env, cre
       event_type: prepared.eventType,
       event_payload: prepared.eventPayload,
       initial_variables: prepared.initialVariables,
-      runtime_state: { started_by: "operator" },
+      runtime_state: {
+        started_by: "operator",
+        selected_opening_posture: prepared.selectedOpeningPosture,
+        relationship_context_present: Boolean(prepared.relationshipContext)
+      },
       failure_plan: {},
       started_at: new Date().toISOString()
     })
@@ -4825,7 +4845,14 @@ async function startAutomationSimulation(supabase: SupabaseClient, env: Env, cre
       payload: prepared.eventPayload,
       execution_mode: "simulation",
       simulation_run_id: simulation.id,
-      metadata: { simulation: true, script_id: prepared.script.id, journey_id: prepared.journey?.id ?? null, expected_outcome: prepared.journey?.expected_outcome ?? null },
+      metadata: {
+        simulation: true,
+        script_id: prepared.script.id,
+        journey_id: prepared.journey?.id ?? null,
+        expected_outcome: prepared.journey?.expected_outcome ?? null,
+        relationship_context_present: Boolean(prepared.relationshipContext),
+        selected_opening_posture: prepared.selectedOpeningPosture
+      },
       received_at: new Date().toISOString(),
       processed_at: new Date().toISOString(),
       processing_status: "processed",
@@ -4898,6 +4925,8 @@ async function prepareSimulationLaunch(supabase: SupabaseClient, creatorId: stri
       ? parseActionMode(body.actionModeOverride, scriptActionMode(script))
       : null;
   const ruleId = typeof body.ruleId === "string" && isUuid(body.ruleId) ? body.ruleId : null;
+  const relationshipContext = normalizeRelationshipContext(isRecord(body.relationshipContext) ? body.relationshipContext : isRecord(body.relationship_context) ? body.relationship_context : null);
+  const selectedOpeningPosture = selectOpeningPosture(relationshipContext);
 
   const eventType = stringValue(body.eventType, journey?.trigger_event ?? scenario?.trigger_event_type ?? String(script.trigger_event_type ?? "custom_event"));
   const eventPayloadInput = isRecord(body.eventPayload) ? body.eventPayload : {};
@@ -4914,8 +4943,13 @@ async function prepareSimulationLaunch(supabase: SupabaseClient, creatorId: stri
       journey_name: journey.name
     } : {}),
     ...eventPayloadInput
-  }, initialVariables, creatorId);
-  return { subscriber, scenario, journey, script, eventType, eventPayload, initialVariables, actionModeOverride, ruleId };
+  }, initialVariables, creatorId, relationshipContext, selectedOpeningPosture);
+  const preparedVariables = {
+    ...initialVariables,
+    opening_posture: selectedOpeningPosture,
+    opening_line: openingLineForPosture(selectedOpeningPosture)
+  };
+  return { subscriber, scenario, journey, script, eventType, eventPayload, initialVariables: preparedVariables, actionModeOverride, ruleId, relationshipContext, selectedOpeningPosture };
 }
 
 function buildSimulationEventPayload(
@@ -4923,13 +4957,17 @@ function buildSimulationEventPayload(
   eventType: string,
   payload: Record<string, unknown>,
   variables: Record<string, unknown>,
-  creatorId: string
+  creatorId: string,
+  relationshipContext: RelationshipContextProjection | null,
+  selectedOpeningPosture: OpeningPosture
 ) {
   return {
     ...payload,
     simulation: true,
     simulationSubscriberId: subscriber.id,
     simulationCreatorId: creatorId,
+    relationship_context: relationshipContext,
+    selected_opening_posture: selectedOpeningPosture,
     fanId: `simulation:${subscriber.id}`,
     subscriber: {
       id: subscriber.id,
@@ -4962,11 +5000,15 @@ async function getSimulationDetail(supabase: SupabaseClient, simulationId: strin
   const outboundMessages = simulationRow.conversation_instance_id
     ? await listSimulationOutboundMessages(supabase, simulationRow.conversation_instance_id)
     : [];
+  const relationshipContext = extractRelationshipContext(isRecord(simulationRow.event_payload) ? simulationRow.event_payload : null, conversation.conversation);
+  const selectedOpeningPosture = extractSelectedOpeningPosture(isRecord(simulationRow.runtime_state) ? simulationRow.runtime_state : null, conversation.conversation, relationshipContext);
   return {
     simulation: simulationRow,
     conversation: conversation.conversation,
     history: conversation.history,
-    outboundMessages
+    outboundMessages,
+    relationship_context: relationshipContext,
+    selected_opening_posture: selectedOpeningPosture
   };
 }
 
@@ -5616,10 +5658,15 @@ async function createConversationInstance(
     sourceJourneyId?: string | null;
     sourceJourneyName?: string | null;
     expectedOutcome?: string | null;
+    relationshipContext?: RelationshipContextProjection | null;
+    openingPosture?: OpeningPosture;
   }
 ) {
   const steps = ((input.script.of_message_script_steps as OfMessageScriptStep[] | undefined) ?? []).sort((a, b) => a.step_order - b.step_order);
   const firstStep = steps[0] ?? null;
+  const relationshipContext = input.relationshipContext ?? normalizeRelationshipContext(isRecord(input.eventPayload) ? input.eventPayload.relationship_context : null);
+  const selectedOpeningPosture = input.openingPosture ?? selectOpeningPosture(relationshipContext);
+  const openingLine = openingLineForPosture(selectedOpeningPosture);
   const inserted = await supabase
     .from("of_conversation_instances")
     .insert({
@@ -5636,7 +5683,18 @@ async function createConversationInstance(
       next_step_id: null,
       status: "running",
       execution_mode: input.executionMode,
-      variables: conversationInitialVariables(input.script, input.relationshipId, input.subscriberId, input.eventId, input.fanId, input.eventType, input.eventPayload),
+      variables: conversationInitialVariables(
+        input.script,
+        input.relationshipId,
+        input.subscriberId,
+        input.eventId,
+        input.fanId,
+        input.eventType,
+        input.eventPayload,
+        relationshipContext,
+        selectedOpeningPosture,
+        openingLine
+      ),
       metadata: input.executionMode === "simulation"
         ? {
             simulation: true,
@@ -5646,6 +5704,9 @@ async function createConversationInstance(
             source_journey_id: input.sourceJourneyId ?? null,
             source_journey_name: input.sourceJourneyName ?? null,
             expected_outcome: input.expectedOutcome ?? null,
+            relationship_context: relationshipContext,
+            selected_opening_posture: selectedOpeningPosture,
+            opening_line: openingLine,
             subscriber_snapshot: input.simulationSubscriber,
             event_payload: input.eventPayload
           }
@@ -5654,7 +5715,10 @@ async function createConversationInstance(
             source_rule_name: input.sourceRuleName,
             source_journey_id: input.sourceJourneyId ?? null,
             source_journey_name: input.sourceJourneyName ?? null,
-            expected_outcome: input.expectedOutcome ?? null
+            expected_outcome: input.expectedOutcome ?? null,
+            relationship_context: relationshipContext,
+            selected_opening_posture: selectedOpeningPosture,
+            opening_line: openingLine
           }
     })
     .select("*")
@@ -5680,7 +5744,10 @@ function conversationInitialVariables(
   eventId: string | null,
   fanId: string,
   eventType: string,
-  eventPayload: Record<string, unknown> | null
+  eventPayload: Record<string, unknown> | null,
+  relationshipContext: RelationshipContextProjection | null,
+  selectedOpeningPosture: OpeningPosture,
+  openingLine: string
 ) {
   const baseVariables: Record<string, unknown> = {
     relationship_id: relationshipId,
@@ -5694,6 +5761,15 @@ function conversationInitialVariables(
   const builderConfig = normalizeBuilderConfig(script.builder_config);
   for (const variable of builderConfig.variables ?? []) {
     if (variable.key.trim()) baseVariables[variable.key] = variable.defaultValue ?? "";
+  }
+  baseVariables.opening_posture = selectedOpeningPosture;
+  baseVariables.opening_line = openingLine;
+  baseVariables.relationship_context_present = Boolean(relationshipContext);
+  if (relationshipContext) {
+    baseVariables.relationship_context_identity_status = relationshipContext.identity_status;
+    baseVariables.relationship_context_downstream_usability = relationshipContext.downstream_usability;
+    baseVariables.relationship_context_known_sources = relationshipContext.known_sources.join(", ");
+    baseVariables.relationship_context_warnings = relationshipContext.warnings.join("; ");
   }
   return baseVariables;
 }
@@ -6583,6 +6659,57 @@ function resolveRuntimeVariableValue(variableKey: string, variableValue: string 
     return "I am happy you are here. I can make your first day feel personal.";
   }
   return interpolateTemplate(variableValue ?? "", toVariableMap(variables));
+}
+
+function normalizeRelationshipContext(value: unknown): RelationshipContextProjection | null {
+  if (!isRecord(value)) return null;
+  const projection: RelationshipContextProjection = {
+    identity_status: normalizeContextToken(value.identity_status ?? value.identityStatus),
+    identity_confidence: clampRelationshipConfidence(value.identity_confidence ?? value.identityConfidence),
+    downstream_usability: normalizeContextToken(value.downstream_usability ?? value.downstreamUsability),
+    known_sources: normalizeStringList(value.known_sources ?? value.knownSources),
+    relationship_posture: normalizeContextToken(value.relationship_posture ?? value.relationshipPosture),
+    relationship_signals: normalizeStringList(value.relationship_signals ?? value.relationshipSignals),
+    commercial_signal_summary: normalizeOptionalText(value.commercial_signal_summary ?? value.commercialSignalSummary),
+    warnings: normalizeStringList(value.warnings)
+  };
+  if (
+    !projection.identity_status &&
+    projection.identity_confidence === null &&
+    !projection.downstream_usability &&
+    !projection.known_sources.length &&
+    !projection.relationship_posture &&
+    !projection.relationship_signals.length &&
+    !projection.commercial_signal_summary &&
+    !projection.warnings.length
+  ) {
+    return null;
+  }
+  return projection;
+}
+
+function selectOpeningPosture(context: RelationshipContextProjection | null): OpeningPosture {
+  if (!context) return "standard";
+  if (context.warnings.length) return "standard";
+
+  const downstreamUsability = context.downstream_usability ?? "";
+  if (downstreamUsability !== "usable" && downstreamUsability !== "qualified") return "standard";
+
+  const posture = context.relationship_posture ?? "";
+  const identityStatus = context.identity_status ?? "";
+  if ((posture === "warm" || posture === "established") && (identityStatus === "exact" || identityStatus === "confirmed")) {
+    return "warm";
+  }
+  if (posture === "familiar" && (identityStatus === "probable" || identityStatus === "qualified" || identityStatus === "exact")) {
+    return "familiar";
+  }
+  return "standard";
+}
+
+function openingLineForPosture(posture: OpeningPosture) {
+  if (posture === "warm") return "Hey {{subscriber_name}}, I am really glad you are here again and I want to keep this warm and easy.";
+  if (posture === "familiar") return "Hey {{subscriber_name}}, you feel a little familiar, so I want to keep this easy and natural.";
+  return "Hey {{subscriber_name}}, I am glad you made it in and I want to keep this easy and natural.";
 }
 
 function classifyNewSubscriberReply(replyText: string) {
@@ -8934,6 +9061,12 @@ async function getConversationWorkspace(supabase: SupabaseClient, conversationId
     : null;
   const subscriberContext = toQueueWorkspaceSubscriberSummary(detail.relationship);
   const recentEvents = await loadQueueWorkspaceRecentEvents(supabase, conversationId);
+  const relationshipContext = extractRelationshipContext(isRecord(detail.conversation.metadata) ? detail.conversation.metadata : null, detail.conversation);
+  const selectedOpeningPosture = extractSelectedOpeningPosture(
+    isRecord(detail.conversation.metadata) ? detail.conversation.metadata : null,
+    detail.conversation,
+    relationshipContext
+  );
 
   return {
     selected_creator: detail.creator,
@@ -8943,8 +9076,39 @@ async function getConversationWorkspace(supabase: SupabaseClient, conversationId
     current_opportunity: currentOpportunity,
     subscriber_context: subscriberContext,
     recent_events: recentEvents,
-    attachments: []
+    attachments: [],
+    relationship_context: relationshipContext,
+    selected_opening_posture: selectedOpeningPosture
   };
+}
+
+function extractRelationshipContext(source: Record<string, unknown> | null, conversation: OfConversationInstance | null): RelationshipContextProjection | null {
+  const fromSource = normalizeRelationshipContext(source?.relationship_context);
+  if (fromSource) return fromSource;
+  if (conversation && isRecord(conversation.metadata)) {
+    return normalizeRelationshipContext(conversation.metadata.relationship_context);
+  }
+  return null;
+}
+
+function extractSelectedOpeningPosture(
+  source: Record<string, unknown> | null,
+  conversation: OfConversationInstance | null,
+  relationshipContext: RelationshipContextProjection | null
+): OpeningPosture {
+  const fromSource = normalizeOpeningPosture(source?.selected_opening_posture);
+  if (fromSource) return fromSource;
+  if (conversation && isRecord(conversation.metadata)) {
+    const fromConversation = normalizeOpeningPosture(conversation.metadata.selected_opening_posture);
+    if (fromConversation) return fromConversation;
+  }
+  return selectOpeningPosture(relationshipContext);
+}
+
+function normalizeOpeningPosture(value: unknown): OpeningPosture | null {
+  const posture = normalizeContextToken(value);
+  if (posture === "standard" || posture === "familiar" || posture === "warm") return posture;
+  return null;
 }
 
 type ConversationWorkspaceQueueItemRow = CanonicalQueueWorkspaceItemRow;
@@ -10404,6 +10568,27 @@ function stringValue(value: unknown, fallback = "") {
 
 function normalizeRouteToken(value: unknown) {
   return stringValue(value).toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+}
+
+function normalizeContextToken(value: unknown) {
+  return stringValue(value).trim().toLowerCase();
+}
+
+function normalizeStringList(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => stringValue(item).trim().toLowerCase())
+    .filter((item) => item.length > 0);
+}
+
+function normalizeOptionalText(value: unknown) {
+  return stringValue(value).trim() || null;
+}
+
+function clampRelationshipConfidence(value: unknown) {
+  const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : null;
+  if (parsed === null || !Number.isFinite(parsed)) return null;
+  return Math.max(0, Math.min(100, Math.round(parsed)));
 }
 
 function findString(record: Record<string, unknown>, ...keys: string[]) {

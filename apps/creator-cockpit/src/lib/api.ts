@@ -40,6 +40,8 @@ import type {
   OfSimulatedSubscriber,
   OfSubscriber,
   OfSubscriberRelationship,
+  OpeningPosture,
+  RelationshipContextProjection,
   DailyFocusQueueCard,
   MorningBrief,
   OfSyncRun,
@@ -104,6 +106,8 @@ export interface SimulationDetailData {
   conversation: OfConversationInstance | null;
   history: OfConversationHistoryItem[];
   outboundMessages: OfOutboundMessage[];
+  relationship_context?: RelationshipContextProjection | null;
+  selected_opening_posture?: OpeningPosture;
 }
 
 export interface SubscribersData {
@@ -154,6 +158,7 @@ export interface SimulationLaunchPayload {
   eventType: string;
   eventPayload?: Record<string, unknown>;
   variables?: Record<string, unknown>;
+  relationshipContext?: RelationshipContextProjection | null;
   subscriber?: Partial<Pick<OfSimulatedSubscriber, "name" | "username" | "subscription_status" | "renewal_state" | "spend_level" | "lifetime_value" | "message_history_summary" | "custom_variables">>;
 }
 
