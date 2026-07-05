@@ -1,15 +1,18 @@
 import { Bot, ClipboardList, PlaySquare, RefreshCw, Send, Sparkles, UserRound, Users } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import type { SyncType } from "@funkmyfans/of-types";
+import type { CreatorPlaybookProposal, SyncType } from "@funkmyfans/of-types";
 import {
+  createPlaybookProposal,
   fetchCreatorDetail,
   fetchCreatorIntelligence,
+  fetchCreatorPlaybookProposals,
   fetchCreatorScripts,
   fetchQueueWorkspace,
   importCreatorIntelligenceFixture,
   syncCreatorSection,
   updateTask,
+  updatePlaybookProposal,
   type CreatorDetailData,
   type CreatorIntelligenceData,
   type QueueWorkspaceData
@@ -29,11 +32,13 @@ const syncButtons: Array<{ type: SyncType; label: string }> = [
 export function CreatorDetail({ creatorId }: { creatorId: string }) {
   const [data, setData] = useState<CreatorDetailData | null>(null);
   const [intelligence, setIntelligence] = useState<CreatorIntelligenceData | null>(null);
+  const [playbookProposals, setPlaybookProposals] = useState<CreatorPlaybookProposal[]>([]);
   const [queueWorkspace, setQueueWorkspace] = useState<QueueWorkspaceData | null>(null);
   const [playbooks, setPlaybooks] = useState<Awaited<ReturnType<typeof fetchCreatorScripts>>["scripts"]>([]);
   const [tab, setTab] = useState<Tab>("Profile");
   const [runningSync, setRunningSync] = useState<SyncType | null>(null);
   const [importingFixture, setImportingFixture] = useState(false);
+  const [proposalBusy, setProposalBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -45,14 +50,16 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
 
   async function refresh() {
     try {
-      const [detail, intelligenceResult, queues, scripts] = await Promise.all([
+      const [detail, intelligenceResult, proposalsResult, queues, scripts] = await Promise.all([
         fetchCreatorDetail(creatorId),
         fetchCreatorIntelligence(creatorId).catch(() => null),
+        fetchCreatorPlaybookProposals(creatorId).catch(() => ({ proposals: [] })),
         fetchQueueWorkspace({ creatorId }).catch(() => null),
         fetchCreatorScripts(creatorId).catch(() => ({ scripts: [] }))
       ]);
       setData(detail);
       setIntelligence(intelligenceResult ?? null);
+      setPlaybookProposals(proposalsResult.proposals);
       setQueueWorkspace(queues);
       setPlaybooks(scripts.scripts);
       setError(null);
@@ -86,6 +93,34 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
       setError(importError instanceof Error ? importError.message : "Unable to import creator intelligence fixture");
     } finally {
       setImportingFixture(false);
+    }
+  }
+
+  async function handleCreateProposal(opportunityId: string) {
+    setProposalBusy(opportunityId);
+    setError(null);
+    try {
+      await createPlaybookProposal(creatorId, opportunityId);
+      const proposals = await fetchCreatorPlaybookProposals(creatorId);
+      setPlaybookProposals(proposals.proposals);
+    } catch (proposalError) {
+      setError(proposalError instanceof Error ? proposalError.message : "Unable to create playbook proposal");
+    } finally {
+      setProposalBusy(null);
+    }
+  }
+
+  async function handleProposalState(proposalId: string, state: "accepted" | "dismissed") {
+    setProposalBusy(proposalId);
+    setError(null);
+    try {
+      await updatePlaybookProposal(proposalId, state);
+      const proposals = await fetchCreatorPlaybookProposals(creatorId);
+      setPlaybookProposals(proposals.proposals);
+    } catch (proposalError) {
+      setError(proposalError instanceof Error ? proposalError.message : "Unable to update playbook proposal");
+    } finally {
+      setProposalBusy(null);
     }
   }
 
@@ -144,7 +179,17 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
       {tab === "Profile" ? <ProfileTab data={data} /> : null}
       {tab === "Subscribers" ? <SubscribersTab data={data} /> : null}
       {tab === "Queues" ? <QueuesTab data={data} queueWorkspace={queueWorkspace} onResolve={resolveTask} /> : null}
-      {tab === "Intelligence" ? <IntelligenceTab data={intelligence} onImportFixture={handleImportFixture} importingFixture={importingFixture} /> : null}
+      {tab === "Intelligence" ? (
+        <IntelligenceTab
+          data={intelligence}
+          proposals={playbookProposals}
+          onImportFixture={handleImportFixture}
+          importingFixture={importingFixture}
+          onCreateProposal={handleCreateProposal}
+          onProposalState={handleProposalState}
+          proposalBusy={proposalBusy}
+        />
+      ) : null}
       {tab === "Playbooks" ? <PlaybooksTab playbooks={playbooks} /> : null}
       {tab === "Activity" ? <ActivityTab data={data} /> : null}
     </main>
@@ -272,17 +317,34 @@ function PlaybooksTab({ playbooks }: { playbooks: Awaited<ReturnType<typeof fetc
 
 function IntelligenceTab({
   data,
+  proposals,
   onImportFixture,
-  importingFixture
+  importingFixture,
+  onCreateProposal,
+  onProposalState,
+  proposalBusy
 }: {
   data: CreatorIntelligenceData | null;
+  proposals: CreatorPlaybookProposal[];
   onImportFixture: () => Promise<void>;
   importingFixture: boolean;
+  onCreateProposal: (opportunityId: string) => Promise<void>;
+  onProposalState: (proposalId: string, state: "accepted" | "dismissed") => Promise<void>;
+  proposalBusy: string | null;
 }) {
   const summary = data?.summary ?? null;
   const latestSnapshot = data?.latest_snapshot ?? null;
   const snapshots = data?.snapshots ?? [];
   const opportunities = data?.opportunities ?? [];
+  const proposalsByOpportunity = useMemo(() => {
+    const map = new Map<string, CreatorPlaybookProposal[]>();
+    for (const proposal of proposals) {
+      const existing = map.get(proposal.creator_intelligence_opportunity_projection_id) ?? [];
+      existing.push(proposal);
+      map.set(proposal.creator_intelligence_opportunity_projection_id, existing);
+    }
+    return map;
+  }, [proposals]);
 
   return (
     <section className="space-y-4">
@@ -351,24 +413,61 @@ function IntelligenceTab({
       ) : null}
 
       <section className="premium-card overflow-hidden rounded-lg">
-        <TableHeader columns={["Journey", "Opportunity", "Confidence", "Priority", "State", "Rationale"]} />
+        <TableHeader columns={["Journey", "Opportunity", "Confidence", "Priority", "State", "Proposal", "Rationale"]} />
         <div className="divide-y divide-blue-500/12">
-          {opportunities.map((opportunity) => (
-            <div key={opportunity.id} className="grid grid-cols-[0.8fr_1.1fr_0.45fr_0.35fr_0.55fr_1.3fr] gap-3 px-4 py-3 text-sm">
-              <div className="text-blue-100/74">{opportunity.journey_type}</div>
-              <div className="min-w-0">
-                <div className="truncate font-semibold text-white">{opportunity.title}</div>
-                <div className="truncate text-xs text-blue-100/52">{opportunity.opportunity_type}</div>
+          {opportunities.map((opportunity) => {
+            const opportunityProposals = proposalsByOpportunity.get(opportunity.id) ?? [];
+            const currentProposal = opportunityProposals.find((proposal) => proposal.proposal_state === "draft") ?? opportunityProposals[0] ?? null;
+            const canCreate = opportunity.projection_state === "available";
+            return (
+              <div key={opportunity.id} className="grid grid-cols-[0.7fr_1fr_0.42fr_0.32fr_0.52fr_0.72fr_1.15fr] items-center gap-3 px-4 py-3 text-sm">
+                <div className="text-blue-100/74">{opportunity.journey_type}</div>
+                <div className="min-w-0">
+                  <div className="truncate font-semibold text-white">{opportunity.title}</div>
+                  <div className="truncate text-xs text-blue-100/52">{opportunity.opportunity_type}</div>
+                </div>
+                <div className="font-semibold text-white">{opportunity.confidence}%</div>
+                <div className="text-blue-100/74">{opportunity.priority}</div>
+                <div>
+                  <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${projectionStateTone(opportunity.projection_state)}`}>{opportunity.projection_state}</span>
+                </div>
+                <div className="flex flex-col gap-2">
+                  {currentProposal ? (
+                    <span className={`w-fit rounded-full px-2.5 py-1 text-xs font-semibold ${proposalStateTone(currentProposal.proposal_state)}`}>
+                      {currentProposal.proposal_state}
+                    </span>
+                  ) : null}
+                  {canCreate ? (
+                    <button
+                      type="button"
+                      onClick={() => void onCreateProposal(opportunity.id)}
+                      disabled={proposalBusy === opportunity.id}
+                      className="rounded-md bg-cyan-400 px-2.5 py-1.5 text-xs font-semibold text-slate-950 disabled:opacity-45"
+                    >
+                      {currentProposal ? "Open Draft" : "Create Proposal"}
+                    </button>
+                  ) : null}
+                </div>
+                <div className="text-blue-100/64">{opportunity.rationale}</div>
               </div>
-              <div className="font-semibold text-white">{opportunity.confidence}%</div>
-              <div className="text-blue-100/74">{opportunity.priority}</div>
-              <div>
-                <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${projectionStateTone(opportunity.projection_state)}`}>{opportunity.projection_state}</span>
-              </div>
-              <div className="text-blue-100/64">{opportunity.rationale}</div>
-            </div>
-          ))}
+            );
+          })}
           {!opportunities.length ? <div className="px-4 py-6 text-sm text-blue-100/58">No projected opportunities available yet.</div> : null}
+        </div>
+      </section>
+
+      <section className="premium-card rounded-lg p-4">
+        <SectionTitle icon={PlaySquare} title="Playbook Proposals" />
+        <div className="mt-4 space-y-3">
+          {proposals.map((proposal) => (
+            <ProposalReviewCard
+              key={proposal.id}
+              proposal={proposal}
+              busy={proposalBusy === proposal.id}
+              onState={onProposalState}
+            />
+          ))}
+          {!proposals.length ? <div className="text-sm text-blue-100/58">No playbook proposals drafted yet.</div> : null}
         </div>
       </section>
 
@@ -414,6 +513,92 @@ function ActivityTab({ data }: { data: CreatorDetailData }) {
         {!rows.length ? <div className="px-4 py-6 text-sm text-blue-100/58">No activity yet.</div> : null}
       </div>
     </section>
+  );
+}
+
+function ProposalReviewCard({
+  proposal,
+  busy,
+  onState
+}: {
+  proposal: CreatorPlaybookProposal;
+  busy: boolean;
+  onState: (proposalId: string, state: "accepted" | "dismissed") => Promise<void>;
+}) {
+  const payload = proposal.proposal_payload;
+  return (
+    <article className="rounded-lg border border-blue-500/14 bg-[#0D1B2A]/55 p-4">
+      <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <h4 className="text-lg font-semibold text-white">{proposal.proposal_title}</h4>
+            <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${proposalStateTone(proposal.proposal_state)}`}>{proposal.proposal_state}</span>
+          </div>
+          <div className="mt-1 text-sm text-blue-100/58">{proposal.journey_type} / {proposal.source_opportunity_type} / {payload.confidence}% confidence</div>
+          <p className="mt-3 max-w-5xl text-sm leading-6 text-blue-100/72">{payload.rationale}</p>
+        </div>
+        <div className="flex shrink-0 flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={() => void onState(proposal.id, "accepted")}
+            disabled={busy || proposal.proposal_state === "accepted"}
+            className="rounded-lg bg-cyan-400 px-3 py-2 text-sm font-semibold text-slate-950 disabled:opacity-45"
+          >
+            Accept Proposal
+          </button>
+          <button
+            type="button"
+            onClick={() => void onState(proposal.id, "dismissed")}
+            disabled={busy || proposal.proposal_state === "dismissed"}
+            className="rounded-lg border border-rose-400/25 bg-rose-500/10 px-3 py-2 text-sm font-semibold text-rose-100 disabled:opacity-45"
+          >
+            Dismiss Proposal
+          </button>
+        </div>
+      </div>
+
+      <div className="mt-4 grid gap-3 xl:grid-cols-[0.8fr_1.2fr]">
+        <div className="space-y-3">
+          <InfoBlock title="Entry Trigger" items={[payload.entry_trigger]} />
+          <InfoBlock title="Creator Voice" items={payload.creator_voice_notes} />
+          <InfoBlock title="Guardrails" items={payload.guardrails} />
+          <InfoBlock title="Endpoints" items={payload.endpoints.map((endpoint) => `${endpoint.label}: ${endpoint.description}`)} />
+          <InfoBlock title="Source References" items={payload.source_references.map((source) => `${source.kind}: ${source.reference}`)} />
+        </div>
+        <div className="space-y-3">
+          {payload.steps.map((step) => (
+            <div key={step.id} className="rounded-lg border border-blue-500/12 bg-[#102338]/55 p-3">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-sm font-semibold text-white">{step.order}. {step.label}</div>
+                  <div className="mt-1 text-xs text-blue-100/54">{step.objective}</div>
+                </div>
+                {step.endpoint_label ? <span className="rounded-full bg-blue-400/12 px-2 py-1 text-xs font-semibold text-blue-100">{step.endpoint_label}</span> : null}
+              </div>
+              <div className="mt-3 rounded-md border border-blue-500/12 bg-[#0D1B2A]/70 p-3 text-sm leading-6 text-blue-50">{step.message_draft}</div>
+              <div className="mt-3 grid gap-2 md:grid-cols-2">
+                <InfoBlock title="Responses" items={step.expected_subscriber_response_options} compact />
+                <InfoBlock title="Fork Routing" items={step.fork_routing.map((route) => `${route.response_option} -> ${route.route_to}: ${route.note}`)} compact />
+              </div>
+            </div>
+          ))}
+          <InfoBlock title="Fork Map" items={payload.forks.map((fork) => `${fork.from_step_id} / ${fork.response_option} -> ${fork.endpoint_label ?? fork.to_step_id}: ${fork.rationale}`)} />
+        </div>
+      </div>
+    </article>
+  );
+}
+
+function InfoBlock({ title, items, compact = false }: { title: string; items: string[]; compact?: boolean }) {
+  return (
+    <div className={`rounded-lg border border-blue-500/12 bg-[#102338]/42 ${compact ? "p-2.5" : "p-3"}`}>
+      <div className="text-xs font-semibold uppercase tracking-[0.14em] text-cyan-200/72">{title}</div>
+      <div className="mt-2 space-y-1.5">
+        {items.map((item, index) => (
+          <div key={`${title}:${index}`} className="text-sm leading-5 text-blue-100/70">{item}</div>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -477,6 +662,13 @@ function formatDate(value: string | null | undefined) {
 function projectionStateTone(state: string) {
   if (state === "available") return "bg-emerald-500/14 text-emerald-200";
   if (state === "accepted") return "bg-cyan-500/14 text-cyan-100";
+  if (state === "dismissed") return "bg-slate-500/16 text-slate-100";
+  return "bg-blue-400/12 text-blue-100";
+}
+
+function proposalStateTone(state: string) {
+  if (state === "draft") return "bg-amber-400/14 text-amber-100";
+  if (state === "accepted") return "bg-emerald-500/14 text-emerald-200";
   if (state === "dismissed") return "bg-slate-500/16 text-slate-100";
   return "bg-blue-400/12 text-blue-100";
 }

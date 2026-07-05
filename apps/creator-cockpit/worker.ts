@@ -64,6 +64,9 @@ import type {
   CreatorSettingsBundle,
   CreatorIntelligencePackageV1,
   CreatorIntelligenceOpportunityProjection,
+  CreatorPlaybookProposal,
+  CreatorPlaybookProposalPayload,
+  CreatorPlaybookProposalState,
   CreatorIntelligenceSnapshot,
   CreatorIntelligenceSummary,
   CreatorIntelligenceWorkspaceData,
@@ -364,6 +367,31 @@ async function handleApi(request: Request, env: Env, url: URL, ctx: ExecutionCon
     return Response.json(workspace, { headers: jsonHeaders });
   }
 
+  const creatorOpportunityProposalMatch = url.pathname.match(/^\/api\/creators\/([^/]+)\/intelligence\/opportunities\/([^/]+)\/proposals$/);
+  if (request.method === "POST" && creatorOpportunityProposalMatch) {
+    if (!isUuid(creatorOpportunityProposalMatch[2])) {
+      return Response.json({ error: "Opportunity id must be a database UUID" }, { status: 400, headers: jsonHeaders });
+    }
+    const proposal = await createPlaybookProposalFromOpportunity(supabase, creatorOpportunityProposalMatch[1], creatorOpportunityProposalMatch[2]);
+    return Response.json({ proposal }, { status: 201, headers: jsonHeaders });
+  }
+
+  const creatorPlaybookProposalsMatch = url.pathname.match(/^\/api\/creators\/([^/]+)\/playbook-proposals$/);
+  if (request.method === "GET" && creatorPlaybookProposalsMatch) {
+    const proposals = await listCreatorPlaybookProposals(supabase, creatorPlaybookProposalsMatch[1]);
+    return Response.json({ proposals }, { headers: jsonHeaders });
+  }
+
+  const playbookProposalMatch = url.pathname.match(/^\/api\/playbook-proposals\/([^/]+)$/);
+  if (request.method === "PATCH" && playbookProposalMatch) {
+    if (!isUuid(playbookProposalMatch[1])) {
+      return Response.json({ error: "Proposal id must be a database UUID" }, { status: 400, headers: jsonHeaders });
+    }
+    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const proposal = await updatePlaybookProposalState(supabase, playbookProposalMatch[1], body);
+    return Response.json({ proposal }, { headers: jsonHeaders });
+  }
+
   if (request.method === "GET" && url.pathname === "/api/events") {
     const result = await supabase
       .from("of_events")
@@ -517,6 +545,260 @@ async function importCreatorIntelligencePackage(
   }
 
   return getCreatorIntelligenceWorkspace(supabase, creatorId);
+}
+
+async function listCreatorPlaybookProposals(supabase: SupabaseClient, creatorId: string): Promise<CreatorPlaybookProposal[]> {
+  const result = await traceCreatorDetailRowsOrEmpty(
+    "creator_playbook_proposals",
+    "creator_playbook_proposals",
+    supabase.from("creator_playbook_proposals").select("*").eq("creator_id", creatorId).order("created_at", { ascending: false })
+  );
+  assertNoError(result.error);
+  return (result.data ?? []) as CreatorPlaybookProposal[];
+}
+
+async function createPlaybookProposalFromOpportunity(
+  supabase: SupabaseClient,
+  creatorId: string,
+  opportunityId: string
+): Promise<CreatorPlaybookProposal> {
+  const existingDraft = await supabase
+    .from("creator_playbook_proposals")
+    .select("*")
+    .eq("creator_id", creatorId)
+    .eq("creator_intelligence_opportunity_projection_id", opportunityId)
+    .eq("proposal_state", "draft")
+    .maybeSingle();
+  assertNoError(existingDraft.error);
+  if (existingDraft.data) return existingDraft.data as CreatorPlaybookProposal;
+
+  const opportunityResult = await supabase
+    .from("creator_intelligence_opportunity_projections")
+    .select("*, snapshot:creator_intelligence_snapshots(*)")
+    .eq("id", opportunityId)
+    .eq("creator_id", creatorId)
+    .single();
+  assertNoError(opportunityResult.error);
+  if (!opportunityResult.data) throw new ApiError(404, "Opportunity not found");
+
+  const opportunity = opportunityResult.data as CreatorIntelligenceOpportunityProjection & { snapshot?: CreatorIntelligenceSnapshot | null };
+  if (opportunity.projection_state !== "available") {
+    throw new ApiError(409, "Only available opportunities can draft playbook proposals");
+  }
+
+  const payload = buildPlaybookProposalPayload(opportunity, opportunity.snapshot ?? null);
+  const inserted = await supabase
+    .from("creator_playbook_proposals")
+    .insert({
+      creator_id: creatorId,
+      intelligence_snapshot_id: opportunity.intelligence_snapshot_id,
+      creator_intelligence_opportunity_projection_id: opportunity.id,
+      proposal_title: payloadTitleForOpportunity(opportunity),
+      journey_type: opportunity.journey_type,
+      source_opportunity_type: opportunity.opportunity_type,
+      proposal_state: "draft",
+      proposal_payload: payload
+    })
+    .select("*")
+    .single();
+
+  if (inserted.error && isDuplicateKeyError(inserted.error)) {
+    const draft = await supabase
+      .from("creator_playbook_proposals")
+      .select("*")
+      .eq("creator_id", creatorId)
+      .eq("creator_intelligence_opportunity_projection_id", opportunityId)
+      .eq("proposal_state", "draft")
+      .single();
+    assertNoError(draft.error);
+    return draft.data as CreatorPlaybookProposal;
+  }
+
+  assertNoError(inserted.error);
+  return inserted.data as CreatorPlaybookProposal;
+}
+
+async function updatePlaybookProposalState(
+  supabase: SupabaseClient,
+  proposalId: string,
+  body: Record<string, unknown>
+): Promise<CreatorPlaybookProposal> {
+  const requestedState = body.proposal_state ?? body.state;
+  if (requestedState !== "accepted" && requestedState !== "dismissed") {
+    throw new ApiError(400, "Proposal state can only change to accepted or dismissed");
+  }
+
+  const result = await supabase
+    .from("creator_playbook_proposals")
+    .update({ proposal_state: requestedState satisfies CreatorPlaybookProposalState })
+    .eq("id", proposalId)
+    .select("*")
+    .single();
+  assertNoError(result.error);
+  return result.data as CreatorPlaybookProposal;
+}
+
+function payloadTitleForOpportunity(opportunity: CreatorIntelligenceOpportunityProjection) {
+  if (opportunity.source_opportunity_reference === "welcome_runway_new_subscriber") return "New Subscriber Welcome";
+  return `${opportunity.title} Proposal`;
+}
+
+function buildPlaybookProposalPayload(
+  opportunity: CreatorIntelligenceOpportunityProjection,
+  snapshot: CreatorIntelligenceSnapshot | null
+): CreatorPlaybookProposalPayload {
+  if (opportunity.source_opportunity_reference === "welcome_runway_new_subscriber") {
+    return buildMoonSirenWelcomeProposalPayload(opportunity, snapshot);
+  }
+
+  return {
+    schema_version: 1,
+    entry_trigger: `Review when ${opportunity.journey_type} opportunity is selected from creator intelligence.`,
+    creator_voice_notes: ["Use a warm, personal tone.", "Keep the message concise and human-reviewed."],
+    guardrails: ["Proposal only; do not auto-send.", "No paid offer unless an operator approves conversion in a later sprint."],
+    steps: [
+      {
+        id: "step_1_review",
+        order: 1,
+        label: "Operator review",
+        objective: "Review intelligence and decide whether this opportunity should become a future playbook.",
+        message_draft: "Hey {{subscriber_name}}, I wanted to check in personally.",
+        expected_subscriber_response_options: ["warm reply", "no reply", "not interested"],
+        fork_routing: [
+          { response_option: "warm reply", route_to: "endpoint_continue_chat", note: "Keep conversation human-led." },
+          { response_option: "no reply", route_to: "endpoint_no_action", note: "No runtime follow-up is created by this proposal." },
+          { response_option: "not interested", route_to: "endpoint_respect_boundary", note: "Respect the subscriber's signal." }
+        ]
+      }
+    ],
+    forks: [
+      {
+        from_step_id: "step_1_review",
+        response_option: "warm reply",
+        to_step_id: "endpoint_continue_chat",
+        endpoint_label: "Continue chat manually",
+        rationale: "A positive response deserves human review before any automation exists."
+      }
+    ],
+    endpoints: [
+      { id: "endpoint_continue_chat", label: "Continue chat manually", description: "Operator may continue the relationship without automation." },
+      { id: "endpoint_no_action", label: "No action", description: "No playbook or automation is created." },
+      { id: "endpoint_respect_boundary", label: "Respect boundary", description: "Do not pursue the opportunity." }
+    ],
+    rationale: opportunity.rationale,
+    confidence: opportunity.confidence,
+    source_references: sourceReferencesForProposal(opportunity, snapshot)
+  };
+}
+
+function buildMoonSirenWelcomeProposalPayload(
+  opportunity: CreatorIntelligenceOpportunityProjection,
+  snapshot: CreatorIntelligenceSnapshot | null
+): CreatorPlaybookProposalPayload {
+  return {
+    schema_version: 1,
+    entry_trigger: "New subscriber joins MoonSiren and has not yet received a personal welcome from this proposal path.",
+    creator_voice_notes: [
+      "girl-next-door warmth: friendly, bright, lightly flirty, never pushy",
+      "Make the subscriber feel noticed by name before introducing choices.",
+      "Keep paid-content language soft and optional."
+    ],
+    guardrails: [
+      "Drafting artifact only; acceptance does not activate runtime automation.",
+      "Do not promise explicit content, custom content, or discounts.",
+      "Escalate boundary-testing or uncomfortable replies to a human operator.",
+      "Do not send follow-ups without a later runtime conversion sprint."
+    ],
+    steps: [
+      {
+        id: "step_1_warm_welcome",
+        order: 1,
+        label: "Warm first hello",
+        objective: "Start a low-friction relationship and invite a simple reply.",
+        message_draft: "Hey {{subscriber_name}}, welcome in. I am really happy you found your way here. What should I call you?",
+        expected_subscriber_response_options: ["shares name", "warm greeting", "short low-effort reply", "no reply"],
+        fork_routing: [
+          { response_option: "shares name", route_to: "step_2_personal_interest", note: "Personalize the next question." },
+          { response_option: "warm greeting", route_to: "step_2_personal_interest", note: "Continue the gentle welcome." },
+          { response_option: "short low-effort reply", route_to: "step_2_personal_interest", note: "Reduce effort with simple choices." },
+          { response_option: "no reply", route_to: "endpoint_no_reply", note: "No automated follow-up is scheduled in this proposal." }
+        ]
+      },
+      {
+        id: "step_2_personal_interest",
+        order: 2,
+        label: "Easy personal choice",
+        objective: "Learn what brought them in while keeping the tone casual and low effort.",
+        message_draft: "Cute, I like knowing who is here with me. Pick one for tonight: cozy chat, soft photo tease, or surprise me.",
+        expected_subscriber_response_options: ["cozy chat", "soft photo tease", "surprise me", "flirty reply", "boundary-testing reply"],
+        fork_routing: [
+          { response_option: "cozy chat", route_to: "step_3_chat_path", note: "Lean into relationship building." },
+          { response_option: "soft photo tease", route_to: "step_4_soft_preview", note: "Mention content without a hard sell." },
+          { response_option: "surprise me", route_to: "step_4_soft_preview", note: "Use playful but safe framing." },
+          { response_option: "flirty reply", route_to: "step_3_chat_path", note: "Mirror lightly within boundaries." },
+          { response_option: "boundary-testing reply", route_to: "endpoint_human_review", note: "Route to human review." }
+        ]
+      },
+      {
+        id: "step_3_chat_path",
+        order: 3,
+        label: "Relationship-building close",
+        objective: "Reward chat interest and leave the door open.",
+        message_draft: "Then I am glad you are here. Tell me one tiny thing about your day and I will tell you one back.",
+        expected_subscriber_response_options: ["shares personal detail", "asks about creator", "no reply"],
+        fork_routing: [
+          { response_option: "shares personal detail", route_to: "endpoint_manual_conversation", note: "Continue manually with memory-worthy detail." },
+          { response_option: "asks about creator", route_to: "endpoint_manual_conversation", note: "Human reply recommended." },
+          { response_option: "no reply", route_to: "endpoint_complete", note: "Complete without automation." }
+        ]
+      },
+      {
+        id: "step_4_soft_preview",
+        order: 4,
+        label: "Soft content-interest close",
+        objective: "Acknowledge content interest without converting to a paid automation.",
+        message_draft: "Noted. I like keeping a few sweeter things tucked away for people who actually say hi first.",
+        expected_subscriber_response_options: ["asks what is tucked away", "purchase intent", "price objection", "no reply"],
+        fork_routing: [
+          { response_option: "asks what is tucked away", route_to: "endpoint_human_review", note: "Human can decide whether a future PPV offer is appropriate." },
+          { response_option: "purchase intent", route_to: "endpoint_human_review", note: "Revenue signal, still not executable automation." },
+          { response_option: "price objection", route_to: "endpoint_manual_conversation", note: "Respond gently without pressure." },
+          { response_option: "no reply", route_to: "endpoint_complete", note: "Complete without automation." }
+        ]
+      }
+    ],
+    forks: [
+      { from_step_id: "step_1_warm_welcome", response_option: "shares name", to_step_id: "step_2_personal_interest", rationale: "Personal detail supports warmer onboarding." },
+      { from_step_id: "step_1_warm_welcome", response_option: "short low-effort reply", to_step_id: "step_2_personal_interest", rationale: "Low-effort replies need lower-friction prompts." },
+      { from_step_id: "step_2_personal_interest", response_option: "cozy chat", to_step_id: "step_3_chat_path", rationale: "Chat preference should deepen relationship first." },
+      { from_step_id: "step_2_personal_interest", response_option: "soft photo tease", to_step_id: "step_4_soft_preview", rationale: "Content interest can be acknowledged without selling." },
+      { from_step_id: "step_2_personal_interest", response_option: "boundary-testing reply", to_step_id: "endpoint_human_review", endpoint_label: "Human review", rationale: "Safety boundary requires operator judgment." },
+      { from_step_id: "step_4_soft_preview", response_option: "purchase intent", to_step_id: "endpoint_human_review", endpoint_label: "Human revenue review", rationale: "Buying signal is useful but still outside proposal execution." }
+    ],
+    endpoints: [
+      { id: "endpoint_manual_conversation", label: "Continue manually", description: "Operator continues the chat using creator memory and tone notes." },
+      { id: "endpoint_human_review", label: "Human review", description: "Operator reviews safety or monetization signal before any reply." },
+      { id: "endpoint_no_reply", label: "No reply", description: "No further action from proposal drafting." },
+      { id: "endpoint_complete", label: "Welcome complete", description: "The proposal path has done its relationship-building job." }
+    ],
+    rationale: "MoonSiren's accepted intelligence highlights warm, low-friction onboarding with gentle monetization and a light VIP follow-up path. This proposal drafts a reviewable New Subscriber Welcome that keeps the first interaction personal and defers runtime automation.",
+    confidence: opportunity.confidence,
+    source_references: sourceReferencesForProposal(opportunity, snapshot)
+  };
+}
+
+function sourceReferencesForProposal(
+  opportunity: CreatorIntelligenceOpportunityProjection,
+  snapshot: CreatorIntelligenceSnapshot | null
+) {
+  return [
+    { kind: "intelligence_snapshot_id", reference: opportunity.intelligence_snapshot_id },
+    { kind: "opportunity_projection_id", reference: opportunity.id },
+    { kind: "source_opportunity_reference", reference: opportunity.source_opportunity_reference },
+    ...(opportunity.source_scenario_reference ? [{ kind: "source_scenario_reference", reference: opportunity.source_scenario_reference }] : []),
+    ...(snapshot?.source_package_reference ? [{ kind: "source_package_reference", reference: snapshot.source_package_reference }] : []),
+    ...(snapshot?.source_assessment_reference ? [{ kind: "source_assessment_reference", reference: snapshot.source_assessment_reference }] : [])
+  ];
 }
 
 function buildCreatorIntelligenceSummary(snapshot: CreatorIntelligenceSnapshot): CreatorIntelligenceSummary {

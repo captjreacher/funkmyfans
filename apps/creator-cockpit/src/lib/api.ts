@@ -34,6 +34,8 @@ import type {
   CreatorIntelligenceSnapshot,
   CreatorIntelligenceSummary,
   CreatorIntelligenceWorkspaceData,
+  CreatorPlaybookProposal,
+  CreatorPlaybookProposalState,
   OfRelationshipTimelineItem,
   OfSimulatedSubscriber,
   OfSubscriber,
@@ -206,6 +208,19 @@ export async function fetchCreatorIntelligence(creatorId: string): Promise<Creat
 
 export async function importCreatorIntelligenceFixture(creatorId: string): Promise<CreatorIntelligenceData> {
   return apiJson<CreatorIntelligenceData>(`/creators/${creatorId}/intelligence/import-fixture`, { method: "POST" });
+}
+
+export async function createPlaybookProposal(creatorId: string, opportunityId: string): Promise<{ proposal: CreatorPlaybookProposal }> {
+  return apiJson<{ proposal: CreatorPlaybookProposal }>(`/creators/${creatorId}/intelligence/opportunities/${opportunityId}/proposals`, { method: "POST" });
+}
+
+export async function fetchCreatorPlaybookProposals(creatorId: string): Promise<{ proposals: CreatorPlaybookProposal[] }> {
+  return apiJson<{ proposals: CreatorPlaybookProposal[] }>(`/creators/${creatorId}/playbook-proposals`);
+}
+
+export async function updatePlaybookProposal(proposalId: string, state: Extract<CreatorPlaybookProposalState, "accepted" | "dismissed">): Promise<{ proposal: CreatorPlaybookProposal }> {
+  assertUuid(proposalId, "playbook proposal");
+  return apiJson<{ proposal: CreatorPlaybookProposal }>(`/playbook-proposals/${proposalId}`, jsonInit("PATCH", { state }));
 }
 
 export type QueueItemAction = "approve_ai" | "respond" | "assign" | "ignore" | "pause";

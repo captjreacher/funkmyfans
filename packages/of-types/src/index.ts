@@ -1058,6 +1058,7 @@ export interface CreatorSettingsBundle {
 }
 
 export type CreatorIntelligenceProjectionState = "available" | "accepted" | "dismissed";
+export type CreatorPlaybookProposalState = "draft" | "accepted" | "dismissed";
 
 export interface CreatorIntelligencePackageOpportunity {
   source_opportunity_reference: string;
@@ -1110,6 +1111,61 @@ export interface CreatorIntelligenceOpportunityProjection {
   confidence: number;
   priority: number;
   projection_state: CreatorIntelligenceProjectionState;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreatorPlaybookProposalPayloadStep {
+  id: string;
+  order: number;
+  label: string;
+  objective: string;
+  message_draft: string;
+  expected_subscriber_response_options: string[];
+  fork_routing: Array<{
+    response_option: string;
+    route_to: string;
+    note: string;
+  }>;
+  endpoint_label?: string;
+}
+
+export interface CreatorPlaybookProposalPayload {
+  schema_version: 1;
+  entry_trigger: string;
+  creator_voice_notes: string[];
+  guardrails: string[];
+  steps: CreatorPlaybookProposalPayloadStep[];
+  forks: Array<{
+    from_step_id: string;
+    response_option: string;
+    to_step_id: string;
+    endpoint_label?: string;
+    rationale: string;
+  }>;
+  endpoints: Array<{
+    id: string;
+    label: string;
+    description: string;
+  }>;
+  rationale: string;
+  confidence: number;
+  source_references: Array<{
+    kind: string;
+    reference: string;
+  }>;
+}
+
+export interface CreatorPlaybookProposal {
+  id: string;
+  creator_id: string;
+  intelligence_snapshot_id: string;
+  creator_intelligence_opportunity_projection_id: string;
+  proposal_title: string;
+  journey_type: string;
+  source_opportunity_type: string;
+  proposal_state: CreatorPlaybookProposalState;
+  proposal_payload: CreatorPlaybookProposalPayload;
   created_at: string;
   updated_at: string;
 }
