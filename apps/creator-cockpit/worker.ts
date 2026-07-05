@@ -5247,29 +5247,17 @@ async function processDueConversations(supabase: SupabaseClient, env: Env, optio
   }
   const dueItems = [...((dueWaiting.data ?? []) as OfConversationInstance[]), ...((staleRunning.data ?? []) as OfConversationInstance[])];
   const unique = [...new Map(dueItems.map((item) => [item.id, item])).values()].slice(0, options.limit);
-  console.info("[due-conversations] scan complete", {
-    limit: options.limit,
-    dueWaiting: (dueWaiting.data ?? []).length,
-    staleRunning: (staleRunning.data ?? []).length,
-    unique: unique.length
-  });
+  console.info("[due-conversations] scan complete", { limit: options.limit, dueWaiting: (dueWaiting.data ?? []).length, staleRunning: (staleRunning.data ?? []).length, unique: unique.length });
 
   let processed = 0;
   const errors: string[] = [];
   for (const item of unique) {
     try {
-      console.info("[due-conversations] processing item", {
-        conversationId: item.id,
-        status: item.status,
-        executionMode: item.execution_mode,
-        waitingReason: item.waiting_reason
-      });
       if (await isConversationPausedForSimulation(supabase, item)) continue;
       const reason = item.status === "waiting_delay" ? "delay_due" : "reply_timeout";
       const conversation = await processConversationInstance(supabase, env, item.id, { reason });
       if (item.automation_run_id) await syncAutomationRunToConversation(supabase, item.automation_run_id, conversation);
       processed += 1;
-      console.info("[due-conversations] processed item", { conversationId: item.id, status: conversation.status });
     } catch (error) {
       console.error("[due-conversations] item failed", {
         conversationId: item.id,
