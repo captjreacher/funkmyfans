@@ -1,0 +1,44 @@
+{
+  "source_product": "FYV",
+  "contract_version": "creator-intelligence-package-v1",
+  "intelligence_version": "1.0.0",
+  "source_package_reference": "fyv/moonsiren/intelligence-package/2026-07-05",
+  "source_assessment_reference": "fyv/moonsiren/assessment/2026-07-05",
+  "package_state": "published",
+  "primary_vertical": "premium chat and PPV",
+  "archetype_journey": "girl_next_door -> warm VIP relationship builder",
+  "derived_scenario": "soft welcome runway with selective paid-content follow-up",
+  "intelligence_summary": "MoonSiren is positioned for warm, low-friction onboarding with gentle monetization and a light VIP follow-up path.",
+  "available_opportunities": [
+    {
+      "source_opportunity_reference": "welcome_runway_new_subscriber",
+      "source_scenario_reference": "scenario_welcome_runway",
+      "journey_type": "new_subscriber",
+      "opportunity_type": "welcome",
+      "title": "Welcome New Subscriber",
+      "rationale": "The package identifies a strong first-touch moment where a warm welcome can move the creator relationship forward without pressure.",
+      "confidence": 92,
+      "priority": 1
+    },
+    {
+      "source_opportunity_reference": "vip_soft_checkin",
+      "source_scenario_reference": "scenario_vip_soft_checkin",
+      "journey_type": "vip_relationship",
+      "opportunity_type": "retention",
+      "title": "Soft VIP Check-in",
+      "rationale": "The audience shows enough affinity for a brief VIP-style touchpoint that keeps the relationship warm before a larger ask.",
+      "confidence": 84,
+      "priority": 2
+    },
+    {
+      "source_opportunity_reference": "quiet_fan_reengagement",
+      "source_scenario_reference": "scenario_quiet_fan_reengagement",
+      "journey_type": "reactivation",
+      "opportunity_type": "re_engagement",
+      "title": "Re-engage Quiet Fans",
+      "rationale": "The package flags a reactivation lane for fans who have cooled but still show enough signal to justify a low-pressure re-entry message.",
+      "confidence": 78,
+      "priority": 3
+    }
+  ]
+}

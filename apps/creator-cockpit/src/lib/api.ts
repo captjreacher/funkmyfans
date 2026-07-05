@@ -30,6 +30,10 @@ import type {
   CreatorPreferenceSettings,
   CreatorAiSafetySettings,
   OfContextEvent,
+  CreatorIntelligenceOpportunityProjection,
+  CreatorIntelligenceSnapshot,
+  CreatorIntelligenceSummary,
+  CreatorIntelligenceWorkspaceData,
   OfRelationshipTimelineItem,
   OfSimulatedSubscriber,
   OfSubscriber,
@@ -82,6 +86,8 @@ export interface CreatorDetailData {
   relationshipTimeline: OfRelationshipTimelineItem[];
   contextEvents: OfContextEvent[];
 }
+
+export interface CreatorIntelligenceData extends CreatorIntelligenceWorkspaceData {}
 
 export interface ConversationDetailData extends ConversationOperationsDetail {}
 
@@ -192,6 +198,14 @@ export async function fetchDashboard(): Promise<DashboardData> {
 
 export async function fetchCreatorDetail(creatorId: string): Promise<CreatorDetailData> {
   return apiJson<CreatorDetailData>(`/creators/${creatorId}`);
+}
+
+export async function fetchCreatorIntelligence(creatorId: string): Promise<CreatorIntelligenceData> {
+  return apiJson<CreatorIntelligenceData>(`/creators/${creatorId}/intelligence`);
+}
+
+export async function importCreatorIntelligenceFixture(creatorId: string): Promise<CreatorIntelligenceData> {
+  return apiJson<CreatorIntelligenceData>(`/creators/${creatorId}/intelligence/import-fixture`, { method: "POST" });
 }
 
 export type QueueItemAction = "approve_ai" | "respond" | "assign" | "ignore" | "pause";

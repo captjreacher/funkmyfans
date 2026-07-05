@@ -1057,6 +1057,86 @@ export interface CreatorSettingsBundle {
   ai_safety: CreatorAiSafetySettings;
 }
 
+export type CreatorIntelligenceProjectionState = "available" | "accepted" | "dismissed";
+
+export interface CreatorIntelligencePackageOpportunity {
+  source_opportunity_reference: string;
+  source_scenario_reference: string | null;
+  journey_type: string;
+  opportunity_type: string;
+  title: string;
+  rationale: string;
+  confidence: number;
+  priority: number;
+}
+
+export interface CreatorIntelligencePackageV1 {
+  source_product: string;
+  contract_version: string;
+  intelligence_version: string;
+  source_package_reference: string;
+  source_assessment_reference: string;
+  package_state: "identified" | "published" | "superseded";
+  primary_vertical: string;
+  archetype_journey: string;
+  derived_scenario: string;
+  intelligence_summary: string;
+  available_opportunities: CreatorIntelligencePackageOpportunity[];
+}
+
+export interface CreatorIntelligenceSnapshot {
+  id: string;
+  creator_id: string;
+  source_product: string;
+  contract_version: string;
+  intelligence_version: string;
+  source_package_reference: string;
+  source_assessment_reference: string;
+  package_payload: CreatorIntelligencePackageV1;
+  imported_at: string;
+  superseded_at: string | null;
+}
+
+export interface CreatorIntelligenceOpportunityProjection {
+  id: string;
+  creator_id: string;
+  intelligence_snapshot_id: string;
+  source_opportunity_reference: string;
+  source_scenario_reference: string | null;
+  journey_type: string;
+  opportunity_type: string;
+  title: string;
+  rationale: string;
+  confidence: number;
+  priority: number;
+  projection_state: CreatorIntelligenceProjectionState;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreatorIntelligenceSummary {
+  source_product: string;
+  contract_version: string;
+  intelligence_version: string;
+  source_package_reference: string;
+  source_assessment_reference: string;
+  package_state: "identified" | "published" | "superseded";
+  primary_vertical: string;
+  archetype_journey: string;
+  derived_scenario: string;
+  intelligence_summary: string;
+  imported_at: string;
+  superseded_at: string | null;
+}
+
+export interface CreatorIntelligenceWorkspaceData {
+  creator: Pick<OfCreator, "id" | "username" | "display_name">;
+  latest_snapshot: CreatorIntelligenceSnapshot | null;
+  summary: CreatorIntelligenceSummary | null;
+  snapshots: CreatorIntelligenceSnapshot[];
+  opportunities: CreatorIntelligenceOpportunityProjection[];
+}
+
 export interface SettingsWorkspaceData {
   agency: AgencyDefaultsSettings;
   creators: CreatorSettingsBundle[];

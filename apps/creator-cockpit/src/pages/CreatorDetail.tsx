@@ -1,19 +1,22 @@
-import { Bot, ClipboardList, PlaySquare, RefreshCw, Send, UserRound, Users } from "lucide-react";
+import { Bot, ClipboardList, PlaySquare, RefreshCw, Send, Sparkles, UserRound, Users } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type { SyncType } from "@funkmyfans/of-types";
 import {
   fetchCreatorDetail,
+  fetchCreatorIntelligence,
   fetchCreatorScripts,
   fetchQueueWorkspace,
+  importCreatorIntelligenceFixture,
   syncCreatorSection,
   updateTask,
   type CreatorDetailData,
+  type CreatorIntelligenceData,
   type QueueWorkspaceData
 } from "../lib/api";
 import { PriorityBadge } from "../components/PriorityBadge";
 
-const tabs = ["Profile", "Subscribers", "Queues", "Playbooks", "Activity"] as const;
+const tabs = ["Profile", "Subscribers", "Queues", "Intelligence", "Playbooks", "Activity"] as const;
 type Tab = (typeof tabs)[number];
 
 const syncButtons: Array<{ type: SyncType; label: string }> = [
@@ -25,10 +28,12 @@ const syncButtons: Array<{ type: SyncType; label: string }> = [
 
 export function CreatorDetail({ creatorId }: { creatorId: string }) {
   const [data, setData] = useState<CreatorDetailData | null>(null);
+  const [intelligence, setIntelligence] = useState<CreatorIntelligenceData | null>(null);
   const [queueWorkspace, setQueueWorkspace] = useState<QueueWorkspaceData | null>(null);
   const [playbooks, setPlaybooks] = useState<Awaited<ReturnType<typeof fetchCreatorScripts>>["scripts"]>([]);
   const [tab, setTab] = useState<Tab>("Profile");
   const [runningSync, setRunningSync] = useState<SyncType | null>(null);
+  const [importingFixture, setImportingFixture] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -40,12 +45,14 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
 
   async function refresh() {
     try {
-      const [detail, queues, scripts] = await Promise.all([
+      const [detail, intelligenceResult, queues, scripts] = await Promise.all([
         fetchCreatorDetail(creatorId),
+        fetchCreatorIntelligence(creatorId).catch(() => null),
         fetchQueueWorkspace({ creatorId }).catch(() => null),
         fetchCreatorScripts(creatorId).catch(() => ({ scripts: [] }))
       ]);
       setData(detail);
+      setIntelligence(intelligenceResult ?? null);
       setQueueWorkspace(queues);
       setPlaybooks(scripts.scripts);
       setError(null);
@@ -65,6 +72,20 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
       setError(syncError instanceof Error ? syncError.message : "Sync failed");
     } finally {
       setRunningSync(null);
+    }
+  }
+
+  async function handleImportFixture() {
+    setImportingFixture(true);
+    setError(null);
+    try {
+      const result = await importCreatorIntelligenceFixture(creatorId);
+      setIntelligence(result);
+      await refresh();
+    } catch (importError) {
+      setError(importError instanceof Error ? importError.message : "Unable to import creator intelligence fixture");
+    } finally {
+      setImportingFixture(false);
     }
   }
 
@@ -123,6 +144,7 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
       {tab === "Profile" ? <ProfileTab data={data} /> : null}
       {tab === "Subscribers" ? <SubscribersTab data={data} /> : null}
       {tab === "Queues" ? <QueuesTab data={data} queueWorkspace={queueWorkspace} onResolve={resolveTask} /> : null}
+      {tab === "Intelligence" ? <IntelligenceTab data={intelligence} onImportFixture={handleImportFixture} importingFixture={importingFixture} /> : null}
       {tab === "Playbooks" ? <PlaybooksTab playbooks={playbooks} /> : null}
       {tab === "Activity" ? <ActivityTab data={data} /> : null}
     </main>
@@ -248,6 +270,129 @@ function PlaybooksTab({ playbooks }: { playbooks: Awaited<ReturnType<typeof fetc
   );
 }
 
+function IntelligenceTab({
+  data,
+  onImportFixture,
+  importingFixture
+}: {
+  data: CreatorIntelligenceData | null;
+  onImportFixture: () => Promise<void>;
+  importingFixture: boolean;
+}) {
+  const summary = data?.summary ?? null;
+  const latestSnapshot = data?.latest_snapshot ?? null;
+  const snapshots = data?.snapshots ?? [];
+  const opportunities = data?.opportunities ?? [];
+
+  return (
+    <section className="space-y-4">
+      <div className="premium-card rounded-lg p-4">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div>
+            <div className="text-sm font-semibold uppercase tracking-[0.22em] text-cyan-300">Creator intelligence</div>
+            <h3 className="mt-1 text-2xl font-semibold text-white">Imported FYV intelligence, projected locally.</h3>
+            <p className="mt-2 max-w-3xl text-sm leading-6 text-blue-100/64">
+              FMF stores the source snapshot immutably and projects only operational opportunity records. Playbook generation stays out of v1.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => void onImportFixture()}
+            disabled={importingFixture}
+            className="inline-flex items-center gap-2 rounded-lg border border-cyan-300/20 bg-cyan-400 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-cyan-300 disabled:opacity-60"
+          >
+            <RefreshCw className={`h-4 w-4 ${importingFixture ? "animate-spin" : ""}`} aria-hidden="true" />
+            Import MoonSiren fixture
+          </button>
+        </div>
+      </div>
+
+      {summary ? (
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          <Metric label="Primary vertical" value={summary.primary_vertical} icon={Sparkles} />
+          <Metric label="Archetype journey" value={summary.archetype_journey} icon={Users} />
+          <Metric label="Derived scenario" value={summary.derived_scenario} icon={Bot} />
+          <Metric label="Imported version" value={summary.intelligence_version} icon={PlaySquare} />
+        </div>
+      ) : (
+        <div className="premium-card rounded-lg p-4 text-sm text-blue-100/64">No intelligence snapshot has been imported yet. Use the fixture button to load the local MoonSiren contract sample.</div>
+      )}
+
+      {summary ? (
+        <section className="grid gap-4 xl:grid-cols-[0.95fr_1.05fr]">
+          <div className="premium-card rounded-lg p-4">
+            <SectionTitle icon={ClipboardList} title="Snapshot" />
+            <div className="mt-4 space-y-2">
+              <ContextRow label="Source product" value={summary.source_product} />
+              <ContextRow label="Contract version" value={summary.contract_version} />
+              <ContextRow label="Package reference" value={summary.source_package_reference} />
+              <ContextRow label="Assessment reference" value={summary.source_assessment_reference} />
+              <ContextRow label="Package state" value={summary.package_state} />
+              <ContextRow label="Imported at" value={formatDate(summary.imported_at)} />
+              <ContextRow label="Superseded at" value={summary.superseded_at ? formatDate(summary.superseded_at) : "active"} />
+            </div>
+            <div className="mt-4 rounded-md border border-blue-500/12 bg-[#0D1B2A]/55 p-3 text-sm text-blue-100/72">
+              {summary.intelligence_summary}
+            </div>
+          </div>
+          <div className="premium-card rounded-lg p-4">
+            <SectionTitle icon={Bot} title="Latest imported snapshot" />
+            <div className="mt-4 space-y-2">
+              <ContextRow label="Snapshot id" value={latestSnapshot?.id ?? "none"} />
+              <ContextRow label="Package payload" value={latestSnapshot ? "stored immutably" : "not available"} />
+              <ContextRow label="Available opportunities" value={String(opportunities.length)} />
+              <ContextRow label="Projection states" value="available / accepted / dismissed" />
+            </div>
+            <div className="mt-4 rounded-md border border-blue-500/12 bg-[#0D1B2A]/55 p-3 text-sm text-blue-100/64">
+              FYV publishes intelligence. FMF keeps the operational projection separate and never generates playbooks from this tab.
+            </div>
+          </div>
+        </section>
+      ) : null}
+
+      <section className="premium-card overflow-hidden rounded-lg">
+        <TableHeader columns={["Journey", "Opportunity", "Confidence", "Priority", "State", "Rationale"]} />
+        <div className="divide-y divide-blue-500/12">
+          {opportunities.map((opportunity) => (
+            <div key={opportunity.id} className="grid grid-cols-[0.8fr_1.1fr_0.45fr_0.35fr_0.55fr_1.3fr] gap-3 px-4 py-3 text-sm">
+              <div className="text-blue-100/74">{opportunity.journey_type}</div>
+              <div className="min-w-0">
+                <div className="truncate font-semibold text-white">{opportunity.title}</div>
+                <div className="truncate text-xs text-blue-100/52">{opportunity.opportunity_type}</div>
+              </div>
+              <div className="font-semibold text-white">{opportunity.confidence}%</div>
+              <div className="text-blue-100/74">{opportunity.priority}</div>
+              <div>
+                <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${projectionStateTone(opportunity.projection_state)}`}>{opportunity.projection_state}</span>
+              </div>
+              <div className="text-blue-100/64">{opportunity.rationale}</div>
+            </div>
+          ))}
+          {!opportunities.length ? <div className="px-4 py-6 text-sm text-blue-100/58">No projected opportunities available yet.</div> : null}
+        </div>
+      </section>
+
+      <section className="premium-card overflow-hidden rounded-lg">
+        <TableHeader columns={["Imported snapshot", "State", "Imported at", "Superseded at"]} />
+        <div className="divide-y divide-blue-500/12">
+          {snapshots.map((snapshot) => (
+            <div key={snapshot.id} className="grid grid-cols-[1.1fr_0.5fr_0.7fr_0.7fr] gap-3 px-4 py-3 text-sm">
+              <div className="min-w-0">
+                <div className="truncate font-semibold text-white">{snapshot.source_package_reference}</div>
+                <div className="truncate text-xs text-blue-100/52">{snapshot.intelligence_version}</div>
+              </div>
+              <div className="text-blue-100/74">{snapshot.package_payload.package_state}</div>
+              <div className="text-blue-100/64">{formatDate(snapshot.imported_at)}</div>
+              <div className="text-blue-100/64">{snapshot.superseded_at ? formatDate(snapshot.superseded_at) : "active"}</div>
+            </div>
+          ))}
+          {!snapshots.length ? <div className="px-4 py-6 text-sm text-blue-100/58">No imported snapshots yet.</div> : null}
+        </div>
+      </section>
+    </section>
+  );
+}
+
 function ActivityTab({ data }: { data: CreatorDetailData }) {
   const rows = [
     ...data.syncRuns.map((run) => ({ id: run.id, source: `Sync ${run.sync_type}`, detail: `${run.status} / ${run.records_processed} records`, time: run.completed_at ?? run.started_at })),
@@ -327,4 +472,11 @@ function money(value: number | null | undefined) {
 
 function formatDate(value: string | null | undefined) {
   return value ? new Date(value).toLocaleString() : "unknown";
+}
+
+function projectionStateTone(state: string) {
+  if (state === "available") return "bg-emerald-500/14 text-emerald-200";
+  if (state === "accepted") return "bg-cyan-500/14 text-cyan-100";
+  if (state === "dismissed") return "bg-slate-500/16 text-slate-100";
+  return "bg-blue-400/12 text-blue-100";
 }

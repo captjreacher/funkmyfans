@@ -10,6 +10,7 @@
     "dev:creator-cockpit": "npm --workspace @funkmyfans/creator-cockpit run dev",
     "events:betterfans": "tsx scripts/betterfans-event-stream.ts",
     "smoke:creator-cockpit": "tsx scripts/creator-cockpit-smoke.ts",
+    "smoke:creator-intelligence": "tsx scripts/creator-intelligence-smoke.ts",
     "smoke:creator-cockpit:local": "tsx scripts/creator-cockpit-smoke.ts http://127.0.0.1:8787",
     "smoke:creator-cockpit:prod": "tsx scripts/creator-cockpit-smoke.ts",
     "build": "npm run build --workspaces",

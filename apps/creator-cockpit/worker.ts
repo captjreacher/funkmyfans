@@ -62,6 +62,11 @@ import type {
   CreatorPreferenceSettings,
   CreatorAiSafetySettings,
   CreatorSettingsBundle,
+  CreatorIntelligencePackageV1,
+  CreatorIntelligenceOpportunityProjection,
+  CreatorIntelligenceSnapshot,
+  CreatorIntelligenceSummary,
+  CreatorIntelligenceWorkspaceData,
   SettingsEmojiLevel,
   SettingsFlirtyLevel,
   SettingsSalesAggressiveness,
@@ -81,6 +86,7 @@ import type {
 } from "@funkmyfans/of-types";
 import { mapConversationInstanceToConversation, mapConversationRuntimeStatusToLifecycleState, mapTaskToQueue, mapTaskToQueueItem, summarizeEventType } from "@funkmyfans/of-types";
 import { createClient } from "@supabase/supabase-js";
+import moonsirenIntelligenceFixture from "./fixtures/moonsiren-creator-intelligence-package-v1.json";
 
 interface Env {
   ASSETS: Fetcher;
@@ -99,6 +105,7 @@ const jsonHeaders = {
 
 type SupabaseClient = ReturnType<typeof createServiceClient>;
 type AutomationActionResult = "task_created" | "draft_created" | "sent" | "failed" | "skipped";
+const moonSirenIntelligenceFixture = moonsirenIntelligenceFixture as CreatorIntelligencePackageV1;
 interface EventActionContext {
   subscriberId: string | null;
   chatId: string | null;
@@ -338,6 +345,25 @@ async function handleApi(request: Request, env: Env, url: URL, ctx: ExecutionCon
     );
   }
 
+  const creatorIntelligenceMatch = url.pathname.match(/^\/api\/creators\/([^/]+)\/intelligence$/);
+  if (request.method === "GET" && creatorIntelligenceMatch) {
+    const workspace = await getCreatorIntelligenceWorkspace(supabase, creatorIntelligenceMatch[1]);
+    return Response.json(workspace, { headers: jsonHeaders });
+  }
+
+  const creatorIntelligenceImportFixtureMatch = url.pathname.match(/^\/api\/creators\/([^/]+)\/intelligence\/import-fixture$/);
+  if (request.method === "POST" && creatorIntelligenceImportFixtureMatch) {
+    const workspace = await importCreatorIntelligencePackage(supabase, creatorIntelligenceImportFixtureMatch[1], moonSirenIntelligenceFixture);
+    return Response.json(workspace, { headers: jsonHeaders });
+  }
+
+  const creatorIntelligenceImportMatch = url.pathname.match(/^\/api\/creators\/([^/]+)\/intelligence\/import$/);
+  if (request.method === "POST" && creatorIntelligenceImportMatch) {
+    const body = (await request.json().catch(() => ({}))) as unknown;
+    const workspace = await importCreatorIntelligencePackage(supabase, creatorIntelligenceImportMatch[1], body);
+    return Response.json(workspace, { headers: jsonHeaders });
+  }
+
   if (request.method === "GET" && url.pathname === "/api/events") {
     const result = await supabase
       .from("of_events")
@@ -382,7 +408,204 @@ async function traceCreatorDetailRowsOrEmpty<T>(
   return result;
 }
 
-  if (request.method === "POST" && url.pathname === "/api/subscribers/score-all") {
+async function getCreatorIntelligenceWorkspace(supabase: SupabaseClient, creatorId: string): Promise<CreatorIntelligenceWorkspaceData> {
+  const [creator, snapshots, opportunities] = await Promise.all([
+    traceCreatorDetailQuery(
+      "creator_intelligence",
+      supabase.from("of_creators").select("id, username, display_name").eq("id", creatorId).single()
+    ),
+    traceCreatorDetailRowsOrEmpty(
+      "creator_intelligence_snapshots",
+      "creator_intelligence_snapshots",
+      supabase.from("creator_intelligence_snapshots").select("*").eq("creator_id", creatorId).order("imported_at", { ascending: false }).limit(20)
+    ),
+    traceCreatorDetailRowsOrEmpty(
+      "creator_intelligence_opportunity_projections",
+      "creator_intelligence_opportunity_projections",
+      supabase
+        .from("creator_intelligence_opportunity_projections")
+        .select("*")
+        .eq("creator_id", creatorId)
+        .order("priority", { ascending: true })
+        .order("created_at", { ascending: false })
+        .limit(100)
+    )
+  ]);
+
+  assertNoError(creator.error);
+  assertNoError(snapshots.error);
+  assertNoError(opportunities.error);
+  if (!creator.data) throw new Error("Creator not found");
+
+  const snapshotRows = (snapshots.data ?? []) as CreatorIntelligenceSnapshot[];
+  const latestSnapshot = snapshotRows[0] ?? null;
+  return {
+    creator: creator.data,
+    latest_snapshot: latestSnapshot,
+    summary: latestSnapshot ? buildCreatorIntelligenceSummary(latestSnapshot) : null,
+    snapshots: snapshotRows,
+    opportunities: (opportunities.data ?? []) as CreatorIntelligenceOpportunityProjection[]
+  };
+}
+
+async function importCreatorIntelligencePackage(
+  supabase: SupabaseClient,
+  creatorId: string,
+  payload: unknown
+): Promise<CreatorIntelligenceWorkspaceData> {
+  const packagePayload = normalizeCreatorIntelligencePackage(payload);
+  const creator = await supabase.from("of_creators").select("id, username, display_name").eq("id", creatorId).single();
+  assertNoError(creator.error);
+  if (!creator.data) throw new Error("Creator not found");
+
+  const existingSnapshot = await supabase
+    .from("creator_intelligence_snapshots")
+    .select("*")
+    .eq("creator_id", creatorId)
+    .eq("source_package_reference", packagePayload.source_package_reference)
+    .maybeSingle();
+  assertNoError(existingSnapshot.error);
+
+  const now = new Date().toISOString();
+  let snapshot = existingSnapshot.data as CreatorIntelligenceSnapshot | null;
+
+  if (!snapshot) {
+    await supabase
+      .from("creator_intelligence_snapshots")
+      .update({ superseded_at: now })
+      .eq("creator_id", creatorId)
+      .is("superseded_at", null);
+
+    const inserted = await supabase
+      .from("creator_intelligence_snapshots")
+      .insert({
+        creator_id: creatorId,
+        source_product: packagePayload.source_product,
+        contract_version: packagePayload.contract_version,
+        intelligence_version: packagePayload.intelligence_version,
+        source_package_reference: packagePayload.source_package_reference,
+        source_assessment_reference: packagePayload.source_assessment_reference,
+        package_payload: packagePayload,
+        imported_at: now,
+        superseded_at: null
+      })
+      .select("*")
+      .single();
+    assertNoError(inserted.error);
+    snapshot = inserted.data as CreatorIntelligenceSnapshot;
+  }
+
+  const opportunities = packagePayload.available_opportunities.map((opportunity) => ({
+    creator_id: creatorId,
+    intelligence_snapshot_id: snapshot.id,
+    source_opportunity_reference: opportunity.source_opportunity_reference,
+    source_scenario_reference: opportunity.source_scenario_reference,
+    journey_type: opportunity.journey_type,
+    opportunity_type: opportunity.opportunity_type,
+    title: opportunity.title,
+    rationale: opportunity.rationale,
+    confidence: opportunity.confidence,
+    priority: opportunity.priority,
+    projection_state: "available" as const
+  }));
+
+  if (opportunities.length) {
+    const result = await supabase.from("creator_intelligence_opportunity_projections").upsert(opportunities, {
+      onConflict: "intelligence_snapshot_id,source_opportunity_reference"
+    });
+    assertNoError(result.error);
+  }
+
+  return getCreatorIntelligenceWorkspace(supabase, creatorId);
+}
+
+function buildCreatorIntelligenceSummary(snapshot: CreatorIntelligenceSnapshot): CreatorIntelligenceSummary {
+  const payload = snapshot.package_payload;
+  return {
+    source_product: snapshot.source_product,
+    contract_version: snapshot.contract_version,
+    intelligence_version: snapshot.intelligence_version,
+    source_package_reference: snapshot.source_package_reference,
+    source_assessment_reference: snapshot.source_assessment_reference,
+    package_state: payload.package_state,
+    primary_vertical: payload.primary_vertical,
+    archetype_journey: payload.archetype_journey,
+    derived_scenario: payload.derived_scenario,
+    intelligence_summary: payload.intelligence_summary,
+    imported_at: snapshot.imported_at,
+    superseded_at: snapshot.superseded_at
+  };
+}
+
+function normalizeCreatorIntelligencePackage(payload: unknown): CreatorIntelligencePackageV1 {
+  if (!isRecord(payload)) throw new Error("Creator intelligence package must be an object");
+
+  const packageState = payload.package_state;
+  if (packageState !== "identified" && packageState !== "published" && packageState !== "superseded") {
+    throw new Error("Creator intelligence package requires a valid package_state");
+  }
+
+  const availableOpportunities = Array.isArray(payload.available_opportunities) ? payload.available_opportunities : [];
+  if (!availableOpportunities.length) {
+    throw new Error("Creator intelligence package requires available_opportunities");
+  }
+
+  return {
+    source_product: requireStringField(payload, "source_product"),
+    contract_version: requireStringField(payload, "contract_version"),
+    intelligence_version: requireStringField(payload, "intelligence_version"),
+    source_package_reference: requireStringField(payload, "source_package_reference"),
+    source_assessment_reference: requireStringField(payload, "source_assessment_reference"),
+    package_state: packageState,
+    primary_vertical: requireStringField(payload, "primary_vertical"),
+    archetype_journey: requireStringField(payload, "archetype_journey"),
+    derived_scenario: requireStringField(payload, "derived_scenario"),
+    intelligence_summary: requireStringField(payload, "intelligence_summary"),
+    available_opportunities: availableOpportunities.map((item, index) => {
+      if (!isRecord(item)) throw new Error(`Creator intelligence opportunity ${index + 1} must be an object`);
+      return {
+        source_opportunity_reference: requireStringField(item, "source_opportunity_reference"),
+        source_scenario_reference: stringOrNull(item.source_scenario_reference),
+        journey_type: requireStringField(item, "journey_type"),
+        opportunity_type: requireStringField(item, "opportunity_type"),
+        title: requireStringField(item, "title"),
+        rationale: requireStringField(item, "rationale"),
+        confidence: boundedPercentage(item.confidence, "confidence"),
+        priority: boundedPriority(item.priority, "priority")
+      };
+    })
+  };
+}
+
+function requireStringField(record: Record<string, unknown>, key: string) {
+  const value = record[key];
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(`Creator intelligence package field "${key}" must be a non-empty string`);
+  }
+  return value.trim();
+}
+
+function stringOrNull(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function boundedPercentage(value: unknown, label: string) {
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 100) {
+    throw new Error(`Creator intelligence package field "${label}" must be a number between 0 and 100`);
+  }
+  return Math.round(parsed);
+}
+
+function boundedPriority(value: unknown, label: string) {
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 100) {
+    throw new Error(`Creator intelligence package field "${label}" must be a number between 0 and 100`);
+  }
+  return Math.round(parsed);
+}
+
+ if (request.method === "POST" && url.pathname === "/api/subscribers/score-all") {
     const summary = await recalculateAllRelationshipScores(supabase);
     return Response.json(summary, { headers: jsonHeaders });
   }
