@@ -13,6 +13,7 @@
     "smoke:creator-intelligence": "tsx scripts/creator-intelligence-smoke.ts",
     "smoke:playbook-proposals": "tsx scripts/playbook-proposal-smoke.ts",
     "smoke:creator-cockpit:local": "tsx scripts/creator-cockpit-smoke.ts http://127.0.0.1:8787",
+    "smoke:cip-3": "tsx scripts/cip-3-smoke.ts",
     "smoke:creator-cockpit:prod": "tsx scripts/creator-cockpit-smoke.ts",
     "build": "npm run build --workspaces",
     "typecheck": "npm run typecheck --workspaces"
