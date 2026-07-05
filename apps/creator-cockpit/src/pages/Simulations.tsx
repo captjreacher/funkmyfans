@@ -331,6 +331,16 @@ export function Simulations({ initialScriptId }: { initialScriptId?: string }) {
                 <OutcomeRow label="Flow" value={flowLabel(simulation.simulation.script?.name ?? selectedScript?.name ?? "unknown")} />
                 <OutcomeRow label="Scenario" value={simulation.simulation.scenario?.label ?? selectedScenario?.label ?? "unknown"} />
                 <OutcomeRow label="Subscriber" value={simulation.simulation.simulated_subscriber?.name ?? selectedSubscriber?.name ?? "default"} />
+                <div className="rounded-2xl border border-blue-500/15 bg-[#0D1B2A]/58 p-3">
+                  <div className="text-xs font-semibold uppercase tracking-[0.16em] text-cyan-200/78">Relationship context</div>
+                  <div className="mt-2 space-y-1.5 text-sm">
+                    <OutcomeRow label="Present" value={simulation.relationship_context ? "yes" : "no"} />
+                    <OutcomeRow label="Opening posture" value={simulation.selected_opening_posture ?? "standard"} />
+                    <OutcomeRow label="Known sources" value={formatList(simulation.relationship_context?.known_sources)} />
+                    <OutcomeRow label="Downstream usability" value={simulation.relationship_context?.downstream_usability ?? "n/a"} />
+                    <OutcomeRow label="Warnings" value={formatList(simulation.relationship_context?.warnings)} />
+                  </div>
+                </div>
                 <OutcomeRow label="Last error" value={simulation.simulation.last_error ?? "none"} />
                 <div className="grid gap-2 pt-2 sm:grid-cols-2">
                   <button type="button" onClick={() => void runSimulationAction(() => simulationFastForward(simulation.simulation.id))} disabled={busy} className="rounded-xl border border-blue-400/20 bg-[#102338]/72 px-3 py-2 text-sm font-semibold text-blue-50 disabled:opacity-45">
@@ -424,6 +434,11 @@ function formatDate(value: string | null | undefined) {
 
 function flowLabel(value: string) {
   return value.replace(/\bScripts\b/g, "Conversation Flows").replace(/\bScript\b/g, "Flow");
+}
+
+function formatList(values: string[] | undefined | null) {
+  if (!values?.length) return "none";
+  return values.join(", ");
 }
 
 function flowForJourney(journey: OfRevenueJourney, workspace: ScriptsWorkspaceData | null) {

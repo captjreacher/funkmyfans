@@ -790,11 +790,19 @@ function validateNsp6ShortPlaybookShape(
   if (stringValue(workspace.templateKey) !== "new_subscriber_short_playbook") {
     failures.push(`/api/scripts/workspace: expected New Subscriber Short Playbook templateKey=new_subscriber_short_playbook, got ${describeValue(workspace.templateKey)}`);
   }
-  if (stringValue(workspace.templateVersion) !== "nsp-6a") {
-    failures.push(`/api/scripts/workspace: expected New Subscriber Short Playbook templateVersion=nsp-6a, got ${describeValue(workspace.templateVersion)}`);
+  if (stringValue(workspace.templateVersion) !== "nsp-6c") {
+    failures.push(`/api/scripts/workspace: expected New Subscriber Short Playbook templateVersion=nsp-6c, got ${describeValue(workspace.templateVersion)}`);
   }
   if (stringValue(workspace.archetypeKey) !== "girl_next_door") {
     failures.push(`/api/scripts/workspace: expected New Subscriber Short Playbook archetypeKey=girl_next_door, got ${describeValue(workspace.archetypeKey)}`);
+  }
+  const openingVariables = isRecord(script.builder_config) && Array.isArray(script.builder_config.variables) ? script.builder_config.variables : [];
+  if (!openingVariables.some((item) => isRecord(item) && stringValue(item.key) === "opening_posture")) {
+    failures.push("/api/scripts/workspace: expected New Subscriber Short Playbook to expose opening_posture variable");
+  }
+  const openingStep = steps.find((step) => stringValue(step.step_type) === "question" && stringValue(step.body ?? step.message_body).includes("{{opening_line}}"));
+  if (!stringValue(openingStep?.body ?? openingStep?.message_body).includes("{{opening_line}}")) {
+    failures.push("/api/scripts/workspace: expected New Subscriber Short Playbook opening to use opening_line");
   }
 
   const routeStep = steps.find((step) =>
@@ -836,9 +844,12 @@ async function runNewSubscriberShortPlaybookAcceptance(
 
   const paths = [
     {
-      key: "engaged",
-      username: `smoke_short_engaged_${runKey}`,
-      name: "Smoke Short Engaged Fan",
+      key: "no_context_standard",
+      relationshipContext: null,
+      expectedOpeningPosture: "standard",
+      expectedOpeningFragment: "I am glad you made it in and I want to keep this easy and natural.",
+      username: `smoke_short_standard_${runKey}`,
+      name: "Smoke Short Standard Fan",
       reply: "I just wanted to say hey and see what you are about.",
       expectedOutcome: "engaged",
       expectedQueueTitle: "Relationship continuation",
@@ -851,9 +862,21 @@ async function runNewSubscriberShortPlaybookAcceptance(
       expectedOpportunityForced: false
     },
     {
-      key: "buying_signal",
-      username: `smoke_short_buy_${runKey}`,
-      name: "Smoke Short Buyer Fan",
+      key: "usable_warm",
+      relationshipContext: {
+        identity_status: "exact",
+        identity_confidence: 96,
+        downstream_usability: "usable",
+        known_sources: ["instagram"],
+        relationship_posture: "warm",
+        relationship_signals: ["recent_follow", "story_reply"],
+        commercial_signal_summary: "Warm Instagram context with a strong first-touch signal.",
+        warnings: []
+      },
+      expectedOpeningPosture: "warm",
+      expectedOpeningFragment: "I am really glad you are here again and I want to keep this warm and easy.",
+      username: `smoke_short_warm_${runKey}`,
+      name: "Smoke Short Warm Fan",
       reply: "How much is the paid welcome treat?",
       expectedOutcome: "buying_signal",
       expectedQueueTitle: "Buying signal opportunity",
@@ -866,9 +889,21 @@ async function runNewSubscriberShortPlaybookAcceptance(
       expectedOpportunityForced: true
     },
     {
-      key: "exception",
-      username: `smoke_short_exception_${runKey}`,
-      name: "Smoke Short Exception Fan",
+      key: "qualified_familiar",
+      relationshipContext: {
+        identity_status: "probable",
+        identity_confidence: 78,
+        downstream_usability: "qualified",
+        known_sources: ["instagram"],
+        relationship_posture: "familiar",
+        relationship_signals: ["replies_often"],
+        commercial_signal_summary: "Probable familiar Instagram context.",
+        warnings: []
+      },
+      expectedOpeningPosture: "familiar",
+      expectedOpeningFragment: "you feel a little familiar, so I want to keep this easy and natural.",
+      username: `smoke_short_familiar_${runKey}`,
+      name: "Smoke Short Familiar Fan",
       reply: "Can we move off platform for something explicit?",
       expectedOutcome: "exception",
       expectedQueueTitle: "Human review",
@@ -881,9 +916,68 @@ async function runNewSubscriberShortPlaybookAcceptance(
       expectedOpportunityForced: false
     },
     {
-      key: "silence",
-      username: `smoke_short_silent_${runKey}`,
-      name: "Smoke Short Silent Fan",
+      key: "possible_restricted",
+      relationshipContext: {
+        identity_status: "possible",
+        identity_confidence: 42,
+        downstream_usability: "restricted",
+        known_sources: ["instagram"],
+        relationship_posture: "warm",
+        relationship_signals: ["possible_match"],
+        commercial_signal_summary: "Restricted possible match with no downstream permission.",
+        warnings: []
+      },
+      expectedOpeningPosture: "standard",
+      expectedOpeningFragment: "I am glad you made it in and I want to keep this easy and natural.",
+      username: `smoke_short_restricted_${runKey}`,
+      name: "Smoke Short Restricted Fan",
+      reply: null,
+      expectedOutcome: "no_response",
+      expectedOutboundMessages: 2
+    },
+    {
+      key: "conflict_withheld",
+      relationshipContext: {
+        identity_status: "withheld",
+        identity_confidence: null,
+        downstream_usability: "withheld",
+        known_sources: ["instagram"],
+        relationship_posture: "warm",
+        relationship_signals: ["conflict_flag"],
+        commercial_signal_summary: "Identity is withheld and should stay conservative.",
+        warnings: ["withheld_identity", "conflict"]
+      },
+      expectedOpeningPosture: "standard",
+      expectedOpeningFragment: "I am glad you made it in and I want to keep this easy and natural.",
+      username: `smoke_short_withheld_${runKey}`,
+      name: "Smoke Short Withheld Fan",
+      reply: "I am just looking around.",
+      expectedOutcome: "engaged",
+      expectedQueueTitle: "Relationship continuation",
+      expectedDecisionType: "relationship_continuation",
+      expectedOpportunityRoute: "relationship_continuation",
+      expectedOpportunityClassification: "relationship",
+      expectedOpportunityCategory: "relationship",
+      expectedOpportunityTitle: "Relationship continuation",
+      expectedOpportunitySummary: "The subscriber is engaged and a relationship continuation is the right next step.",
+      expectedOpportunityForced: false
+    },
+    {
+      key: "incomplete_warnings",
+      relationshipContext: {
+        identity_status: "possible",
+        identity_confidence: 55,
+        downstream_usability: "qualified",
+        known_sources: ["instagram"],
+        relationship_posture: "familiar",
+        relationship_signals: ["incomplete_profile"],
+        commercial_signal_summary: "Incomplete context with warnings should stay conservative.",
+        warnings: ["incomplete_context"]
+      },
+      expectedOpeningPosture: "standard",
+      expectedOpeningFragment: "I am glad you made it in and I want to keep this easy and natural.",
+      username: `smoke_short_warnings_${runKey}`,
+      name: "Smoke Short Warnings Fan",
       reply: null,
       expectedOutcome: "no_response",
       expectedOutboundMessages: 2
@@ -891,14 +985,32 @@ async function runNewSubscriberShortPlaybookAcceptance(
   ];
 
   for (const path of paths) {
-    const run = await startFunnelSimulation(creatorId, scriptId, {
-      username: path.username,
-      name: path.name
-    }, failures);
+    const run = await startFunnelSimulation(
+      creatorId,
+      scriptId,
+      { username: path.username, name: path.name },
+      failures,
+      path.relationshipContext
+    );
     if (!run) continue;
 
     let detail = await readSimulationDetail(run.simulationId, failures);
     if (!detail) continue;
+    const simulation = isRecord(detail.simulation) ? detail.simulation : {};
+    const openingText = firstOutboundText(detail);
+    const selectedOpeningPosture = stringValue(simulation.selected_opening_posture ?? detail.selected_opening_posture);
+    if (selectedOpeningPosture !== path.expectedOpeningPosture) {
+      failures.push(`[short:${path.key}] expected opening posture ${path.expectedOpeningPosture}, got ${describeValue(selectedOpeningPosture)}`);
+    }
+    if (!openingText.includes(path.expectedOpeningFragment)) {
+      failures.push(`[short:${path.key}] expected opening text to include ${describeValue(path.expectedOpeningFragment)}, got ${describeValue(openingText)}`);
+    }
+    if (path.relationshipContext) {
+      validateRelationshipContextProjection(isRecord(detail.relationship_context) ? detail.relationship_context : null, failures, `[short:${path.key}].relationship_context`);
+    } else if (detail.relationship_context !== null && typeof detail.relationship_context !== "undefined") {
+      failures.push(`[short:${path.key}] expected no relationship context, got ${describeValue(detail.relationship_context)}`);
+    }
+
     let summary = summarizeSimulationDetail(detail);
     if (summary.conversationStatus !== "waiting_reply") {
       failures.push(`[short:${path.key}] expected waiting_reply after launch, got ${summary.conversationStatus}`);
@@ -963,6 +1075,9 @@ async function runNewSubscriberShortPlaybookAcceptance(
           if (workspaceOpportunity) {
             validateOpportunitySummary(workspaceOpportunity, failures, `[short:${path.key}].conversation_workspace.current_opportunity`);
           }
+          if (stringValue(workspace.selected_opening_posture) !== path.expectedOpeningPosture) {
+            failures.push(`[short:${path.key}] expected conversation workspace opening posture ${path.expectedOpeningPosture}, got ${describeValue(workspace.selected_opening_posture)}`);
+          }
         }
         if (Boolean(queueItem.metadata?.opportunity_forced) !== path.expectedOpportunityForced) {
           failures.push(`[short:${path.key}] expected opportunity_forced=${String(path.expectedOpportunityForced)}, got ${describeValue(queueItem.metadata?.opportunity_forced)}`);
@@ -1004,13 +1119,54 @@ async function runNewSubscriberShortPlaybookAcceptance(
         if (workspace.current_opportunity) {
           failures.push(`[short:${path.key}] expected no linked opportunity in conversation workspace for no-response path`);
         }
+        if (stringValue(workspace.selected_opening_posture) !== path.expectedOpeningPosture) {
+          failures.push(`[short:${path.key}] expected conversation workspace opening posture ${path.expectedOpeningPosture}, got ${describeValue(workspace.selected_opening_posture)}`);
+        }
       }
     }
 
     if (!summary.outcomeSummary.includes(path.expectedOutcome)) {
       failures.push(`[short:${path.key}] expected outcome ${path.expectedOutcome}, got ${summary.outcomeSummary}`);
     }
-    notes.push(`[short:${path.key}] status=${summary.conversationStatus} outcome=${summary.outcomeSummary} timeline=${summary.timeline}`);
+    notes.push(`[short:${path.key}] posture=${selectedOpeningPosture} status=${summary.conversationStatus} outcome=${summary.outcomeSummary} timeline=${summary.timeline}`);
+  }
+}
+
+function validateRelationshipContextProjection(value: JsonRecord | null, failures: string[], endpoint: string) {
+  if (!value) {
+    failures.push(`${endpoint}: expected projected relationship context object`);
+    return;
+  }
+  if (value.identity_status !== null && typeof value.identity_status !== "string") {
+    failures.push(`${endpoint}: expected identity_status to be a string or null`);
+  }
+  if (value.identity_confidence !== null && typeof value.identity_confidence !== "number") {
+    failures.push(`${endpoint}: expected identity_confidence to be a number or null`);
+  }
+  if (value.downstream_usability !== null && typeof value.downstream_usability !== "string") {
+    failures.push(`${endpoint}: expected downstream_usability to be a string or null`);
+  }
+  if (!Array.isArray(value.known_sources)) {
+    failures.push(`${endpoint}: expected known_sources to be an array`);
+  }
+  if (value.relationship_posture !== null && typeof value.relationship_posture !== "string") {
+    failures.push(`${endpoint}: expected relationship_posture to be a string or null`);
+  }
+  if (!Array.isArray(value.relationship_signals)) {
+    failures.push(`${endpoint}: expected relationship_signals to be an array`);
+  }
+  if (value.commercial_signal_summary !== null && typeof value.commercial_signal_summary !== "string") {
+    failures.push(`${endpoint}: expected commercial_signal_summary to be a string or null`);
+  }
+  if (!Array.isArray(value.warnings)) {
+    failures.push(`${endpoint}: expected warnings to be an array`);
+  }
+
+  const forbiddenKeys = ["evidence_references", "withheld_fields", "raw_sources", "raw_payload", "crm", "score", "scoring"];
+  for (const key of forbiddenKeys) {
+    if (key in value) {
+      failures.push(`${endpoint}: leaked forbidden field ${key}`);
+    }
   }
 }
 
@@ -1081,7 +1237,8 @@ async function startFunnelSimulation(
   creatorId: string,
   scriptId: string,
   input: { username: string; name: string },
-  failures: string[]
+  failures: string[],
+  relationshipContext: JsonRecord | null = null
 ) {
   const result = await fetchEndpoint(`/api/creators/${encodeURIComponent(creatorId)}/simulations`, {
     method: "POST",
@@ -1089,6 +1246,7 @@ async function startFunnelSimulation(
     body: JSON.stringify({
       scriptId,
       eventType: "subscriber_created",
+      relationshipContext: relationshipContext ?? undefined,
       eventPayload: {
         fanId: input.username,
         subscriber: {
@@ -1254,6 +1412,7 @@ function summarizeSimulationDetail(detail: JsonRecord) {
   return {
     simulationStatus: stringValue(simulation.status),
     conversationStatus: stringValue(conversation.status),
+    selectedOpeningPosture: stringValue(simulation.selected_opening_posture ?? detail.selected_opening_posture ?? conversation.variables?.opening_posture),
     waitingReason: normalizeWaitingReason(stringValue(conversation.waiting_reason)),
     queueLikeOutboundCount: outbound.filter((message) => stringValue(message.status) === "pending_approval" || stringValue(message.approval_status) === "pending").length,
     outboundSummary: outbound.map((message) => `${stringValue(message.status)}/${stringValue(message.approval_status)}`).join(",") || "none",
@@ -1269,6 +1428,12 @@ function summarizeSimulationDetail(detail: JsonRecord) {
       `conversation_summary=${String(variables.conversation_summary ?? variables.last_reply_text ?? "")}`
     ].join(" ")
   };
+}
+
+function firstOutboundText(detail: JsonRecord) {
+  const first = arrayOfObjects(detail.outboundMessages)[0];
+  if (!isRecord(first)) return "";
+  return stringValue(first.final_text ?? first.draft_text ?? first.message_body);
 }
 
 function normalizeWaitingReason(value: string) {

@@ -177,6 +177,16 @@ export function ConversationWorkspace({
               <ContextRow label="Conversation" value={conversation?.status ?? "unknown"} />
               <ContextRow label="Execution" value={conversation?.execution_mode ?? "unknown"} />
             </div>
+            <div className="mt-4 rounded-2xl border border-blue-500/15 bg-[#0D1B2A]/58 p-4">
+              <div className="text-xs font-semibold uppercase tracking-[0.16em] text-cyan-200/78">Relationship context</div>
+              <div className="mt-3 space-y-2 text-sm text-blue-100/68">
+                <ContextRow label="Present" value={data.relationship_context ? "yes" : "no"} />
+                <ContextRow label="Opening posture" value={data.selected_opening_posture ?? "standard"} />
+                <ContextRow label="Known sources" value={formatList(data.relationship_context?.known_sources)} />
+                <ContextRow label="Downstream usability" value={data.relationship_context?.downstream_usability ?? "n/a"} />
+                <ContextRow label="Warnings" value={formatList(data.relationship_context?.warnings)} />
+              </div>
+            </div>
           </div>
         </div>
       </section>
@@ -270,6 +280,11 @@ function formatPersonLabel(displayName: string | null | undefined, username: str
 
 function formatDate(value: string | null | undefined) {
   return value ? new Date(value).toLocaleString() : "unknown";
+}
+
+function formatList(values: string[] | undefined | null) {
+  if (!values?.length) return "none";
+  return values.join(", ");
 }
 
 function firstNonEmpty(...values: Array<string | null | undefined>) {
