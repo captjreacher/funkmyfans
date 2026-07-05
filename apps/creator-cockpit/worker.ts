@@ -413,7 +413,7 @@ async function handleApi(request: Request, env: Env, url: URL, ctx: ExecutionCon
       return Response.json({ error: "Proposal id must be a database UUID" }, { status: 400, headers: jsonHeaders });
     }
     const draft = await createOrGetBuilderDraftFromProposal(supabase, builderDraftFromProposalMatch[1]);
-    return Response.json({ script: draft }, { status: 201, headers: jsonHeaders });
+    return Response.json({ script: draft }, { status: request.method === "POST" ? 201 : 200, headers: jsonHeaders });
   }
 
   if (request.method === "GET" && url.pathname === "/api/events") {
@@ -699,9 +699,6 @@ async function createOrGetBuilderDraftFromProposal(
     }
   }
 
-  // Build draft name: prepend "[Draft]" for clarity
-  const draftName = `[Draft] ${proposal.proposal_title}`;
-
   // Build builder_config with source metadata
   const builderConfig: ScriptBuilderConfig = {
     schemaVersion: 1,
@@ -718,6 +715,42 @@ async function createOrGetBuilderDraftFromProposal(
     cip_version: "cip-3",
     created_from_proposal_at: new Date().toISOString()
   };
+
+  // Build draft name: prepend "[Draft]" for clarity
+  const draftName = `[Draft] ${proposal.proposal_title}`;
+
+  const namedDraftResult = await supabase
+    .from("of_message_scripts")
+    .select("*")
+    .eq("creator_id", proposal.creator_id)
+    .eq("name", draftName)
+    .maybeSingle();
+  assertNoError(namedDraftResult.error);
+  if (namedDraftResult.data) {
+    const existingDraft = namedDraftResult.data as OfMessageScript;
+    const existingConfig = normalizeBuilderConfig(existingDraft.builder_config);
+    if (existingConfig.source_proposal_id === proposalId) {
+      return existingDraft;
+    }
+
+    const refreshed = await supabase
+      .from("of_message_scripts")
+      .update({
+        description: `Builder draft created from accepted proposal: ${proposal.proposal_title}`,
+        trigger_event_type: proposal.proposal_payload.entry_trigger ?? "new_subscriber",
+        action_mode: "draft_for_approval",
+        auto_send_enabled: false,
+        requires_approval: true,
+        cooldown_hours: 24,
+        max_sends_per_fan: 1,
+        builder_config: builderConfig
+      })
+      .eq("id", existingDraft.id)
+      .select("*")
+      .single();
+    assertNoError(refreshed.error);
+    return refreshed.data as OfMessageScript;
+  }
 
   // Insert the draft script — always inactive, manual_only
   const insertPayload = {
@@ -3647,30 +3680,8 @@ function rowAction(value: unknown) {
 async function createMessageScript(supabase: SupabaseClient, creatorId: string, body: Partial<MessageScriptTemplate>) {
   if (!body.name?.trim()) throw new Error("Script name is required");
   if (!body.triggerEventType?.trim()) throw new Error("Script triggerEventType is required");
-  const legacyBody = body as Partial<MessageScriptTemplate> & { action_mode?: unknown };
-  const actionMode = parseActionMode(body.actionMode ?? legacyBody.action_mode, "draft_for_approval");
-  const normalizedTags = normalizeStringArray(body.tags);
-  const versionNumber = body.versionNumber == null ? 1 : nonNegativeInteger(body.versionNumber, 1);
-  if (versionNumber < 1) throw new Error("Version number must be at least 1");
-
-  const insertPayload = {
-      creator_id: creatorId,
-      name: body.name.trim(),
-      description: typeof body.description === "string" ? body.description.trim() || null : null,
-      trigger_event_type: body.triggerEventType.trim(),
-      status: "inactive",
-      action_mode: actionMode,
-      auto_send_enabled: Boolean(body.autoSendEnabled),
-      requires_approval: body.requiresApproval ?? actionMode !== "auto_send",
-      cooldown_hours: nonNegativeInteger(body.cooldownHours, 24),
-      max_sends_per_fan: nonNegativeInteger(body.maxSendsPerFan, 1),
-      folder_name: typeof body.folderName === "string" ? body.folderName.trim() || null : null,
-      category: typeof body.category === "string" ? body.category.trim() || null : null,
-      tags: normalizedTags,
-      version_number: versionNumber,
-      source_script_id: body.sourceScriptId && isUuid(body.sourceScriptId) ? body.sourceScriptId : null,
-      builder_config: normalizeBuilderConfig(body.builderConfig)
-    } satisfies Record<string, unknown>;
+  const insertPayload = buildMessageScriptInsertPayload(creatorId, body);
+  const actionMode = String(insertPayload.action_mode);
 
   let inserted = await supabase
     .from("of_message_scripts")
@@ -3692,6 +3703,33 @@ async function createMessageScript(supabase: SupabaseClient, creatorId: string, 
   }
 
   return (await listCreatorScripts(supabase, creatorId)).find((item) => item.id === script.id) ?? script;
+}
+
+function buildMessageScriptInsertPayload(creatorId: string, body: Partial<MessageScriptTemplate>) {
+  const legacyBody = body as Partial<MessageScriptTemplate> & { action_mode?: unknown };
+  const actionMode = parseActionMode(body.actionMode ?? legacyBody.action_mode, "draft_for_approval");
+  const normalizedTags = normalizeStringArray(body.tags);
+  const versionNumber = body.versionNumber == null ? 1 : nonNegativeInteger(body.versionNumber, 1);
+  if (versionNumber < 1) throw new Error("Version number must be at least 1");
+
+  return {
+    creator_id: creatorId,
+    name: body.name?.trim() ?? "",
+    description: typeof body.description === "string" ? body.description.trim() || null : null,
+    trigger_event_type: body.triggerEventType?.trim() ?? "",
+    status: "inactive",
+    action_mode: actionMode,
+    auto_send_enabled: Boolean(body.autoSendEnabled),
+    requires_approval: body.requiresApproval ?? actionMode !== "auto_send",
+    cooldown_hours: nonNegativeInteger(body.cooldownHours, 24),
+    max_sends_per_fan: nonNegativeInteger(body.maxSendsPerFan, 1),
+    folder_name: typeof body.folderName === "string" ? body.folderName.trim() || null : null,
+    category: typeof body.category === "string" ? body.category.trim() || null : null,
+    tags: normalizedTags,
+    version_number: versionNumber,
+    source_script_id: body.sourceScriptId && isUuid(body.sourceScriptId) ? body.sourceScriptId : null,
+    builder_config: normalizeBuilderConfig(body.builderConfig)
+  } satisfies Record<string, unknown>;
 }
 
 async function updateMessageScript(supabase: SupabaseClient, scriptId: string, body: Record<string, unknown>) {
@@ -3830,80 +3868,150 @@ async function deleteMessageScript(supabase: SupabaseClient, scriptId: string) {
 }
 
 async function ensureAgencySeedLibrary(supabase: SupabaseClient, creators: OfCreator[]) {
+  if (!creators.length) return;
+
+  const templates = agencySeedLibrary();
+  const creatorIds = creators.map((creator) => creator.id);
+  const state = await loadAgencySeedLibraryState(supabase, creatorIds);
+  const missingScripts: Array<{ creatorId: string; template: MessageScriptTemplate }> = [];
+  const refreshJobs: Array<{ scriptId: string; template: MessageScriptTemplate }> = [];
+
   for (const creator of creators) {
-    for (const template of agencySeedLibrary()) {
-      await ensureSeedMessageScript(supabase, creator.id, template);
+    const scriptsForCreator = state.scriptsByCreatorAndName.get(creator.id) ?? new Map<string, Record<string, unknown>>();
+    for (const template of templates) {
+      const existing = scriptsForCreator.get(template.name.toLowerCase()) ?? null;
+      if (!existing) {
+        missingScripts.push({ creatorId: creator.id, template });
+        continue;
+      }
+
+      const stepCount = state.stepCountByScriptId.get(String(existing.id)) ?? 0;
+      if (seedScriptNeedsRefresh(existing, stepCount, template)) {
+        refreshJobs.push({ scriptId: String(existing.id), template });
+      }
+    }
+  }
+
+  if (missingScripts.length) {
+    const insertedScripts = await insertSeedMessageScripts(
+      supabase,
+      missingScripts.map(({ creatorId, template }) => buildMessageScriptInsertPayload(creatorId, template))
+    );
+    const stepRows = insertedScripts.flatMap((script) => {
+      const template = missingScripts.find(
+        (candidate) =>
+          candidate.creatorId === String(script.creator_id) &&
+          candidate.template.name.toLowerCase() === String(script.name).toLowerCase()
+      )?.template;
+      return template ? buildSeedStepRows(String(script.id), template.steps) : [];
+    });
+    if (stepRows.length) {
+      const stepInsertResult = await supabase.from("of_message_script_steps").insert(stepRows);
+      assertNoError(stepInsertResult.error);
+    }
+  }
+
+  if (refreshJobs.length) {
+    const deleteResult = await supabase.from("of_message_script_steps").delete().in(
+      "script_id",
+      refreshJobs.map((job) => job.scriptId)
+    );
+    assertNoError(deleteResult.error);
+
+    for (const job of refreshJobs) {
+      await updateMessageScript(supabase, job.scriptId, job.template as unknown as Record<string, unknown>);
+      const stepInsertResult = await supabase.from("of_message_script_steps").insert(buildSeedStepRows(job.scriptId, job.template.steps));
+      assertNoError(stepInsertResult.error);
     }
   }
 }
 
-async function ensureSeedMessageScript(supabase: SupabaseClient, creatorId: string, template: MessageScriptTemplate) {
-  const existing = await findCreatorScriptByName(supabase, creatorId, template.name);
-  if (existing?.id) {
-    await refreshSeedMessageScriptIfOutdated(supabase, String(existing.id), template);
-    await ensureSeedScriptStepsIfMissing(supabase, String(existing.id), template);
-    return existing;
-  }
-
-  try {
-    return await createMessageScript(supabase, creatorId, template);
-  } catch (error) {
-    if (!isDuplicateKeyError(error)) throw error;
-    const racedExisting = await findCreatorScriptByName(supabase, creatorId, template.name);
-    if (!racedExisting?.id) throw error;
-    await ensureSeedScriptStepsIfMissing(supabase, String(racedExisting.id), template);
-    return racedExisting;
-  }
-}
-
-async function refreshSeedMessageScriptIfOutdated(supabase: SupabaseClient, scriptId: string, template: MessageScriptTemplate) {
-  const templateKey = template.builderConfig?.workspace?.templateKey;
-  const templateVersion = template.builderConfig?.workspace?.templateVersion;
-  if (!templateKey || !templateVersion) return;
-
-  const existing = await supabase.from("of_message_scripts").select("id, builder_config").eq("id", scriptId).single();
-  assertNoError(existing.error);
-  const builderConfig = normalizeBuilderConfig(existing.data?.builder_config);
-  if (builderConfig.workspace?.templateKey !== templateKey) return;
-  if (builderConfig.workspace?.templateVersion === templateVersion) {
-    const existingSteps = await supabase.from("of_message_script_steps").select("id").eq("script_id", scriptId);
-    assertNoError(existingSteps.error);
-    if ((existingSteps.data ?? []).length >= template.steps.length) return;
-  }
-
-  const deleted = await supabase.from("of_message_script_steps").delete().eq("script_id", scriptId);
-  assertNoError(deleted.error);
-  try {
-    await insertScriptTemplateSteps(supabase, scriptId, template.steps);
-  } catch (error) {
-    if (!isDuplicateKeyError(error)) throw error;
-  }
-  await updateMessageScript(supabase, scriptId, template as unknown as Record<string, unknown>);
-}
-
-async function findCreatorScriptByName(supabase: SupabaseClient, creatorId: string, name: string) {
-  const result = await supabase
+async function loadAgencySeedLibraryState(supabase: SupabaseClient, creatorIds: string[]) {
+  const scriptsResult = await supabase
     .from("of_message_scripts")
-    .select("id, name")
-    .eq("creator_id", creatorId)
-    .ilike("name", name)
-    .order("updated_at", { ascending: false })
-    .limit(1);
-  assertNoError(result.error);
-  return result.data?.[0] ?? null;
+    .select("id, creator_id, name, builder_config")
+    .in("creator_id", creatorIds);
+  assertNoError(scriptsResult.error);
+
+  const scripts = (scriptsResult.data ?? []) as Array<Record<string, unknown>>;
+  const scriptIds = scripts.map((script) => String(script.id)).filter(Boolean);
+  const stepsResult = scriptIds.length
+    ? await supabase.from("of_message_script_steps").select("id, script_id").in("script_id", scriptIds)
+    : { data: [], error: null };
+  assertNoError(stepsResult.error);
+
+  const scriptsByCreatorAndName = new Map<string, Map<string, Record<string, unknown>>>();
+  for (const script of scripts) {
+    const creatorId = String(script.creator_id);
+    const creatorScripts = scriptsByCreatorAndName.get(creatorId) ?? new Map<string, Record<string, unknown>>();
+    creatorScripts.set(String(script.name).toLowerCase(), script);
+    scriptsByCreatorAndName.set(creatorId, creatorScripts);
+  }
+
+  const stepCountByScriptId = new Map<string, number>();
+  for (const step of (stepsResult.data ?? []) as Array<Record<string, unknown>>) {
+    const scriptId = String(step.script_id);
+    stepCountByScriptId.set(scriptId, (stepCountByScriptId.get(scriptId) ?? 0) + 1);
+  }
+
+  return { scriptsByCreatorAndName, stepCountByScriptId };
 }
 
-async function ensureSeedScriptStepsIfMissing(supabase: SupabaseClient, scriptId: string, template: MessageScriptTemplate) {
-  if (!template.steps?.length) return;
-  const existingSteps = await supabase.from("of_message_script_steps").select("id").eq("script_id", scriptId).limit(1);
-  assertNoError(existingSteps.error);
-  if (existingSteps.data?.length) return;
+function seedScriptNeedsRefresh(existing: Record<string, unknown>, existingStepCount: number, template: MessageScriptTemplate) {
+  const builderConfig = normalizeBuilderConfig(existing.builder_config);
+  const templateKey = template.builderConfig?.workspace?.templateKey ?? null;
+  const templateVersion = template.builderConfig?.workspace?.templateVersion ?? null;
+  const existingTemplateKey = builderConfig.workspace?.templateKey ?? null;
+  const existingTemplateVersion = builderConfig.workspace?.templateVersion ?? null;
+  if (existingTemplateKey !== templateKey) return false;
+  if (existingTemplateVersion !== templateVersion) return true;
+  return existingStepCount < template.steps.length;
+}
 
-  try {
-    await insertScriptTemplateSteps(supabase, scriptId, template.steps);
-  } catch (error) {
-    if (!isDuplicateKeyError(error)) throw error;
+function buildSeedStepRows(scriptId: string, steps: ScriptStepTemplate[]) {
+  const idMap = new Map<string, string>();
+  for (const step of steps) {
+    if (step.id) idMap.set(step.id, isUuid(step.id) ? step.id : crypto.randomUUID());
   }
+
+  return steps.map((step) => {
+    const id = step.id ? idMap.get(step.id) ?? (isUuid(step.id) ? step.id : crypto.randomUUID()) : crypto.randomUUID();
+    const metadata = normalizeStepMetadata(step.metadata);
+    const branchRules = metadata.branchRules?.map((rule) => ({
+      ...rule,
+      nextStepId: rule.nextStepId ? idMap.get(rule.nextStepId) ?? rule.nextStepId : null
+    }));
+    return {
+      ...(id ? { id } : {}),
+      script_id: scriptId,
+      step_order: nonNegativeInteger(step.order, 0),
+      step_type: step.type,
+      message_body: step.body ?? null,
+      delay_minutes: step.delayMinutes ?? null,
+      condition_key: step.condition?.key ?? null,
+      condition_value: step.condition?.value ?? null,
+      next_step_id: step.nextStepId ? idMap.get(step.nextStepId) ?? (isUuid(step.nextStepId) ? step.nextStepId : null) : null,
+      fallback_step_id: step.fallbackStepId ? idMap.get(step.fallbackStepId) ?? (isUuid(step.fallbackStepId) ? step.fallbackStepId : null) : null,
+      metadata: {
+        ...metadata,
+        branchRules
+      }
+    };
+  });
+}
+
+async function insertSeedMessageScripts(supabase: SupabaseClient, rows: Record<string, unknown>[]) {
+  if (!rows.length) return [];
+  let inserted = await supabase.from("of_message_scripts").insert(rows).select("*");
+  if (inserted.error && isMissingSchemaCacheColumnError(inserted.error, "of_message_scripts", "action_mode")) {
+    const legacyRows = rows.map((row) => {
+      const { action_mode: _actionMode, ...rest } = row as Record<string, unknown> & { action_mode?: unknown };
+      return rest;
+    });
+    inserted = await supabase.from("of_message_scripts").insert(legacyRows).select("*");
+  }
+  assertNoError(inserted.error);
+  return (inserted.data ?? []) as Array<Record<string, unknown>>;
 }
 
 async function ensureAutomationSeedRules(supabase: SupabaseClient, creators: OfCreator[]) {
