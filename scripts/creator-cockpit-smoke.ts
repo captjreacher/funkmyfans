@@ -13,6 +13,7 @@ type SmokeFetchResult = {
 
 const baseUrl = normalizeBaseUrl(process.env.COCKPIT_BASE_URL ?? process.argv[2] ?? "http://127.0.0.1:8787");
 const mutationEnabled = process.env.COCKPIT_SMOKE_MUTATION === "true";
+const smokeMode = process.env.COCKPIT_SMOKE_MODE ?? "full";
 
 async function main() {
   const failures: string[] = [];
@@ -59,7 +60,11 @@ async function main() {
   }
 
   if (dashboard && scriptsWorkspace && automationWorkspace) {
-    await validateBusinessFlow(dashboard, scriptsWorkspace, automationWorkspace, journeyWorkspace, failures, notes);
+    if (smokeMode === "short-playbook") {
+      await validateShortPlaybookSmoke(dashboard, scriptsWorkspace, automationWorkspace, failures, notes);
+    } else {
+      await validateBusinessFlow(dashboard, scriptsWorkspace, automationWorkspace, journeyWorkspace, failures, notes);
+    }
   }
 
   if (dashboard) {
@@ -508,6 +513,35 @@ async function validateBusinessFlow(
   }
 }
 
+async function validateShortPlaybookSmoke(
+  dashboard: JsonRecord,
+  scriptsWorkspace: JsonRecord,
+  automationWorkspace: JsonRecord,
+  failures: string[],
+  notes: string[]
+) {
+  const creators = arrayOfObjects(dashboard.creators) as JsonRecord[];
+  const connectedCreator = pickConnectedCreator(creators);
+  if (!connectedCreator) {
+    failures.push("/api/dashboard: expected at least one connected creator to exercise short playbook smoke");
+    return;
+  }
+
+  notes.push(`[flow] selected creator ${stringValue(connectedCreator.display_name ?? connectedCreator.username ?? connectedCreator.id)}`);
+
+  const scripts = arrayOfObjects(scriptsWorkspace.scripts) as JsonRecord[];
+  const automationRules = arrayOfObjects(automationWorkspace.rules) as JsonRecord[];
+  const creatorScripts = scripts.filter((script) => stringValue(script.name) === "New Subscriber Short Playbook" && script.creator_id === connectedCreator.id);
+  const shortPlaybook = validateNsp6ShortPlaybookShape(creatorScripts, automationRules, connectedCreator.id, failures);
+  if (!shortPlaybook) return;
+
+  await runNewSubscriberShortPlaybookAcceptance({
+    creator: connectedCreator,
+    script: shortPlaybook.script,
+    rule: shortPlaybook.rule
+  }, failures, notes);
+}
+
 async function validateJourneyAlignment(
   creator: JsonRecord,
   funnelScript: JsonRecord,
@@ -809,8 +843,12 @@ async function runNewSubscriberShortPlaybookAcceptance(
       expectedOutcome: "engaged",
       expectedQueueTitle: "Relationship continuation",
       expectedDecisionType: "relationship_continuation",
-      expectedOpportunityForced: false,
-      expectedOpportunityClassification: null
+      expectedOpportunityRoute: "relationship_continuation",
+      expectedOpportunityClassification: "relationship",
+      expectedOpportunityCategory: "relationship",
+      expectedOpportunityTitle: "Relationship continuation",
+      expectedOpportunitySummary: "The subscriber is engaged and a relationship continuation is the right next step.",
+      expectedOpportunityForced: false
     },
     {
       key: "buying_signal",
@@ -820,8 +858,12 @@ async function runNewSubscriberShortPlaybookAcceptance(
       expectedOutcome: "buying_signal",
       expectedQueueTitle: "Buying signal opportunity",
       expectedDecisionType: "buying_signal",
-      expectedOpportunityForced: true,
-      expectedOpportunityClassification: "buying_signal"
+      expectedOpportunityRoute: "buying_signal",
+      expectedOpportunityClassification: "revenue",
+      expectedOpportunityCategory: "revenue",
+      expectedOpportunityTitle: "Buying signal opportunity",
+      expectedOpportunitySummary: "The subscriber is signaling purchase intent and should be routed for a revenue opportunity.",
+      expectedOpportunityForced: true
     },
     {
       key: "exception",
@@ -831,8 +873,12 @@ async function runNewSubscriberShortPlaybookAcceptance(
       expectedOutcome: "exception",
       expectedQueueTitle: "Human review",
       expectedDecisionType: "human_review",
-      expectedOpportunityForced: false,
-      expectedOpportunityClassification: null
+      expectedOpportunityRoute: "human_review",
+      expectedOpportunityClassification: "operations",
+      expectedOpportunityCategory: "operations",
+      expectedOpportunityTitle: "Human review",
+      expectedOpportunitySummary: "The subscriber requires human review before the conversation continues.",
+      expectedOpportunityForced: false
     },
     {
       key: "silence",
@@ -879,11 +925,47 @@ async function runNewSubscriberShortPlaybookAcceptance(
         if (stringValue(queueItem.metadata?.decision_type) !== path.expectedDecisionType) {
           failures.push(`[short:${path.key}] expected queue decision_type ${path.expectedDecisionType}, got ${describeValue(queueItem.metadata?.decision_type)}`);
         }
+        if (stringValue(queueItem.metadata?.opportunity_classification) !== path.expectedOpportunityClassification) {
+          failures.push(`[short:${path.key}] expected opportunity_classification ${describeValue(path.expectedOpportunityClassification)}, got ${describeValue(queueItem.metadata?.opportunity_classification)}`);
+        }
+        if (stringValue(queueItem.opportunity_id) && typeof queueItem.opportunity_id !== "string") {
+          failures.push(`[short:${path.key}] expected opportunity_id to be a string when present, got ${describeValue(queueItem.opportunity_id)}`);
+        }
+        if (!isRecord(queueItem.opportunity)) {
+          failures.push(`[short:${path.key}] expected queue item to include an opportunity object`);
+        } else {
+          validateOpportunitySummary(queueItem.opportunity, failures, `[short:${path.key}].queue_item.opportunity`);
+          if (stringValue(queueItem.opportunity.route_key) !== path.expectedOpportunityRoute) {
+            failures.push(`[short:${path.key}] expected opportunity route ${path.expectedOpportunityRoute}, got ${describeValue(queueItem.opportunity.route_key)}`);
+          }
+          if (stringValue(queueItem.opportunity.opportunity_classification) !== path.expectedOpportunityClassification) {
+            failures.push(`[short:${path.key}] expected opportunity classification ${path.expectedOpportunityClassification}, got ${describeValue(queueItem.opportunity.opportunity_classification)}`);
+          }
+          if (stringValue(queueItem.opportunity.category) !== path.expectedOpportunityCategory) {
+            failures.push(`[short:${path.key}] expected opportunity category ${path.expectedOpportunityCategory}, got ${describeValue(queueItem.opportunity.category)}`);
+          }
+          if (stringValue(queueItem.opportunity.title) !== path.expectedOpportunityTitle) {
+            failures.push(`[short:${path.key}] expected opportunity title ${path.expectedOpportunityTitle}, got ${describeValue(queueItem.opportunity.title)}`);
+          }
+          if (stringValue(queueItem.opportunity.summary) !== path.expectedOpportunitySummary) {
+            failures.push(`[short:${path.key}] expected opportunity summary ${path.expectedOpportunitySummary}, got ${describeValue(queueItem.opportunity.summary)}`);
+          }
+        }
+        const workspace = await readJson(`/api/conversation-workspace/${encodeURIComponent(run.conversationId)}`, failures);
+        if (workspace) {
+          const workspaceQueueItem = isRecord(workspace.current_queue_item) ? workspace.current_queue_item : null;
+          const workspaceOpportunity = isRecord(workspace.current_opportunity) ? workspace.current_opportunity : null;
+          if (!workspaceQueueItem) {
+            failures.push(`[short:${path.key}] expected conversation workspace to expose the linked queue item`);
+          } else if (!isRecord(workspaceQueueItem.opportunity)) {
+            failures.push(`[short:${path.key}] expected conversation workspace queue item to include an opportunity`);
+          }
+          if (workspaceOpportunity) {
+            validateOpportunitySummary(workspaceOpportunity, failures, `[short:${path.key}].conversation_workspace.current_opportunity`);
+          }
+        }
         if (Boolean(queueItem.metadata?.opportunity_forced) !== path.expectedOpportunityForced) {
           failures.push(`[short:${path.key}] expected opportunity_forced=${String(path.expectedOpportunityForced)}, got ${describeValue(queueItem.metadata?.opportunity_forced)}`);
-        }
-        if ((queueItem.metadata?.opportunity_classification ?? null) !== path.expectedOpportunityClassification) {
-          failures.push(`[short:${path.key}] expected opportunity_classification ${describeValue(path.expectedOpportunityClassification)}, got ${describeValue(queueItem.metadata?.opportunity_classification)}`);
         }
         const respond = await fetchEndpoint(`/api/queue-items/${encodeURIComponent(stringValue(queueItem.id))}/action`, {
           method: "POST",
@@ -913,6 +995,15 @@ async function runNewSubscriberShortPlaybookAcceptance(
       const queueItem = queue ? arrayOfObjects(queue.items).find((item) => isRecord(item.conversation) && stringValue(item.conversation.id) === run.conversationId) : null;
       if (queueItem) {
         failures.push(`[short:${path.key}] expected no queue item for no-response path, got ${describeValue(queueItem.id)}`);
+      }
+      const workspace = await readJson(`/api/conversation-workspace/${encodeURIComponent(run.conversationId)}`, failures);
+      if (workspace) {
+        if (workspace.current_queue_item) {
+          failures.push(`[short:${path.key}] expected no linked queue item in conversation workspace for no-response path`);
+        }
+        if (workspace.current_opportunity) {
+          failures.push(`[short:${path.key}] expected no linked opportunity in conversation workspace for no-response path`);
+        }
       }
     }
 
@@ -1298,8 +1389,44 @@ function validateQueueItemLifecycle(item: JsonRecord, failures: string[], endpoi
     validateQueueConversationSummary(item.conversation, failures, `${endpoint}.conversation`);
   }
 
+  if (item.opportunity !== null && typeof item.opportunity !== "undefined") {
+    validateOpportunitySummary(item.opportunity, failures, `${endpoint}.opportunity`);
+  }
+
   if (item.subscriber !== null && typeof item.subscriber !== "undefined") {
     validateQueueSubscriberSummary(item.subscriber, failures, `${endpoint}.subscriber`);
+  }
+}
+
+function validateOpportunitySummary(opportunity: unknown, failures: string[], endpoint: string) {
+  if (!isRecord(opportunity)) {
+    failures.push(`${endpoint}: expected opportunity object, got ${describeValue(opportunity)}`);
+    return;
+  }
+
+  requireString(opportunity, "id", endpoint, failures);
+  requireString(opportunity, "conversation_instance_id", endpoint, failures);
+  requireString(opportunity, "route_key", endpoint, failures);
+  requireString(opportunity, "opportunity_classification", endpoint, failures);
+  requireString(opportunity, "category", endpoint, failures);
+  requireString(opportunity, "title", endpoint, failures);
+  requireString(opportunity, "summary", endpoint, failures);
+  requireString(opportunity, "status", endpoint, failures);
+  requireString(opportunity, "priority", endpoint, failures);
+  requireString(opportunity, "created_at", endpoint, failures);
+  requireString(opportunity, "updated_at", endpoint, failures);
+
+  if (opportunity.queue_id !== null && typeof opportunity.queue_id !== "string") {
+    failures.push(`${endpoint}: expected queue_id to be string or null, got ${describeValue(opportunity.queue_id)}`);
+  }
+  if (opportunity.queue_item_id !== null && typeof opportunity.queue_item_id !== "string") {
+    failures.push(`${endpoint}: expected queue_item_id to be string or null, got ${describeValue(opportunity.queue_item_id)}`);
+  }
+  if (opportunity.source_event_id !== null && typeof opportunity.source_event_id !== "string") {
+    failures.push(`${endpoint}: expected source_event_id to be string or null, got ${describeValue(opportunity.source_event_id)}`);
+  }
+  if (opportunity.source_step_id !== null && typeof opportunity.source_step_id !== "string") {
+    failures.push(`${endpoint}: expected source_step_id to be string or null, got ${describeValue(opportunity.source_step_id)}`);
   }
 }
 

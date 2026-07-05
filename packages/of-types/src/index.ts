@@ -627,6 +627,7 @@ export interface QueueItem {
   id: string;
   queue_id: string;
   conversation_id: string | null;
+  opportunity_id: string | null;
   assigned_operator_id: string | null;
   priority: TaskPriority;
   status: QueueItemLifecycleStatus;
@@ -636,6 +637,33 @@ export interface QueueItem {
   resolved_at: string | null;
   metadata: Record<string, unknown>;
 }
+
+export type ConversationOpportunityStatus = "detected" | "queued" | "resolved" | "cancelled";
+
+export interface ConversationOpportunity {
+  id: string;
+  creator_id: string;
+  conversation_instance_id: string;
+  queue_id: string | null;
+  queue_item_id: string | null;
+  source_event_id: string | null;
+  source_step_id: string | null;
+  route_key: string;
+  opportunity_classification: string;
+  category: string;
+  title: string;
+  summary: string;
+  status: ConversationOpportunityStatus;
+  priority: TaskPriority;
+  queue_handoff: boolean;
+  recommended_next_objective: string | null;
+  created_at: string;
+  updated_at: string;
+  resolved_at: string | null;
+  metadata: Record<string, unknown>;
+}
+
+export interface ConversationOpportunitySummary extends ConversationOpportunity {}
 
 export interface QueueWorkspaceViewModel {
   selected_creator: Pick<OfCreator, "id" | "username" | "display_name"> | null;
@@ -704,11 +732,13 @@ export interface QueueWorkspaceItemSummary extends QueueItem {
   status_label: string;
   conversation: QueueWorkspaceConversationSummary | null;
   subscriber: QueueWorkspaceSubscriberSummary | null;
+  opportunity: ConversationOpportunitySummary | null;
 }
 
 export interface QueueWorkspaceItemContext {
   conversation: QueueWorkspaceConversationSummary | null;
   subscriber: QueueWorkspaceSubscriberSummary | null;
+  opportunity: ConversationOpportunitySummary | null;
   recent_events: QueueWorkspaceRecentEvent[];
 }
 
@@ -1316,6 +1346,7 @@ export interface ConversationWorkspaceViewModel {
   detail: ConversationOperationsDetail;
   current_queue: Queue | null;
   current_queue_item: QueueWorkspaceItemSummary | null;
+  current_opportunity: ConversationOpportunitySummary | null;
   subscriber_context: QueueWorkspaceSubscriberSummary | null;
   recent_events: QueueWorkspaceRecentEvent[];
   attachments: ConversationWorkspaceAttachment[];
@@ -1608,6 +1639,7 @@ export function mapTaskToQueueItem(task: OfTask): QueueItem {
     id: task.id,
     queue_id: queueId,
     conversation_id: conversationIdFromTask(task),
+    opportunity_id: null,
     assigned_operator_id: task.assigned_to,
     priority: task.priority,
     status: mapTaskStatusToQueueItemStatus(task.status),

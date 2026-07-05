@@ -26,6 +26,7 @@ import type {
   ConversationRuntimeStatus,
   ConversationIntent,
   ConversationSentiment,
+  ConversationOpportunitySummary,
   OfAutomationAuditTrailEntry,
   OfAutomationRule,
   OfAutomationSimulation,
@@ -191,12 +192,12 @@ interface ConversationIntelligenceProvider {
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
     if (url.pathname.startsWith("/api/")) {
       try {
-        return await handleApi(request, env, url);
+        return await handleApi(request, env, url, ctx);
       } catch (error) {
         if (error instanceof ApiError) {
           return Response.json({ error: error.message }, { status: error.status, headers: jsonHeaders });
@@ -219,13 +220,11 @@ class ApiError extends Error {
   }
 }
 
-async function handleApi(request: Request, env: Env, url: URL): Promise<Response> {
+async function handleApi(request: Request, env: Env, url: URL, ctx: ExecutionContext): Promise<Response> {
   const supabase = createServiceClient(env);
   if (request.method === "GET" || request.method === "POST" || request.method === "PATCH") {
-    try {
-      await processDueConversations(supabase, env, { limit: 10 });
-    } catch (error) {
-      console.error("processDueConversations preflight failed", error);
+    if (!(request.method === "POST" && url.pathname === "/api/conversations/process-due")) {
+      scheduleDueConversationMaintenance(supabase, env, ctx, `${request.method} ${url.pathname}`);
     }
   }
   if (request.method === "GET" && url.pathname === "/api/dashboard") {
@@ -297,17 +296,17 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
   if (request.method === "GET" && creatorMatch) {
     const creatorId = creatorMatch[1];
     const [creator, snapshots, subscribers, chats, tasks, recommendations, events, syncRuns, relationships, relationshipTimeline, contextEvents] = await Promise.all([
-      supabase.from("of_creators").select("*").eq("id", creatorId).single(),
-      supabase.from("of_creator_snapshots").select("*").eq("creator_id", creatorId).order("created_at", { ascending: false }).limit(14),
-      supabase.from("of_subscribers").select("*").eq("creator_id", creatorId).order("last_sync_at", { ascending: false }).limit(100),
-      supabase.from("of_chats").select("*").eq("creator_id", creatorId).order("last_activity_at", { ascending: false, nullsFirst: false }).limit(100),
-      supabase.from("of_tasks").select("*, of_task_timeline(*)").eq("creator_id", creatorId).order("created_at", { ascending: false }),
-      supabase.from("of_recommendations").select("*").eq("creator_id", creatorId).order("created_at", { ascending: false }),
-      supabase.from("of_events").select("*").eq("creator_id", creatorId).order("created_at", { ascending: false }).limit(100),
-      supabase.from("of_sync_runs").select("*").eq("creator_id", creatorId).order("started_at", { ascending: false }).limit(100),
-      supabase.from("of_subscriber_relationships").select("*, of_relationship_summaries(*), of_conversation_intelligence(*)").eq("creator_id", creatorId).order("updated_at", { ascending: false }).limit(100),
-      supabase.from("of_relationship_timeline").select("*").eq("creator_id", creatorId).order("occurred_at", { ascending: false }).limit(200),
-      supabase.from("of_context_events").select("*").eq("creator_id", creatorId).order("emitted_at", { ascending: false }).limit(100)
+      traceCreatorDetailQuery("of_creators", supabase.from("of_creators").select("*").eq("id", creatorId).single()),
+      traceCreatorDetailRowsOrEmpty("of_creator_snapshots", "of_creator_snapshots", supabase.from("of_creator_snapshots").select("*").eq("creator_id", creatorId).order("created_at", { ascending: false }).limit(14)),
+      traceCreatorDetailRowsOrEmpty("of_subscribers", "of_subscribers", supabase.from("of_subscribers").select("*").eq("creator_id", creatorId).order("last_sync_at", { ascending: false }).limit(100)),
+      traceCreatorDetailRowsOrEmpty("of_chats", "of_chats", supabase.from("of_chats").select("*").eq("creator_id", creatorId).order("last_activity_at", { ascending: false, nullsFirst: false }).limit(100)),
+      traceCreatorDetailRowsOrEmpty("of_tasks", "of_tasks", supabase.from("of_tasks").select("*").eq("creator_id", creatorId).order("created_at", { ascending: false })),
+      traceCreatorDetailRowsOrEmpty("of_recommendations", "of_recommendations", supabase.from("of_recommendations").select("*").eq("creator_id", creatorId).order("created_at", { ascending: false })),
+      traceCreatorDetailRowsOrEmpty("of_events", "of_events", supabase.from("of_events").select("*").eq("creator_id", creatorId).order("created_at", { ascending: false }).limit(100)),
+      traceCreatorDetailRowsOrEmpty("of_sync_runs", "of_sync_runs", supabase.from("of_sync_runs").select("*").eq("creator_id", creatorId).order("started_at", { ascending: false }).limit(100)),
+      traceCreatorDetailRowsOrEmpty("of_subscriber_relationships", "of_subscriber_relationships", supabase.from("of_subscriber_relationships").select("*").eq("creator_id", creatorId).order("updated_at", { ascending: false }).limit(100)),
+      traceCreatorDetailRowsOrEmpty("of_relationship_timeline", "of_relationship_timeline", supabase.from("of_relationship_timeline").select("*").eq("creator_id", creatorId).order("occurred_at", { ascending: false }).limit(200)),
+      traceCreatorDetailRowsOrEmpty("of_context_events", "of_context_events", supabase.from("of_context_events").select("*").eq("creator_id", creatorId).order("emitted_at", { ascending: false }).limit(100))
     ]);
     assertNoError(creator.error);
     assertNoError(snapshots.error);
@@ -356,8 +355,32 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
 
   if (request.method === "GET" && url.pathname === "/api/subscribers") {
     const result = await listSubscribers(supabase, url);
-    return Response.json(result, { headers: jsonHeaders });
+  return Response.json(result, { headers: jsonHeaders });
+}
+
+async function traceCreatorDetailQuery<T>(label: string, promise: PromiseLike<{ data: T | null; error: any }>) {
+  const result = await promise;
+  if (result.error) {
+    console.error(`[creator-detail] ${label} failed`, result.error);
   }
+  return result;
+}
+
+async function traceCreatorDetailRowsOrEmpty<T>(
+  label: string,
+  tableName: string,
+  promise: PromiseLike<{ data: T[] | null; error: any }>
+) {
+  const result = await promise;
+  if (result.error) {
+    if (isMissingSchemaCacheRelationError(result.error, tableName)) {
+      console.error(`[creator-detail] ${label} missing schema cache table, returning empty rows`);
+      return { data: [] as T[], error: null };
+    }
+    console.error(`[creator-detail] ${label} failed`, result.error);
+  }
+  return result;
+}
 
   if (request.method === "POST" && url.pathname === "/api/subscribers/score-all") {
     const summary = await recalculateAllRelationshipScores(supabase);
@@ -5170,6 +5193,35 @@ function conversationInitialVariables(
   return baseVariables;
 }
 
+let dueConversationMaintenancePromise: Promise<void> | null = null;
+
+function scheduleDueConversationMaintenance(supabase: SupabaseClient, env: Env, ctx: ExecutionContext, requestLabel: string) {
+  if (dueConversationMaintenancePromise) {
+    console.info(`[due-conversations] skipped preflight for ${requestLabel}; maintenance already running`);
+    return;
+  }
+
+  const startedAt = Date.now();
+  dueConversationMaintenancePromise = (async () => {
+    console.info(`[due-conversations] preflight start for ${requestLabel}`);
+    const summary = await processDueConversations(supabase, env, { limit: 10 });
+    if (summary.errors.length) {
+      console.error(`[due-conversations] preflight completed with errors for ${requestLabel}`, summary);
+    } else {
+      console.info(`[due-conversations] preflight complete for ${requestLabel}`, {
+        processed: summary.processed,
+        elapsedMs: Date.now() - startedAt
+      });
+    }
+  })().catch((error) => {
+    console.error(`[due-conversations] preflight failed for ${requestLabel}`, error);
+  }).finally(() => {
+    dueConversationMaintenancePromise = null;
+  });
+
+  ctx.waitUntil(dueConversationMaintenancePromise);
+}
+
 async function processDueConversations(supabase: SupabaseClient, env: Env, options: { limit: number }) {
   const now = new Date().toISOString();
   const dueWaiting = await supabase
@@ -5179,27 +5231,50 @@ async function processDueConversations(supabase: SupabaseClient, env: Env, optio
     .lte("waiting_until", now)
     .order("updated_at", { ascending: true })
     .limit(options.limit);
-  assertNoError(dueWaiting.error);
+  if (dueWaiting.error) {
+    console.error("[due-conversations] dueWaiting query failed", { now, limit: options.limit, error: dueWaiting.error });
+    assertNoError(dueWaiting.error);
+  }
   const staleRunning = await supabase
     .from("of_conversation_instances")
     .select("*")
     .eq("status", "running")
     .order("updated_at", { ascending: true })
     .limit(options.limit);
-  assertNoError(staleRunning.error);
+  if (staleRunning.error) {
+    console.error("[due-conversations] staleRunning query failed", { now, limit: options.limit, error: staleRunning.error });
+    assertNoError(staleRunning.error);
+  }
   const dueItems = [...((dueWaiting.data ?? []) as OfConversationInstance[]), ...((staleRunning.data ?? []) as OfConversationInstance[])];
   const unique = [...new Map(dueItems.map((item) => [item.id, item])).values()].slice(0, options.limit);
+  console.info("[due-conversations] scan complete", {
+    limit: options.limit,
+    dueWaiting: (dueWaiting.data ?? []).length,
+    staleRunning: (staleRunning.data ?? []).length,
+    unique: unique.length
+  });
 
   let processed = 0;
   const errors: string[] = [];
   for (const item of unique) {
     try {
+      console.info("[due-conversations] processing item", {
+        conversationId: item.id,
+        status: item.status,
+        executionMode: item.execution_mode,
+        waitingReason: item.waiting_reason
+      });
       if (await isConversationPausedForSimulation(supabase, item)) continue;
       const reason = item.status === "waiting_delay" ? "delay_due" : "reply_timeout";
       const conversation = await processConversationInstance(supabase, env, item.id, { reason });
       if (item.automation_run_id) await syncAutomationRunToConversation(supabase, item.automation_run_id, conversation);
       processed += 1;
+      console.info("[due-conversations] processed item", { conversationId: item.id, status: conversation.status });
     } catch (error) {
+      console.error("[due-conversations] item failed", {
+        conversationId: item.id,
+        error: error instanceof Error ? error.message : error
+      });
       errors.push(error instanceof Error ? error.message : "Unexpected conversation runtime error");
     }
   }
@@ -6394,6 +6469,156 @@ async function ensureConversationApprovalQueueItem(
   assertNoError(result.error);
 }
 
+function queueOpportunityCategory(handoffKind: string) {
+  switch (handoffKind) {
+    case "buying_signal":
+      return "revenue";
+    case "human_review":
+      return "operations";
+    default:
+      return "relationship";
+  }
+}
+
+function queueOpportunitySummary(input: { handoffKind: string; handoffObjective: string; reason: string }) {
+  switch (input.handoffKind) {
+    case "relationship_continuation":
+      return "The subscriber is engaged and a relationship continuation is the right next step.";
+    case "buying_signal":
+      return "The subscriber is signaling purchase intent and should be routed for a revenue opportunity.";
+    case "human_review":
+      return "The subscriber requires human review before the conversation continues.";
+    default:
+      return input.reason || input.handoffObjective;
+  }
+}
+
+function buildConversationOpportunitySnapshot(
+  conversation: OfConversationInstance,
+  queueId: string,
+  step: OfMessageScriptStep,
+  input: {
+    outcomeKey: string;
+    outcomeLabel: string;
+    handoffKind: string;
+    handoffObjective: string;
+    reason: string;
+    terminalType: string;
+    title?: string;
+  }
+): ConversationOpportunitySummary {
+  const category = queueOpportunityCategory(input.handoffKind);
+  const summary = queueOpportunitySummary(input);
+  const timestamp = new Date().toISOString();
+  return {
+    id: `opportunity:${conversation.id}:${input.handoffKind}`,
+    creator_id: conversation.creator_id,
+    conversation_instance_id: conversation.id,
+    queue_id: queueId,
+    queue_item_id: null,
+    source_event_id: conversation.originating_event_id ?? null,
+    source_step_id: step.id,
+    route_key: input.handoffKind,
+    opportunity_classification: category,
+    category,
+    title: input.title ?? input.outcomeLabel,
+    summary,
+    status: "queued",
+    priority: "high",
+    queue_handoff: true,
+    recommended_next_objective: input.handoffObjective,
+    resolved_at: null,
+    created_at: timestamp,
+    updated_at: timestamp,
+    metadata: {
+      source: "conversation_runtime",
+      terminal_type: input.terminalType,
+      outcome_key: input.outcomeKey,
+      outcome_label: input.outcomeLabel,
+      handoff_kind: input.handoffKind,
+      handoff_reason: input.reason,
+      step_id: step.id,
+      queue_id: queueId,
+      queue_item_id: null
+    }
+  };
+}
+
+function opportunityFromMetadata(metadata: unknown): ConversationOpportunitySummary | null {
+  if (!isRecord(metadata)) return null;
+  const candidate = metadata.opportunity ?? metadata.opportunity_snapshot ?? metadata.opportunitySummary;
+  if (!isRecord(candidate)) return null;
+  if (
+    typeof candidate.id !== "string" ||
+    typeof candidate.conversation_instance_id !== "string" ||
+    typeof candidate.route_key !== "string" ||
+    typeof candidate.opportunity_classification !== "string" ||
+    typeof candidate.category !== "string" ||
+    typeof candidate.title !== "string" ||
+    typeof candidate.summary !== "string" ||
+    typeof candidate.status !== "string" ||
+    typeof candidate.priority !== "string" ||
+    typeof candidate.created_at !== "string" ||
+    typeof candidate.updated_at !== "string"
+  ) {
+    return null;
+  }
+  return candidate as unknown as ConversationOpportunitySummary;
+}
+
+async function ensureConversationOpportunity(
+  supabase: SupabaseClient,
+  conversation: OfConversationInstance,
+  queueId: string,
+  step: OfMessageScriptStep,
+  input: {
+    outcomeKey: string;
+    outcomeLabel: string;
+    handoffKind: string;
+    handoffObjective: string;
+    reason: string;
+    terminalType: string;
+    title?: string;
+  }
+): Promise<ConversationOpportunitySummary | null> {
+  const payload = {
+    creator_id: conversation.creator_id,
+    conversation_instance_id: conversation.id,
+    queue_id: queueId,
+    queue_item_id: null,
+    source_event_id: conversation.originating_event_id ?? null,
+    source_step_id: step.id,
+    route_key: input.handoffKind,
+    opportunity_classification: queueOpportunityCategory(input.handoffKind),
+    category: queueOpportunityCategory(input.handoffKind),
+    title: input.title ?? input.outcomeLabel,
+    summary: queueOpportunitySummary(input),
+    status: "queued",
+    priority: "high",
+    queue_handoff: true,
+    recommended_next_objective: input.handoffObjective,
+    resolved_at: null,
+    metadata: {
+      source: "conversation_runtime",
+      terminal_type: input.terminalType,
+      outcome_key: input.outcomeKey,
+      outcome_label: input.outcomeLabel,
+      handoff_kind: input.handoffKind,
+      handoff_reason: input.reason,
+      step_id: step.id
+    }
+  } satisfies Record<string, unknown>;
+
+  const result = await supabase
+    .from("of_conversation_opportunities")
+    .upsert(payload, { onConflict: "conversation_instance_id,route_key" })
+    .select("id, creator_id, conversation_instance_id, queue_id, queue_item_id, source_event_id, source_step_id, route_key, opportunity_classification, category, title, summary, status, priority, queue_handoff, recommended_next_objective, created_at, updated_at, resolved_at, metadata")
+    .single();
+  if (result.error && isMissingSchemaCacheRelationError(result.error, "of_conversation_opportunities")) return buildConversationOpportunitySnapshot(conversation, queueId, step, input);
+  assertNoError(result.error);
+  return result.data as ConversationOpportunitySummary;
+}
+
 async function ensureConversationHandoffQueueItem(
   supabase: SupabaseClient,
   conversation: OfConversationInstance,
@@ -6411,58 +6636,143 @@ async function ensureConversationHandoffQueueItem(
   const queue = await ensureCreatorConversationQueue(supabase, conversation.creator_id);
   if (!queue?.id) return;
 
-  const existing = await supabase
+  const opportunity = await ensureConversationOpportunity(supabase, conversation, queue.id, step, input);
+  if (!opportunity?.id) return;
+
+  let supportsOpportunityId = true;
+  let existing = await supabase
     .from("of_queue_items")
-    .select("id, status")
+    .select("id, status, opportunity_id, metadata")
     .eq("queue_id", queue.id)
     .eq("conversation_id", conversation.id)
     .neq("status", "resolved")
     .limit(1)
     .maybeSingle();
+  if (existing.error && isMissingSchemaCacheColumnError(existing.error, "of_queue_items", "opportunity_id")) {
+    supportsOpportunityId = false;
+    existing = await supabase
+      .from("of_queue_items")
+      .select("id, status, metadata")
+      .eq("queue_id", queue.id)
+      .eq("conversation_id", conversation.id)
+      .neq("status", "resolved")
+      .limit(1)
+      .maybeSingle();
+  }
   if (existing.error && isMissingSchemaCacheRelationError(existing.error, "of_queue_items")) return;
   assertNoError(existing.error);
-  if (existing.data) return;
 
-  const result = await supabase.from("of_queue_items").insert({
-    queue_id: queue.id,
-    legacy_task_id: null,
-    conversation_id: conversation.id,
-    assigned_operator_id: null,
-    priority: "high",
-    status: "visible",
-    moved_at: null,
-    resolved_at: null,
-    metadata: {
-      source: "conversation_runtime",
-      queue_handoff: true,
-      decision_type: input.handoffKind,
-      title: input.title ?? input.outcomeLabel,
-      outcome_key: input.outcomeKey,
-      outcome_label: input.outcomeLabel,
-      recommended_next_objective: input.handoffObjective,
-      handoff_reason: input.reason,
-      handoff_kind: input.handoffKind,
-      terminal_type: input.terminalType,
-      opportunity_forced: input.handoffKind === "buying_signal",
-      opportunity_classification: input.handoffKind === "buying_signal" ? "buying_signal" : null,
-      conversation_reference: {
-        conversation_id: conversation.id,
-        creator_id: conversation.creator_id,
-        script_id: conversation.script_id
-      },
-      subscriber_reference: isRecord(conversation.metadata) && isRecord(conversation.metadata.subscriber_snapshot)
-        ? conversation.metadata.subscriber_snapshot
-        : {
-            subscriber_id: conversation.subscriber_id,
-            relationship_id: conversation.relationship_id
-          },
-      script_step_id: step.id,
-      step_type: step.step_type,
-      priority_reason: input.reason
+  const metadata: Record<string, unknown> = {
+    source: "conversation_runtime",
+    queue_handoff: true,
+    decision_type: input.handoffKind,
+    title: input.title ?? input.outcomeLabel,
+    outcome_key: input.outcomeKey,
+    outcome_label: input.outcomeLabel,
+    recommended_next_objective: input.handoffObjective,
+    handoff_reason: input.reason,
+    handoff_kind: input.handoffKind,
+    terminal_type: input.terminalType,
+    opportunity_forced: input.handoffKind === "buying_signal",
+    opportunity_classification: input.handoffKind === "buying_signal" ? "buying_signal" : null,
+    conversation_reference: {
+      conversation_id: conversation.id,
+      creator_id: conversation.creator_id,
+      script_id: conversation.script_id
+    },
+    subscriber_reference: isRecord(conversation.metadata) && isRecord(conversation.metadata.subscriber_snapshot)
+      ? conversation.metadata.subscriber_snapshot
+      : {
+          subscriber_id: conversation.subscriber_id,
+          relationship_id: conversation.relationship_id
+        },
+    script_step_id: step.id,
+    step_type: step.step_type,
+    priority_reason: input.reason
+  };
+  const opportunitySnapshot = buildConversationOpportunitySnapshot(conversation, queue.id, step, input);
+  metadata.opportunity_classification = opportunitySnapshot.opportunity_classification;
+  metadata.opportunity = opportunitySnapshot;
+  metadata.opportunity_snapshot = opportunitySnapshot;
+
+  if (existing.data) {
+    const existingMetadata = isRecord(existing.data.metadata) ? existing.data.metadata : {};
+    const existingOpportunityId = supportsOpportunityId && "opportunity_id" in existing.data
+      ? typeof (existing.data as Record<string, unknown>).opportunity_id === "string"
+        ? (existing.data as Record<string, unknown>).opportunity_id as string
+        : null
+      : null;
+    if (existingOpportunityId !== opportunity.id || JSON.stringify(existingMetadata) !== JSON.stringify(metadata)) {
+      const updateResult = supportsOpportunityId
+        ? await supabase.from("of_queue_items").update({ opportunity_id: opportunity.id, metadata }).eq("id", existing.data.id)
+        : await supabase.from("of_queue_items").update({ metadata }).eq("id", existing.data.id);
+      if (updateResult.error && isMissingSchemaCacheColumnError(updateResult.error, "of_queue_items", "opportunity_id")) {
+        supportsOpportunityId = false;
+        const fallbackUpdate = await supabase.from("of_queue_items").update({ metadata }).eq("id", existing.data.id);
+        if (fallbackUpdate.error && isMissingSchemaCacheRelationError(fallbackUpdate.error, "of_queue_items")) return;
+        assertNoError(fallbackUpdate.error);
+        return;
+      }
+      if (updateResult.error && isMissingSchemaCacheRelationError(updateResult.error, "of_queue_items")) return;
+      assertNoError(updateResult.error);
     }
-  });
-  if (result.error && isMissingSchemaCacheRelationError(result.error, "of_queue_items")) return;
-  assertNoError(result.error);
+  } else {
+    const result = supportsOpportunityId
+      ? await supabase.from("of_queue_items").insert({
+          queue_id: queue.id,
+          opportunity_id: opportunity.id,
+          legacy_task_id: null,
+          conversation_id: conversation.id,
+          assigned_operator_id: null,
+          priority: "high",
+          status: "visible",
+          moved_at: null,
+          resolved_at: null,
+          metadata
+        })
+      : await supabase.from("of_queue_items").insert({
+          queue_id: queue.id,
+          legacy_task_id: null,
+          conversation_id: conversation.id,
+          assigned_operator_id: null,
+          priority: "high",
+          status: "visible",
+          moved_at: null,
+          resolved_at: null,
+          metadata
+        });
+    if (result.error && isMissingSchemaCacheColumnError(result.error, "of_queue_items", "opportunity_id")) {
+      supportsOpportunityId = false;
+      const fallbackResult = await supabase.from("of_queue_items").insert({
+        queue_id: queue.id,
+        legacy_task_id: null,
+        conversation_id: conversation.id,
+        assigned_operator_id: null,
+        priority: "high",
+        status: "visible",
+        moved_at: null,
+        resolved_at: null,
+        metadata
+      });
+      if (fallbackResult.error && isMissingSchemaCacheRelationError(fallbackResult.error, "of_queue_items")) return;
+      assertNoError(fallbackResult.error);
+      const inserted = (fallbackResult.data ? (Array.isArray(fallbackResult.data) ? fallbackResult.data[0] : fallbackResult.data) : null) as { id: string } | null;
+      if (inserted?.id) {
+        const updateOpportunity = await supabase.from("of_conversation_opportunities").update({ queue_item_id: inserted.id, queue_id: queue.id }).eq("id", opportunity.id);
+        if (updateOpportunity.error && isMissingSchemaCacheRelationError(updateOpportunity.error, "of_conversation_opportunities")) return;
+        assertNoError(updateOpportunity.error);
+      }
+      return;
+    }
+    if (result.error && isMissingSchemaCacheRelationError(result.error, "of_queue_items")) return;
+    assertNoError(result.error);
+    const inserted = (result.data ? (Array.isArray(result.data) ? result.data[0] : result.data) : null) as { id: string } | null;
+    if (inserted?.id) {
+      const updateOpportunity = await supabase.from("of_conversation_opportunities").update({ queue_item_id: inserted.id, queue_id: queue.id }).eq("id", opportunity.id);
+      if (updateOpportunity.error && isMissingSchemaCacheRelationError(updateOpportunity.error, "of_conversation_opportunities")) return;
+      assertNoError(updateOpportunity.error);
+    }
+  }
 }
 
 async function ensureCreatorConversationQueue(supabase: SupabaseClient, creatorId: string) {
@@ -7170,9 +7480,11 @@ async function getCanonicalQueueWorkspace(supabase: SupabaseClient, url: URL): P
         .filter((value): value is string => Boolean(value))
     )
   ];
+  const opportunityIds = [...new Set(visibleRowsForSelectedQueue.map((row) => row.opportunity_id).filter((value): value is string => Boolean(value)))];
   const { conversations, relationshipIds } = await loadQueueWorkspaceConversationSummariesByIds(supabase, conversationIds);
   const subscribers = await loadQueueWorkspaceSubscriberSummariesByIds(supabase, relationshipIds);
-  const items = buildCanonicalQueueWorkspaceItems(visibleRowsForSelectedQueue, queueMap, taskMap, conversations, subscribers);
+  const opportunities = await loadQueueWorkspaceOpportunitiesByIds(supabase, opportunityIds);
+  const items = buildCanonicalQueueWorkspaceItems(visibleRowsForSelectedQueue, queueMap, taskMap, conversations, subscribers, opportunities);
   const summary = buildQueueWorkspaceSummary(queues, items);
   const selectedItemId = resolveSelectedItemId(url, items);
   const selectedItemContext = selectedItemId
@@ -7409,6 +7721,17 @@ async function loadQueueWorkspaceSubscriberSummariesByIds(supabase: SupabaseClie
   );
 }
 
+async function loadQueueWorkspaceOpportunitiesByIds(supabase: SupabaseClient, opportunityIds: string[]) {
+  if (!opportunityIds.length) return new Map<string, ConversationOpportunitySummary>();
+
+  const result = await supabase
+    .from("of_conversation_opportunities")
+    .select("id, creator_id, conversation_instance_id, queue_id, queue_item_id, source_event_id, source_step_id, route_key, opportunity_classification, category, title, summary, status, priority, queue_handoff, recommended_next_objective, created_at, updated_at, resolved_at, metadata")
+    .in("id", opportunityIds);
+  const opportunities = rowsOrEmptyIfMissingTable(result, "of_conversation_opportunities") as Array<ConversationOpportunitySummary>;
+  return new Map(opportunities.map((opportunity) => [opportunity.id, opportunity]));
+}
+
 function buildCanonicalQueueWorkspaceQueues(
   rows: CanonicalQueueWorkspaceItemRow[],
   queues: Map<string, CanonicalQueueWorkspaceQueueRow>,
@@ -7486,7 +7809,8 @@ function buildCanonicalQueueWorkspaceItems(
   queues: Map<string, CanonicalQueueWorkspaceQueueRow>,
   tasks: Map<string, CanonicalQueueWorkspaceTaskRow>,
   conversations: Map<string, QueueWorkspaceConversationSummary>,
-  subscribers: Map<string, QueueWorkspaceSubscriberSummary>
+  subscribers: Map<string, QueueWorkspaceSubscriberSummary>,
+  opportunities: Map<string, ConversationOpportunitySummary>
 ): QueueWorkspaceItemSummary[] {
   return [...rows]
     .sort((left, right) => {
@@ -7512,9 +7836,12 @@ function buildCanonicalQueueWorkspaceItems(
           : null;
       const priorityScore = task?.priority_score ?? deriveTaskPriorityScore({ priority: row.priority });
       const metadataTitle = stringValue(row.metadata.title) || stringValue(row.metadata.decision_type);
+      const opportunity = row.opportunity_id
+        ? opportunities.get(row.opportunity_id) ?? null
+        : opportunityFromMetadata(row.metadata) ?? null;
       return {
         ...row,
-        title: task?.title ?? metadataTitle ?? queue?.label ?? conversation?.script_name ?? humanizeIdentifier(row.queue_id),
+        title: task?.title ?? metadataTitle ?? opportunity?.title ?? queue?.label ?? conversation?.script_name ?? humanizeIdentifier(row.queue_id),
         queue_name: queue?.name ?? task?.rule_name ?? row.queue_id,
         queue_label: queue?.label ?? task?.rule_name ?? humanizeIdentifier(row.queue_id),
         assignment_label: row.assigned_operator_id ?? queue?.assigned_operator_id ?? task?.assigned_to ?? null,
@@ -7522,7 +7849,8 @@ function buildCanonicalQueueWorkspaceItems(
         priority_reason: task?.priority_reason ?? stringValue(row.metadata.priority_reason),
         status_label: humanizeIdentifier(row.status),
         conversation,
-        subscriber
+        subscriber,
+        opportunity
       };
     });
 }
@@ -7749,6 +8077,7 @@ function buildQueueWorkspaceItems(
       const conversation = conversationId ? conversations.get(conversationId) ?? null : null;
       return {
         ...queueItem,
+        opportunity: null,
         title: task.title,
         queue_name: queue?.name ?? task.rule_name,
         queue_label: queue?.label ?? humanizeIdentifier(task.rule_name),
@@ -7917,6 +8246,7 @@ async function loadQueueWorkspaceItemContext(
 
   const conversation = item.conversation?.id ? conversations.get(item.conversation.id) ?? item.conversation : null;
   const subscriber = item.subscriber?.id ? subscribers.get(item.subscriber.id) ?? item.subscriber : null;
+  const opportunity = item.opportunity?.id ? item.opportunity : null;
   const recent_events = conversation?.id
     ? await loadQueueWorkspaceRecentEvents(supabase, conversation.id)
     : [];
@@ -7924,6 +8254,7 @@ async function loadQueueWorkspaceItemContext(
   return {
     conversation,
     subscriber,
+    opportunity,
     recent_events
   };
 }
@@ -8104,8 +8435,9 @@ async function getConversationWorkspace(supabase: SupabaseClient, conversationId
   const detail = await getConversationOperationsDetail(supabase, conversationId);
   const queueItem = await loadConversationWorkspaceQueueItem(supabase, conversationId);
   const queue = await loadConversationWorkspaceQueue(supabase, queueItem?.queue_id ?? null);
+  const currentOpportunity = queueItem ? await loadConversationWorkspaceOpportunity(supabase, conversationId, queueItem.opportunity_id) : null;
   const currentQueueItem = queueItem
-    ? await buildConversationWorkspaceQueueItemSummary(supabase, queueItem, queue, detail)
+    ? await buildConversationWorkspaceQueueItemSummary(supabase, queueItem, queue, detail, currentOpportunity)
     : null;
   const subscriberContext = toQueueWorkspaceSubscriberSummary(detail.relationship);
   const recentEvents = await loadQueueWorkspaceRecentEvents(supabase, conversationId);
@@ -8115,6 +8447,7 @@ async function getConversationWorkspace(supabase: SupabaseClient, conversationId
     detail,
     current_queue: queue,
     current_queue_item: currentQueueItem,
+    current_opportunity: currentOpportunity,
     subscriber_context: subscriberContext,
     recent_events: recentEvents,
     attachments: []
@@ -8181,11 +8514,43 @@ async function loadConversationWorkspaceQueue(supabase: SupabaseClient, queueId:
   return (result.data ?? null) as Queue | null;
 }
 
+async function loadConversationWorkspaceOpportunity(
+  supabase: SupabaseClient,
+  conversationId: string,
+  opportunityId: string | null
+): Promise<ConversationOpportunitySummary | null> {
+  if (opportunityId) {
+    const byId = await supabase
+      .from("of_conversation_opportunities")
+      .select("id, creator_id, conversation_instance_id, queue_id, queue_item_id, route_key, opportunity_classification, category, title, summary, status, priority, queue_handoff, recommended_next_objective, source_event_id, source_step_id, resolved_at, created_at, updated_at, metadata")
+      .eq("id", opportunityId)
+      .maybeSingle();
+    if (byId.error && isMissingSchemaCacheRelationError(byId.error, "of_conversation_opportunities")) {
+      return null;
+    }
+    assertNoError(byId.error);
+    if (byId.data) return byId.data as ConversationOpportunitySummary;
+  }
+
+  const latest = await supabase
+    .from("of_conversation_opportunities")
+    .select("id, creator_id, conversation_instance_id, queue_id, queue_item_id, route_key, opportunity_classification, category, title, summary, status, priority, queue_handoff, recommended_next_objective, source_event_id, source_step_id, resolved_at, created_at, updated_at, metadata")
+    .eq("conversation_instance_id", conversationId)
+    .order("updated_at", { ascending: false })
+    .limit(1);
+  if (latest.error && isMissingSchemaCacheRelationError(latest.error, "of_conversation_opportunities")) {
+    return null;
+  }
+  assertNoError(latest.error);
+  return (latest.data ?? [])[0] ? ((latest.data ?? [])[0] as ConversationOpportunitySummary) : null;
+}
+
 async function buildConversationWorkspaceQueueItemSummary(
   supabase: SupabaseClient,
   row: ConversationWorkspaceQueueItemRow,
   queue: Queue | null,
-  detail: ConversationOperationsDetail
+  detail: ConversationOperationsDetail,
+  opportunity: ConversationOpportunitySummary | null
 ): Promise<QueueWorkspaceItemSummary | null> {
   const conversationSummary: QueueWorkspaceConversationSummary = {
     id: detail.conversation.id,
@@ -8201,9 +8566,10 @@ async function buildConversationWorkspaceQueueItemSummary(
   const subscriberSummary = toQueueWorkspaceSubscriberSummary(detail.relationship);
   const task = row.legacy_task_id ? await loadConversationWorkspaceLegacyTaskById(supabase, row.legacy_task_id) : null;
   const priorityScore = task?.priority_score ?? deriveTaskPriorityScore({ priority: row.priority });
+  const resolvedOpportunity = opportunity ?? opportunityFromMetadata(row.metadata) ?? null;
   return {
     ...row,
-    title: task?.title ?? queue?.label ?? conversationSummary.script_name ?? humanizeIdentifier(row.queue_id),
+    title: task?.title ?? resolvedOpportunity?.title ?? queue?.label ?? conversationSummary.script_name ?? humanizeIdentifier(row.queue_id),
     queue_name: queue?.name ?? task?.rule_name ?? row.queue_id,
     queue_label: queue?.label ?? task?.rule_name ?? humanizeIdentifier(row.queue_id),
     assignment_label: row.assigned_operator_id ?? queue?.assigned_operator_id ?? task?.assigned_to ?? null,
@@ -8211,7 +8577,8 @@ async function buildConversationWorkspaceQueueItemSummary(
     priority_reason: task?.priority_reason ?? stringValue(row.metadata.priority_reason),
     status_label: humanizeIdentifier(row.status),
     conversation: conversationSummary,
-    subscriber: subscriberSummary
+    subscriber: subscriberSummary,
+    opportunity: resolvedOpportunity
   };
 }
 
