@@ -259,7 +259,7 @@ export function ScriptBuilderPanel({
 
   async function handleCancelConversation(conversationId: string) {
     try {
-      await cancelConversation(conversationId, "Cancelled from Creator Cockpit.");
+      await cancelConversation(conversationId, "Cancelled from FunkMyFans.");
       await refreshConversations();
     } catch (cancelError) {
       setLocalError(errorMessage(cancelError));

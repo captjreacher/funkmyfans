@@ -66,11 +66,11 @@ export function Dashboard({
       <section className="premium-card rounded-lg p-4">
         <div className="flex items-start justify-between gap-4">
           <div className="min-w-0">
-            <div className="text-xs font-semibold uppercase tracking-[0.18em] text-cyan-200/80">Agency launchpad</div>
-            <h2 className="mt-2 text-xl font-semibold text-white">{data.morningBrief.headline}</h2>
-            <p className="mt-2 max-w-4xl text-sm leading-6 text-blue-100/68">{data.morningBrief.summary}</p>
+            <div className="text-xs font-semibold uppercase tracking-[0.18em] text-[#E66A8D]/90">Agency launchpad</div>
+            <h2 className="mt-2 text-xl font-semibold text-[#F3EEE8]">{data.morningBrief.headline}</h2>
+            <p className="mt-2 max-w-4xl text-sm leading-6 text-[#F3EEE8]/68">{data.morningBrief.summary}</p>
           </div>
-          <Sparkles className="h-5 w-5 shrink-0 text-cyan-300" aria-hidden="true" />
+          <Sparkles className="h-5 w-5 shrink-0 text-[#E66A8D]" aria-hidden="true" />
         </div>
       </section>
     </main>
@@ -94,15 +94,15 @@ function SummaryCard({
     <button type="button" onClick={onClick} className="premium-card premium-card-hover rounded-lg p-4 text-left">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="text-xs font-semibold uppercase tracking-[0.16em] text-cyan-200/80">{title}</div>
-          <div className="mt-2 text-2xl font-semibold text-white">{value}</div>
-          <div className="mt-1 text-sm text-blue-100/62">{detail}</div>
+          <div className="text-xs font-semibold uppercase tracking-[0.16em] text-[#E66A8D]/90">{title}</div>
+          <div className="mt-2 text-2xl font-semibold text-[#F3EEE8]">{value}</div>
+          <div className="mt-1 text-sm text-[#F3EEE8]/62">{detail}</div>
         </div>
-        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-cyan-400/10 text-cyan-300">
+        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#1d1118] text-[#E66A8D]">
           <Icon className="h-4 w-4" aria-hidden="true" />
         </div>
       </div>
-      <div className="mt-3 inline-flex items-center gap-1 text-xs font-semibold text-cyan-200">
+      <div className="mt-3 inline-flex items-center gap-1 text-xs font-semibold text-[#E66A8D]">
         Open
         <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
       </div>

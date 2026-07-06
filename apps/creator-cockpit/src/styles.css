@@ -1,8 +1,14 @@
 @import "tailwindcss";
 
 :root {
-  color: #e5f2ff;
-  background: #071423;
+  --brand-bg: #0a0a0a;
+  --brand-surface: #141418;
+  --brand-text: #f3eee8;
+  --brand-berry: #c21875;
+  --brand-magenta: #e66a8d;
+  --brand-violet: #7b3ff2;
+  color: var(--brand-text);
+  background: var(--brand-bg);
   font-family:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   color-scheme: dark;
@@ -13,9 +19,10 @@ body {
   min-width: 320px;
   min-height: 100vh;
   background:
-    radial-gradient(circle at top left, rgba(34, 211, 238, 0.14), transparent 32rem),
-    radial-gradient(circle at 72% 12%, rgba(236, 72, 153, 0.10), transparent 26rem),
-    linear-gradient(135deg, #071423 0%, #0d1b2a 48%, #071423 100%);
+    radial-gradient(circle at top left, rgba(194, 24, 117, 0.22), transparent 28rem),
+    radial-gradient(circle at 72% 12%, rgba(123, 63, 242, 0.16), transparent 24rem),
+    radial-gradient(circle at 50% 120%, rgba(230, 106, 141, 0.08), transparent 28rem),
+    linear-gradient(135deg, #0a0a0a 0%, #111116 48%, #0a0a0a 100%);
 }
 
 button,
@@ -39,7 +46,7 @@ button:focus-visible,
 input:focus-visible,
 select:focus-visible,
 textarea:focus-visible {
-  outline: 2px solid rgba(34, 211, 238, 0.85);
+  outline: 2px solid rgba(194, 24, 117, 0.95);
   outline-offset: 2px;
 }
 
@@ -64,22 +71,22 @@ select option {
 }
 
 .glass-panel {
-  border: 1px solid rgba(59, 130, 246, 0.18);
-  background: linear-gradient(145deg, rgba(22, 42, 64, 0.82), rgba(13, 27, 42, 0.72));
+  border: 1px solid rgba(194, 24, 117, 0.16);
+  background: linear-gradient(145deg, rgba(20, 20, 24, 0.88), rgba(10, 10, 10, 0.84));
   box-shadow: 0 24px 80px rgba(0, 0, 0, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.06);
   backdrop-filter: blur(18px);
 }
 
 .command-card {
-  border: 1px solid rgba(59, 130, 246, 0.18);
-  background: rgba(18, 34, 53, 0.72);
+  border: 1px solid rgba(194, 24, 117, 0.18);
+  background: rgba(20, 20, 24, 0.84);
   box-shadow: 0 18px 52px rgba(0, 0, 0, 0.20);
   backdrop-filter: blur(16px);
 }
 
 .premium-card {
-  border: 1px solid rgba(59, 130, 246, 0.18);
-  background: linear-gradient(145deg, rgba(22, 42, 64, 0.82), rgba(13, 27, 42, 0.72));
+  border: 1px solid rgba(194, 24, 117, 0.18);
+  background: linear-gradient(145deg, rgba(20, 20, 24, 0.92), rgba(10, 10, 10, 0.84));
   box-shadow: 0 18px 52px rgba(0, 0, 0, 0.20);
   backdrop-filter: blur(16px);
 }
@@ -94,14 +101,14 @@ select option {
 
 .premium-card-hover:hover {
   transform: translateY(-2px);
-  border-color: rgba(34, 211, 238, 0.38);
-  box-shadow: 0 22px 70px rgba(3, 10, 22, 0.38), 0 0 32px rgba(59, 130, 246, 0.12);
+  border-color: rgba(230, 106, 141, 0.40);
+  box-shadow: 0 22px 70px rgba(3, 10, 22, 0.38), 0 0 32px rgba(194, 24, 117, 0.16);
 }
 
 .selected-glow {
-  border-color: rgba(59, 130, 246, 0.58) !important;
-  background: linear-gradient(145deg, rgba(59, 130, 246, 0.20), rgba(34, 211, 238, 0.08)) !important;
-  box-shadow: 0 0 0 1px rgba(34, 211, 238, 0.12), 0 0 34px rgba(59, 130, 246, 0.22);
+  border-color: rgba(194, 24, 117, 0.62) !important;
+  background: linear-gradient(145deg, rgba(194, 24, 117, 0.24), rgba(123, 63, 242, 0.16)) !important;
+  box-shadow: 0 0 0 1px rgba(230, 106, 141, 0.14), 0 0 34px rgba(194, 24, 117, 0.24);
 }
 
 .animate-in-soft {
@@ -109,7 +116,7 @@ select option {
 }
 
 .shimmer {
-  background: linear-gradient(90deg, rgba(18, 34, 53, 0.8), rgba(59, 130, 246, 0.18), rgba(18, 34, 53, 0.8));
+  background: linear-gradient(90deg, rgba(20, 20, 24, 0.82), rgba(194, 24, 117, 0.18), rgba(20, 20, 24, 0.82));
   background-size: 220% 100%;
   animation: shimmer 1.5s ease-in-out infinite;
 }
@@ -138,12 +145,12 @@ select option {
 .bg-white,
 .bg-stone-50,
 .bg-stone-100 {
-  background-color: rgba(18, 34, 53, 0.76) !important;
+  background-color: rgba(20, 20, 24, 0.82) !important;
 }
 
 .bg-teal-50,
 .bg-sky-100 {
-  background-color: rgba(59, 130, 246, 0.18) !important;
+  background-color: rgba(194, 24, 117, 0.16) !important;
 }
 
 .bg-emerald-50 {
@@ -162,33 +169,33 @@ select option {
 
 .bg-stone-950,
 .bg-teal-700 {
-  background-color: #3b82f6 !important;
+  background-color: #c21875 !important;
 }
 
 .border-stone-100,
 .border-stone-200,
 .divide-stone-100 > :not([hidden]) ~ :not([hidden]) {
-  border-color: rgba(59, 130, 246, 0.18) !important;
+  border-color: rgba(194, 24, 117, 0.18) !important;
 }
 
 .text-stone-950,
 .text-stone-900,
 .text-stone-800,
 .text-stone-700 {
-  color: #e5f2ff !important;
+  color: var(--brand-text) !important;
 }
 
 .text-stone-600,
 .text-stone-500,
 .text-stone-400 {
-  color: rgba(191, 219, 254, 0.68) !important;
+  color: rgba(243, 238, 232, 0.68) !important;
 }
 
 .text-teal-900,
 .text-teal-800,
 .text-teal-700,
 .text-sky-800 {
-  color: #22d3ee !important;
+  color: var(--brand-magenta) !important;
 }
 
 .text-emerald-800,
@@ -206,5 +213,94 @@ select option {
 }
 
 table thead {
-  background: rgba(13, 27, 42, 0.92) !important;
+  background: rgba(20, 20, 24, 0.96) !important;
+}
+
+.text-cyan-100,
+[class*="text-cyan-100/"] {
+  color: var(--brand-text) !important;
+}
+
+.text-cyan-200,
+[class*="text-cyan-200/"] {
+  color: var(--brand-magenta) !important;
+}
+
+.text-cyan-300,
+[class*="text-cyan-300/"] {
+  color: var(--brand-berry) !important;
+}
+
+.text-cyan-400,
+[class*="text-cyan-400/"] {
+  color: var(--brand-berry) !important;
+}
+
+.text-cyan-500,
+[class*="text-cyan-500/"] {
+  color: var(--brand-violet) !important;
+}
+
+.bg-cyan-400 {
+  background-color: var(--brand-berry) !important;
+}
+
+[class*="bg-cyan-400/"] {
+  background-color: rgba(194, 24, 117, 0.18) !important;
+}
+
+.bg-cyan-300 {
+  background-color: var(--brand-magenta) !important;
+}
+
+[class*="bg-cyan-300/"] {
+  background-color: rgba(230, 106, 141, 0.14) !important;
+}
+
+.bg-cyan-500 {
+  background-color: var(--brand-violet) !important;
+}
+
+[class*="bg-cyan-500/"] {
+  background-color: rgba(123, 63, 242, 0.14) !important;
+}
+
+.border-cyan-300,
+[class*="border-cyan-300/"] {
+  border-color: rgba(194, 24, 117, 0.24) !important;
+}
+
+.border-cyan-400,
+[class*="border-cyan-400/"] {
+  border-color: rgba(230, 106, 141, 0.24) !important;
+}
+
+.ring-cyan-300,
+[class*="ring-cyan-300/"] {
+  --tw-ring-color: rgba(194, 24, 117, 0.4) !important;
+}
+
+.ring-cyan-400,
+[class*="ring-cyan-400/"] {
+  --tw-ring-color: rgba(230, 106, 141, 0.4) !important;
+}
+
+.brand-ink {
+  color: var(--brand-text);
+}
+
+.brand-accent {
+  color: var(--brand-berry);
+}
+
+.brand-accent-soft {
+  color: var(--brand-magenta);
+}
+
+.brand-surface {
+  background: var(--brand-surface);
+}
+
+.brand-ring {
+  box-shadow: 0 0 0 1px rgba(194, 24, 117, 0.18), 0 0 0 4px rgba(194, 24, 117, 0.08);
 }

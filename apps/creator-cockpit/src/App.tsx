@@ -1,5 +1,5 @@
-import { BarChart3, ClipboardList, FileText, PanelLeftClose, PanelLeftOpen, Plus, Route, Search, Settings2, Sparkles, TestTube2, Users } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { BarChart3, ClipboardList, FileText, PanelLeftClose, PanelLeftOpen, Plus, Route, Search, Settings2, TestTube2, Users } from "lucide-react";
+import { useEffect, useState } from "react";
 import { ConnectCreatorModal } from "./components/ConnectCreatorModal";
 import { CreatorDetail } from "./pages/CreatorDetail";
 import { Creators } from "./pages/Creators";
@@ -10,6 +10,7 @@ import { Queue } from "./pages/Queue";
 import { Settings } from "./pages/Settings";
 import { Simulations } from "./pages/Simulations";
 import { fetchDashboard, type DashboardData } from "./lib/api";
+import { FunkMyFansBrand, FunkMyFansSymbol } from "./components/FunkMyFansBrand";
 
 type View = "dashboard" | "creators" | "creator" | "queue" | "playbooks" | "journeys" | "simulations" | "settings";
 
@@ -30,7 +31,6 @@ export function App() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [connectCreatorOpen, setConnectCreatorOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => readStoredBoolean("fmf.appSidebarCollapsed", true));
-  const mainScrollRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     void refreshDashboard();
@@ -39,29 +39,6 @@ export function App() {
   useEffect(() => {
     window.localStorage.setItem("fmf.appSidebarCollapsed", JSON.stringify(sidebarCollapsed));
   }, [sidebarCollapsed]);
-
-  useEffect(() => {
-    const main = mainScrollRef.current;
-    if (!main || view !== "playbooks") return;
-
-    const handleWheel = (event: globalThis.WheelEvent) => {
-      const target = event.target;
-      if (!(target instanceof Element) || !target.closest(".react-flow")) return;
-      if (event.ctrlKey || event.metaKey) return;
-      if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
-
-      const previousScrollTop = main.scrollTop;
-      main.scrollTop += event.deltaY;
-
-      if (main.scrollTop !== previousScrollTop) {
-        event.preventDefault();
-        event.stopPropagation();
-      }
-    };
-
-    main.addEventListener("wheel", handleWheel, { capture: true, passive: false });
-    return () => main.removeEventListener("wheel", handleWheel, true);
-  }, [view]);
 
   async function refreshDashboard() {
     const result = await fetchDashboard();
@@ -87,17 +64,18 @@ export function App() {
   }
 
   return (
-    <div className="h-screen overflow-hidden text-slate-100">
-      <div className="flex h-full min-w-0 overflow-hidden">
-        <aside className={`hidden h-full min-h-0 shrink-0 flex-col overflow-hidden border-r border-blue-500/20 bg-[#06111d] lg:flex ${sidebarCollapsed ? "w-16" : "w-72"}`}>
-          <div className={`shrink-0 border-b border-blue-500/20 ${sidebarCollapsed ? "px-3 py-4" : "px-5 py-5"}`}>
+    <div className="min-h-screen bg-[#0A0A0A] text-[#F3EEE8]">
+      <div className="flex min-h-screen min-w-0">
+        <aside className={`hidden h-screen min-h-0 shrink-0 flex-col overflow-hidden border-r border-[#2a1a26] bg-[#0c0c10] lg:flex ${sidebarCollapsed ? "w-16" : "w-72"}`}>
+          <div className={`shrink-0 border-b border-[#2a1a26] ${sidebarCollapsed ? "px-3 py-4" : "px-5 py-5"}`}>
             <div className={`flex items-center ${sidebarCollapsed ? "justify-center" : "gap-3"}`}>
-              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-500/20 shadow-[0_0_34px_rgba(59,130,246,.20)] ring-1 ring-cyan-300/20">
-                <Sparkles className="h-6 w-6 text-cyan-300" aria-hidden="true" />
-              </div>
-              <div className={sidebarCollapsed ? "sr-only" : undefined}>
-                <div className="text-lg font-semibold text-white">Creator Cockpit</div>
-                <div className="text-sm text-blue-200/70">Creator operations platform</div>
+              {sidebarCollapsed ? (
+                <FunkMyFansSymbol className="h-10 w-10" />
+              ) : (
+                <FunkMyFansBrand variant="lockup" className="max-w-full" />
+              )}
+              <div className={sidebarCollapsed ? "sr-only" : "text-sm text-[#F3EEE8]/68"}>
+                Creator operations platform
               </div>
             </div>
           </div>
@@ -106,7 +84,7 @@ export function App() {
             <button
               type="button"
               onClick={() => setSidebarCollapsed((current) => !current)}
-              className={`flex w-full items-center rounded-lg border border-blue-400/20 bg-[#102338]/72 px-3 py-2.5 text-sm font-semibold text-blue-50 ${sidebarCollapsed ? "justify-center" : "gap-3"}`}
+              className={`flex w-full items-center rounded-lg border border-[#2f1f29] bg-[#17171b] px-3 py-2.5 text-sm font-semibold text-[#F3EEE8] ${sidebarCollapsed ? "justify-center" : "gap-3"}`}
               aria-label={sidebarCollapsed ? "Expand app sidebar" : "Collapse app sidebar"}
               title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
             >
@@ -122,8 +100,8 @@ export function App() {
                   onClick={() => setView(item.view)}
                   className={`flex w-full items-center rounded-lg px-3 py-2.5 text-left text-sm font-semibold ${sidebarCollapsed ? "justify-center" : "gap-3"} ${
                     view === item.view
-                      ? "selected-glow text-white"
-                      : "text-blue-100/68 hover:bg-[#1A3655]/55 hover:text-white"
+                      ? "selected-glow text-[#F3EEE8]"
+                      : "text-[#F3EEE8]/68 hover:bg-[#24141c]/80 hover:text-[#F3EEE8]"
                   }`}
                   title={item.label}
                 >
@@ -136,7 +114,7 @@ export function App() {
             <button
               type="button"
               onClick={openConnectCreator}
-              className={`mt-3 flex w-full items-center rounded-lg border border-cyan-300/20 bg-cyan-400/10 px-3 py-3 text-left text-sm font-semibold text-cyan-100 hover:bg-cyan-400/15 hover:text-white ${sidebarCollapsed ? "justify-center" : "gap-3"}`}
+              className={`mt-3 flex w-full items-center rounded-lg border border-[#7b3ff2]/24 bg-[#1a1020] px-3 py-3 text-left text-sm font-semibold text-[#F3EEE8] hover:bg-[#241226] hover:text-white ${sidebarCollapsed ? "justify-center" : "gap-3"}`}
               title="Connect Creator"
             >
               <Plus className="h-4 w-4" aria-hidden="true" />
@@ -146,25 +124,27 @@ export function App() {
         </aside>
 
         <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-          <header className="shrink-0 border-b border-blue-500/20 bg-[#071423]/78 backdrop-blur-2xl">
+          <header className="shrink-0 border-b border-[#2a1a26] bg-[#0a0a0a]/82 backdrop-blur-2xl">
             <div className="flex min-h-20 flex-col gap-3 px-4 py-3 md:flex-row md:items-center md:justify-between md:px-6">
               <div>
-                <div className="text-sm font-semibold text-cyan-300">Creator Cockpit</div>
-                <h1 className="text-xl font-semibold text-white">Agency operations, organised around creators.</h1>
-                <div className="mt-1 text-sm text-blue-200/70">
+                <div className="inline-flex items-center gap-3">
+                  <FunkMyFansBrand variant="lockup" className="text-base md:text-lg" />
+                </div>
+                <h1 className="mt-2 text-xl font-semibold text-[#F3EEE8]">Agency operations, organised around creators.</h1>
+                <div className="mt-1 text-sm text-[#F3EEE8]/68">
                   Connect creators, sync activity, activate playbooks, resolve decisions.
                 </div>
               </div>
               <label className="command-card flex min-h-10 w-full max-w-xl items-center gap-3 rounded-lg px-4">
-                <Search className="h-5 w-5 text-cyan-300" aria-hidden="true" />
+                <Search className="h-5 w-5 text-[#E66A8D]" aria-hidden="true" />
                 <input
-                  className="w-full bg-transparent text-sm outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/80 focus-visible:ring-offset-2 focus-visible:ring-offset-[#071423]"
+                  className="w-full bg-transparent text-sm outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#c21875]/80 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0a0a0a]"
                   placeholder="Search creators, queue items, playbooks, or simulations..."
                 />
               </label>
             </div>
 
-            <nav className="flex gap-2 overflow-x-auto border-t border-blue-500/20 px-3 py-3 lg:hidden">
+            <nav className="flex gap-2 overflow-x-auto border-t border-[#2a1a26] px-3 py-3 lg:hidden">
               {navItems.map((item) => (
                 <button
                   key={item.view}
@@ -172,8 +152,8 @@ export function App() {
                   onClick={() => setView(item.view)}
                   className={`shrink-0 rounded-xl px-3 py-2 text-sm font-semibold ${
                     view === item.view
-                      ? "selected-glow text-white"
-                      : "text-blue-100/68"
+                      ? "selected-glow text-[#F3EEE8]"
+                      : "text-[#F3EEE8]/68"
                   }`}
                 >
                   {item.label}
@@ -182,7 +162,7 @@ export function App() {
             </nav>
           </header>
 
-          <main ref={mainScrollRef} className="flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden p-4 md:p-6">
+          <main className="flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden p-4 md:p-6">
             {!data ? (
               <div className="glass-panel rounded-2xl p-6 text-blue-100/72">
                 <div className="mb-3 h-4 w-56 rounded-full shimmer" />
