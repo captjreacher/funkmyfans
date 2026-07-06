@@ -10,7 +10,7 @@ import { Queue } from "./pages/Queue";
 import { Settings } from "./pages/Settings";
 import { Simulations } from "./pages/Simulations";
 import { fetchDashboard, type DashboardData } from "./lib/api";
-import { FunkMyFansBrand, FunkMyFansSymbol, FunkMyFansWordmark } from "./components/FunkMyFansBrand";
+import { FunkMyFansSymbol, FunkMyFansWordmark } from "./components/FunkMyFansBrand";
 
 type View = "dashboard" | "creators" | "creator" | "queue" | "playbooks" | "journeys" | "simulations" | "settings";
 
@@ -67,15 +67,12 @@ export function App() {
     <div className="min-h-screen bg-[#0A0A0A] text-[#F3EEE8]">
       <div className="flex min-h-screen min-w-0">
         <aside className={`hidden h-screen min-h-0 shrink-0 flex-col overflow-hidden border-r border-[#2a1a26] bg-[#0c0c10] lg:flex ${sidebarCollapsed ? "w-16" : "w-72"}`}>
-          <div className={`shrink-0 border-b border-[#2a1a26] ${sidebarCollapsed ? "px-3 py-4" : "px-5 py-5"}`}>
-            <div className={`flex items-center ${sidebarCollapsed ? "justify-center" : "gap-3"}`}>
-              {sidebarCollapsed ? (
-                <FunkMyFansSymbol className="h-10 w-10" />
-              ) : (
-                <FunkMyFansBrand variant="lockup" className="max-w-full" />
-              )}
-              <div className={sidebarCollapsed ? "sr-only" : "text-sm text-[#F3EEE8]/68"}>
-                Creator operations platform
+          <div className={`shrink-0 border-b border-[#2a1a26] ${sidebarCollapsed ? "px-3 py-4" : "px-4 py-4"}`}>
+            <div className={`flex items-center ${sidebarCollapsed ? "justify-center" : "gap-2.5"}`}>
+              <FunkMyFansSymbol className="h-9 w-9 shrink-0" />
+              <div className={`flex min-w-0 flex-col leading-tight ${sidebarCollapsed ? "sr-only" : ""}`}>
+                <FunkMyFansWordmark className="text-base" />
+                <span className="truncate text-xs text-[#F3EEE8]/60">Creator operations platform</span>
               </div>
             </div>
           </div>
