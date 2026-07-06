@@ -97,35 +97,35 @@ values
   ('playbook_goal', 'welcome_new_subscriber', 'Welcome New Subscriber', 'Open the relationship, introduce creator voice, and set expectations.', 'Journey', false, true, 10, jsonb_build_object('trigger_event_type', 'subscriber_created', 'folder_name', 'Journey Library', 'category', 'Welcome', 'cooldown_hours', 24, 'max_sends_per_fan', 1, 'tags', jsonb_build_array('welcome', 'relationship'), 'preview_steps', jsonb_build_array(
     jsonb_build_object('type', 'message', 'body', 'Hey {{subscriber_name}}, welcome in. I am glad you are here.', 'delayMinutes', 0),
     jsonb_build_object('type', 'question', 'body', 'What kind of stuff do you want most from me?', 'delayMinutes', 60)
-  )),
+  ))),
   ('playbook_goal', 'build_relationship', 'Build Relationship', 'Keep the conversation warm, natural, and personal.', 'Journey', false, false, 20, jsonb_build_object('trigger_event_type', 'existing_conversation', 'folder_name', 'Journey Library', 'category', 'Relationship', 'cooldown_hours', 36, 'max_sends_per_fan', 2, 'tags', jsonb_build_array('relationship', 'conversation'), 'preview_steps', jsonb_build_array(
     jsonb_build_object('type', 'message', 'body', 'I saw your message and wanted to answer properly.', 'delayMinutes', 0),
     jsonb_build_object('type', 'follow_up', 'body', 'If you want, we can keep this going later tonight.', 'delayMinutes', 180)
-  )),
+  ))),
   ('playbook_goal', 'high_spender_follow_up', 'High Spender Follow-up', 'Prioritise high-value fans with a careful follow-up.', 'Revenue', false, false, 30, jsonb_build_object('trigger_event_type', 'high_spender', 'folder_name', 'Revenue Plays', 'category', 'Revenue', 'cooldown_hours', 12, 'max_sends_per_fan', 1, 'tags', jsonb_build_array('vip', 'revenue'), 'preview_steps', jsonb_build_array(
     jsonb_build_object('type', 'message', 'body', 'You have been incredibly supportive lately, so I wanted to reach out directly.', 'delayMinutes', 0),
     jsonb_build_object('type', 'question', 'body', 'Want something custom from me next?', 'delayMinutes', 90)
-  )),
+  ))),
   ('playbook_goal', 'upsell_custom_content', 'Upsell Custom Content', 'Move a fan toward custom content with a clear offer.', 'Revenue', true, false, 40, jsonb_build_object('trigger_event_type', 'custom_content_purchased', 'folder_name', 'Revenue Plays', 'category', 'Revenue', 'cooldown_hours', 24, 'max_sends_per_fan', 1, 'tags', jsonb_build_array('custom', 'upsell'), 'preview_steps', jsonb_build_array(
     jsonb_build_object('type', 'message', 'body', 'I can do that for you. Here is the fastest way to make it happen.', 'delayMinutes', 0),
     jsonb_build_object('type', 'follow_up', 'body', 'If you want the premium version, I can put that together too.', 'delayMinutes', 120)
-  )),
+  ))),
   ('playbook_goal', 'recover_expired_subscriber', 'Recover Expired Subscriber', 'Bring back a churned fan with a low-friction re-entry.', 'Recovery', false, false, 50, jsonb_build_object('trigger_event_type', 'subscription_expired', 'folder_name', 'Recovery', 'category', 'Retention', 'cooldown_hours', 72, 'max_sends_per_fan', 2, 'tags', jsonb_build_array('retention', 'recovery'), 'preview_steps', jsonb_build_array(
     jsonb_build_object('type', 'message', 'body', 'I noticed you dropped off, so I wanted to make this easy to pick back up.', 'delayMinutes', 0),
     jsonb_build_object('type', 'question', 'body', 'Want me to send you something worth coming back for?', 'delayMinutes', 240)
-  )),
+  ))),
   ('playbook_goal', 're_engage_quiet_fan', 'Re-engage Quiet Fan', 'Wake up a quiet fan with a light, low-pressure message.', 'Reactivation', false, false, 60, jsonb_build_object('trigger_event_type', 'reply_after_inactivity', 'folder_name', 'Reactivation', 'category', 'Reactivation', 'cooldown_hours', 48, 'max_sends_per_fan', 1, 'tags', jsonb_build_array('reactivation', 'quiet-fan'), 'preview_steps', jsonb_build_array(
     jsonb_build_object('type', 'message', 'body', 'You have been quiet lately, so I thought I would check in.', 'delayMinutes', 0),
     jsonb_build_object('type', 'question', 'body', 'Still around, or should I tempt you back?', 'delayMinutes', 180)
-  )),
+  ))),
   ('playbook_goal', 'warning_stand_down', 'Warning / Stand Down', 'Send a firm boundary message when the conversation needs a stop or reset.', 'Safety', false, false, 70, jsonb_build_object('trigger_event_type', 'manual', 'folder_name', 'Boundaries', 'category', 'Safety', 'cooldown_hours', 0, 'max_sends_per_fan', 1, 'tags', jsonb_build_array('warning', 'boundaries'), 'preview_steps', jsonb_build_array(
     jsonb_build_object('type', 'message', 'body', 'I need to keep this conversation within boundaries.', 'delayMinutes', 0),
     jsonb_build_object('type', 'end', 'body', 'Conversation closed.', 'delayMinutes', 0)
-  )),
+  ))),
   ('playbook_goal', 'manual_campaign', 'Manual Campaign', 'Operator-led playbook for broadcasts, launches, and campaigns.', 'Campaign', false, false, 80, jsonb_build_object('trigger_event_type', 'manual', 'folder_name', 'Manual Campaigns', 'category', 'Campaign', 'cooldown_hours', 6, 'max_sends_per_fan', 1, 'tags', jsonb_build_array('manual', 'campaign'), 'preview_steps', jsonb_build_array(
     jsonb_build_object('type', 'message', 'body', 'I have got something new I want to share with you.', 'delayMinutes', 0),
     jsonb_build_object('type', 'follow_up', 'body', 'If you missed it, I can send the details again.', 'delayMinutes', 180)
-  )),
+  ))),
   -- Playbook styles
   ('playbook_style', 'friendly', 'Friendly', 'Warm, upbeat, and easy to trust.', 'Tone', false, false, 10, jsonb_build_object('ai_mode', 'draft_only', 'approval_mode', 'always_approve', 'tags', jsonb_build_array('friendly', 'warm'))),
   ('playbook_style', 'flirty', 'Flirty', 'Playful energy with a little edge.', 'Tone', false, false, 20, jsonb_build_object('ai_mode', 'draft_only', 'approval_mode', 'always_approve', 'tags', jsonb_build_array('flirty', 'playful'))),
