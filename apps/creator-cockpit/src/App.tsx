@@ -1,5 +1,5 @@
 import { BarChart3, ClipboardList, FileText, PanelLeftClose, PanelLeftOpen, Plus, Route, Search, Settings2, Sparkles, TestTube2, Users } from "lucide-react";
-import { useEffect, useState, type WheelEvent } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ConnectCreatorModal } from "./components/ConnectCreatorModal";
 import { CreatorDetail } from "./pages/CreatorDetail";
 import { Creators } from "./pages/Creators";
@@ -30,6 +30,7 @@ export function App() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [connectCreatorOpen, setConnectCreatorOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => readStoredBoolean("fmf.appSidebarCollapsed", true));
+  const mainScrollRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     void refreshDashboard();
@@ -38,6 +39,29 @@ export function App() {
   useEffect(() => {
     window.localStorage.setItem("fmf.appSidebarCollapsed", JSON.stringify(sidebarCollapsed));
   }, [sidebarCollapsed]);
+
+  useEffect(() => {
+    const main = mainScrollRef.current;
+    if (!main || view !== "playbooks") return;
+
+    const handleWheel = (event: globalThis.WheelEvent) => {
+      const target = event.target;
+      if (!(target instanceof Element) || !target.closest(".react-flow")) return;
+      if (event.ctrlKey || event.metaKey) return;
+      if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
+
+      const previousScrollTop = main.scrollTop;
+      main.scrollTop += event.deltaY;
+
+      if (main.scrollTop !== previousScrollTop) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    };
+
+    main.addEventListener("wheel", handleWheel, { capture: true, passive: false });
+    return () => main.removeEventListener("wheel", handleWheel, true);
+  }, [view]);
 
   async function refreshDashboard() {
     const result = await fetchDashboard();
@@ -60,16 +84,6 @@ export function App() {
   function openSimulations(scriptId?: string) {
     setSimulationScriptId(scriptId);
     setView("simulations");
-  }
-
-  function handleMainWheelCapture(event: WheelEvent<HTMLElement>) {
-    const target = event.target;
-    if (!(target instanceof Element) || !target.closest(".react-flow")) return;
-    if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
-
-    event.preventDefault();
-    event.stopPropagation();
-    event.currentTarget.scrollTop += event.deltaY;
   }
 
   return (
@@ -168,7 +182,7 @@ export function App() {
             </nav>
           </header>
 
-          <main onWheelCapture={handleMainWheelCapture} className="flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden p-4 md:p-6">
+          <main ref={mainScrollRef} className="flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden p-4 md:p-6">
             {!data ? (
               <div className="glass-panel rounded-2xl p-6 text-blue-100/72">
                 <div className="mb-3 h-4 w-56 rounded-full shimmer" />
