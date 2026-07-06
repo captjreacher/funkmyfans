@@ -10,7 +10,7 @@ import { Queue } from "./pages/Queue";
 import { Settings } from "./pages/Settings";
 import { Simulations } from "./pages/Simulations";
 import { fetchDashboard, type DashboardData } from "./lib/api";
-import { FunkMyFansBrand, FunkMyFansSymbol } from "./components/FunkMyFansBrand";
+import { FunkMyFansBrand, FunkMyFansSymbol, FunkMyFansWordmark } from "./components/FunkMyFansBrand";
 
 type View = "dashboard" | "creators" | "creator" | "queue" | "playbooks" | "journeys" | "simulations" | "settings";
 
@@ -128,10 +128,11 @@ export function App() {
             <div className="flex min-h-20 flex-col gap-3 px-4 py-3 md:flex-row md:items-center md:justify-between md:px-6">
               <div>
                 <div className="inline-flex items-center gap-3">
-                  <FunkMyFansBrand variant="lockup" className="text-base md:text-lg" />
+                  <FunkMyFansSymbol className="h-16 w-16 shrink-0 md:h-[72px] md:w-[72px]" />
+                  <FunkMyFansWordmark className="text-lg md:text-xl" />
                 </div>
-                <h1 className="mt-2 text-xl font-semibold text-[#F3EEE8]">Agency operations, organised around creators.</h1>
-                <div className="mt-1 text-sm text-[#F3EEE8]/68">
+                <h1 className="mt-1 text-2xl font-semibold tracking-[-0.02em] text-[#F3EEE8] md:text-3xl">Agency operations, organised around creators.</h1>
+                <div className="mt-1 text-base text-[#F3EEE8]/68">
                   Connect creators, sync activity, activate playbooks, resolve decisions.
                 </div>
               </div>
