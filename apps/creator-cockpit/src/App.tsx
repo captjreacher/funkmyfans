@@ -1,5 +1,5 @@
 import { BarChart3, ClipboardList, FileText, PanelLeftClose, PanelLeftOpen, Plus, Route, Search, Settings2, Sparkles, TestTube2, Users } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type WheelEvent } from "react";
 import { ConnectCreatorModal } from "./components/ConnectCreatorModal";
 import { CreatorDetail } from "./pages/CreatorDetail";
 import { Creators } from "./pages/Creators";
@@ -60,6 +60,16 @@ export function App() {
   function openSimulations(scriptId?: string) {
     setSimulationScriptId(scriptId);
     setView("simulations");
+  }
+
+  function handleMainWheelCapture(event: WheelEvent<HTMLElement>) {
+    const target = event.target;
+    if (!(target instanceof Element) || !target.closest(".react-flow")) return;
+    if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.scrollTop += event.deltaY;
   }
 
   return (
@@ -158,7 +168,7 @@ export function App() {
             </nav>
           </header>
 
-          <main className="flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden p-4 md:p-6">
+          <main onWheelCapture={handleMainWheelCapture} className="flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden p-4 md:p-6">
             {!data ? (
               <div className="glass-panel rounded-2xl p-6 text-blue-100/72">
                 <div className="mb-3 h-4 w-56 rounded-full shimmer" />
