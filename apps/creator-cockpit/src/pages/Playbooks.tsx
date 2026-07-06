@@ -1779,12 +1779,12 @@ function buildFlowEdge(connection: FlowEdgeInput): FlowEdge {
     type: "smoothstep",
     label: displayLabel,
     data: { label },
-    style: { stroke: "rgba(34,211,238,.58)", strokeWidth: 1.7 },
+    style: { stroke: "rgba(194,24,117,.60)", strokeWidth: 1.7 },
     labelBgPadding: [8, 4],
     labelBgBorderRadius: 6,
-    labelBgStyle: { fill: "rgba(8,21,36,.94)", stroke: "rgba(34,211,238,.28)" },
+    labelBgStyle: { fill: "rgba(20,20,24,.96)", stroke: "rgba(230,106,141,.24)" },
     labelStyle: { fill: "#dff8ff", fontSize: 11, fontWeight: 700 },
-    markerEnd: { type: MarkerType.ArrowClosed, color: "rgba(34,211,238,.58)" }
+    markerEnd: { type: MarkerType.ArrowClosed, color: "rgba(194,24,117,.60)" }
   };
 }
 
@@ -1819,7 +1819,7 @@ function withAuthoringData(
 
 function withEdgeFocusState(edge: FlowEdge, focusedPathNodeIds: Set<string> | null): FlowEdge {
   const dimmed = Boolean(focusedPathNodeIds && (!focusedPathNodeIds.has(edge.source) || !focusedPathNodeIds.has(edge.target)));
-  const stroke = dimmed ? "rgba(96,165,250,.22)" : "rgba(34,211,238,.86)";
+  const stroke = dimmed ? "rgba(123,63,242,.24)" : "rgba(194,24,117,.90)";
   return {
     ...edge,
     data: { ...edge.data, dimmed },
@@ -1831,7 +1831,7 @@ function withEdgeFocusState(edge: FlowEdge, focusedPathNodeIds: Set<string> | nu
     },
     labelStyle: {
       ...(edge.labelStyle ?? {}),
-      fill: dimmed ? "rgba(191,219,254,.40)" : "#dff8ff"
+      fill: dimmed ? "rgba(243,238,232,.42)" : "#f3eee8"
     },
     markerEnd: { type: MarkerType.ArrowClosed, color: stroke }
   };
@@ -1924,7 +1924,7 @@ function statusToSimulationState(conversationStatus?: string | null, simulationS
 }
 
 function simulationNodeClass(state: BuilderSimulationStepState) {
-  if (state === "running") return "ring-2 ring-cyan-300/70";
+  if (state === "running") return "ring-2 ring-[#c21875]/70";
   if (state === "completed") return "ring-1 ring-emerald-300/55";
   if (state === "waiting_queue") return "ring-2 ring-amber-300/70";
   if (state === "failed") return "ring-2 ring-rose-300/75";
@@ -1932,7 +1932,7 @@ function simulationNodeClass(state: BuilderSimulationStepState) {
 }
 
 function simulationStateTone(state: BuilderSimulationStepState) {
-  if (state === "running") return "bg-cyan-400/14 text-cyan-100";
+  if (state === "running") return "bg-[#c21875]/14 text-[#f3eee8]";
   if (state === "completed") return "bg-emerald-500/14 text-emerald-100";
   if (state === "waiting_queue") return "bg-amber-400/14 text-amber-100";
   if (state === "failed") return "bg-rose-500/16 text-rose-100";
@@ -1940,7 +1940,7 @@ function simulationStateTone(state: BuilderSimulationStepState) {
 }
 
 function simulationTimelineTone(state: BuilderSimulationStepState) {
-  if (state === "running") return "border-cyan-300/25 bg-cyan-400/10 text-cyan-50";
+  if (state === "running") return "border-[#c21875]/25 bg-[#c21875]/10 text-[#f3eee8]";
   if (state === "completed") return "border-emerald-300/25 bg-emerald-500/10 text-emerald-50";
   if (state === "waiting_queue") return "border-amber-300/25 bg-amber-400/10 text-amber-50";
   if (state === "failed") return "border-rose-300/25 bg-rose-500/10 text-rose-50";
@@ -2351,12 +2351,12 @@ function operatorIssueMessage(message: string) {
 }
 
 function categoryColor(category?: ScriptVisualBuilderNodeCategory) {
-  if (category === "ai") return "#38bdf8";
-  if (category === "logic") return "#a78bfa";
-  if (category === "human") return "#f59e0b";
-  if (category === "commerce") return "#22c55e";
-  if (category === "timing") return "#60a5fa";
-  return "#22d3ee";
+  if (category === "ai") return "#c21875";
+  if (category === "logic") return "#7b3ff2";
+  if (category === "human") return "#e66a8d";
+  if (category === "commerce") return "#c21875";
+  if (category === "timing") return "#e66a8d";
+  return "#c21875";
 }
 
 function sameStringArray(left: string[], right: string[]) {
