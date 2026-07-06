@@ -875,7 +875,7 @@ function ConversationFlowBuilder({
   }
 
   return (
-    <main className="animate-in-soft flex h-full min-h-[calc(100vh-9rem)] flex-col overflow-hidden rounded-lg border border-blue-500/18 bg-[#071423]">
+    <main className="animate-in-soft flex min-h-[calc(100vh-9rem)] flex-col rounded-lg border border-blue-500/18 bg-[#071423]">
       <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-blue-500/18 bg-[#0B1828]/95 px-4 py-3">
         <div className="flex min-w-0 items-center gap-3">
           <button type="button" onClick={onBack} className="inline-flex items-center gap-2 rounded-lg border border-blue-400/20 bg-[#102338]/72 px-3 py-2 text-sm font-semibold text-blue-50">
@@ -956,10 +956,10 @@ function ConversationFlowBuilder({
 
       {error ? <div className="shrink-0 border-b border-rose-400/25 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">{error}</div> : null}
 
-      <div className="grid min-h-0 flex-1 overflow-hidden" style={{ gridTemplateColumns: builderGridTemplate }}>
+      <div className="grid min-h-0 flex-1" style={{ gridTemplateColumns: builderGridTemplate }}>
         {panelState.leftPanelOpen ? <NodeLibrary onDragStart={handleDragStart} onAddNode={addNode} /> : null}
 
-        <section className="relative min-h-[460px] min-w-0 overflow-hidden bg-[#06111d]" onDrop={handleDrop} onDragOver={handleDragOver}>
+        <section className="relative min-h-[560px] min-w-0 overflow-hidden bg-[#06111d]" onDrop={handleDrop} onDragOver={handleDragOver}>
           <ReactFlow<FlowNode, FlowEdge>
             className="h-full w-full"
             nodes={renderedNodes}
