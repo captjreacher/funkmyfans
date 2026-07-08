@@ -63,6 +63,7 @@ import {
   type NodeProps
 } from "@xyflow/react";
 import type {
+  JourneyGraph,
   JourneyNode,
   OfMessageScript,
   PlaybookJourney,
@@ -79,6 +80,8 @@ import {
   fetchQueueWorkspace,
   fetchScript,
   fetchScriptsWorkspace,
+  fetchScriptJourney,
+  saveScriptJourney,
   fetchSimulationDetail,
   saveScriptBuilder,
   simulationPurchase,
@@ -491,10 +494,70 @@ function PlaybookJourneyWorkspace({
 }) {
   const [mode, setMode] = useState<"journey" | "advanced">("journey");
   const [openNodeId, setOpenNodeId] = useState<string | null>(null);
+  const [journey, setJourney] = useState<PlaybookJourney | null>(null);
+  const [persisted, setPersisted] = useState(false);
+  const [draftGraph, setDraftGraph] = useState<JourneyGraph | null>(null);
+  const [baselineGraphJson, setBaselineGraphJson] = useState("");
+  const [journeyLoading, setJourneyLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [journeyError, setJourneyError] = useState<string | null>(null);
 
   const creatorName = useMemo(() => creatorLabel(workspace, session.script.creator_id), [workspace, session.script.creator_id]);
-  const journey = useMemo<PlaybookJourney>(() => buildPlaybookJourney(session.script, creatorName), [session.script, creatorName]);
-  const openNode = useMemo<JourneyNode | null>(() => journey.graph.nodes.find((node) => node.id === openNodeId) ?? null, [journey, openNodeId]);
+
+  // Load the persisted journey; fall back to the NODE-1B derivation when none
+  // exists (or if the backend is unreachable) so playbooks always open.
+  useEffect(() => {
+    let cancelled = false;
+    setJourneyLoading(true);
+    setJourneyError(null);
+    setDraftGraph(null);
+    void (async () => {
+      let loaded: PlaybookJourney;
+      let fromServer = false;
+      try {
+        const result = await fetchScriptJourney(session.script.id);
+        if (result.journey) {
+          loaded = result.journey;
+          fromServer = true;
+        } else {
+          loaded = buildPlaybookJourney(session.script, creatorName);
+        }
+      } catch {
+        loaded = buildPlaybookJourney(session.script, creatorName);
+      }
+      if (cancelled) return;
+      setJourney(loaded);
+      setPersisted(fromServer);
+      setBaselineGraphJson(JSON.stringify(loaded.graph));
+      setJourneyLoading(false);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [session.script, creatorName]);
+
+  const openNode = useMemo<JourneyNode | null>(() => journey?.graph.nodes.find((node) => node.id === openNodeId) ?? null, [journey, openNodeId]);
+
+  const dirty = Boolean(draftGraph) && JSON.stringify(draftGraph) !== baselineGraphJson;
+  const canSave = !journeyLoading && Boolean(journey) && (dirty || !persisted);
+
+  async function handleSaveJourney() {
+    if (!journey) return;
+    setSaving(true);
+    setJourneyError(null);
+    try {
+      const payload: PlaybookJourney = { ...journey, graph: draftGraph ?? journey.graph };
+      const result = await saveScriptJourney(session.script.id, payload);
+      setJourney(result.journey);
+      setPersisted(true);
+      setBaselineGraphJson(JSON.stringify(result.journey.graph));
+      setDraftGraph(result.journey.graph);
+    } catch (saveErr) {
+      setJourneyError(errorMessage(saveErr, "Unable to save journey"));
+    } finally {
+      setSaving(false);
+    }
+  }
 
   // Advanced mode mounts the EXISTING conversation builder unchanged — the node
   // flow editor and its runtime behaviour are untouched by NODE-1B. Only the
@@ -518,6 +581,7 @@ function PlaybookJourneyWorkspace({
   }
 
   const statusLabel = session.script.builder_config?.workspace?.archivedAt ? "archived" : session.script.status;
+  const saveStateLabel = saving ? "Saving…" : dirty ? "Unsaved changes" : persisted ? "Saved" : "Not saved yet";
 
   return (
     <main className="animate-in-soft flex h-full min-h-0 flex-col gap-4">
@@ -533,13 +597,18 @@ function PlaybookJourneyWorkspace({
               Journey
             </div>
             <div className="flex items-center gap-2">
-              <h2 className="truncate text-xl font-semibold text-white">{journey.title}</h2>
+              <h2 className="truncate text-xl font-semibold text-white">{journey?.title ?? flowLabel(session.script.name)}</h2>
               <span className={`rounded-full px-2.5 py-0.5 text-xs font-semibold ${statusTone(session.script)}`}>{statusLabel}</span>
             </div>
             <div className="truncate text-xs text-blue-100/55">{creatorName}</div>
           </div>
         </div>
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs font-medium text-blue-100/55">{saveStateLabel}</span>
+          <button type="button" onClick={() => void handleSaveJourney()} disabled={!canSave || saving} className="inline-flex items-center gap-2 rounded-lg bg-cyan-400 px-3 py-2 text-sm font-semibold text-slate-950 disabled:opacity-45">
+            <Save className="h-4 w-4" aria-hidden="true" />
+            Save journey
+          </button>
           <button type="button" onClick={onSimulate} className="inline-flex items-center gap-2 rounded-lg border border-blue-400/20 bg-[#102338]/72 px-3 py-2 text-sm font-semibold text-blue-50 hover:border-blue-300/40">
             <Play className="h-4 w-4" aria-hidden="true" />
             Simulate
@@ -551,17 +620,23 @@ function PlaybookJourneyWorkspace({
         </div>
       </header>
 
-      {error ? <div className="rounded-lg border border-rose-400/25 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">{error}</div> : null}
+      {journeyError || error ? <div className="rounded-lg border border-rose-400/25 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">{journeyError ?? error}</div> : null}
 
       <div className="relative min-h-0 flex-1 overflow-hidden rounded-xl premium-card">
-        <JourneyCanvas key={session.script.id} journey={journey} onOpenNode={setOpenNodeId} />
-        <JourneyNodeDrawer
-          node={openNode}
-          onClose={() => setOpenNodeId(null)}
-          onOpenAdvanced={(node) => {
-            if (node.class === "conversation") setMode("advanced");
-          }}
-        />
+        {journeyLoading || !journey ? (
+          <div className="flex h-full items-center justify-center text-sm text-blue-100/55">Loading journey…</div>
+        ) : (
+          <>
+            <JourneyCanvas key={session.script.id} journey={journey} onOpenNode={setOpenNodeId} onGraphChange={setDraftGraph} />
+            <JourneyNodeDrawer
+              node={openNode}
+              onClose={() => setOpenNodeId(null)}
+              onOpenAdvanced={(node) => {
+                if (node.class === "conversation") setMode("advanced");
+              }}
+            />
+          </>
+        )}
       </div>
 
       <p className="px-1 text-xs text-blue-100/50">

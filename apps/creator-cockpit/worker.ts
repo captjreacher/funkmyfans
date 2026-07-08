@@ -87,6 +87,9 @@ import type {
   ScriptMessageGenerationMode,
   ScriptWorkspaceConfig,
   ScriptStepTemplate,
+  JourneyGraph,
+  OfPlaybookJourney,
+  PlaybookJourney,
   SyncType
 } from "@funkmyfans/of-types";
 import { mapConversationInstanceToConversation, mapConversationRuntimeStatusToLifecycleState, mapTaskToQueue, mapTaskToQueueItem, summarizeEventType } from "@funkmyfans/of-types";
@@ -1243,6 +1246,24 @@ function boundedPriority(value: unknown, label: string) {
     const body = (await request.json().catch(() => ({}))) as Partial<MessageScriptTemplate>;
     const script = await saveScriptBuilder(supabase, scriptBuilderMatch[1], body);
     return Response.json({ script }, { headers: jsonHeaders });
+  }
+
+  const scriptJourneyMatch = url.pathname.match(/^\/api\/scripts\/([^/]+)\/journey$/);
+  if (request.method === "GET" && scriptJourneyMatch) {
+    if (!isUuid(scriptJourneyMatch[1])) {
+      return Response.json({ error: "Script id must be a database UUID" }, { status: 400, headers: jsonHeaders });
+    }
+    const journey = await getPlaybookJourney(supabase, scriptJourneyMatch[1]);
+    return Response.json({ journey }, { headers: jsonHeaders });
+  }
+
+  if (request.method === "PUT" && scriptJourneyMatch) {
+    if (!isUuid(scriptJourneyMatch[1])) {
+      return Response.json({ error: "Script id must be a database UUID" }, { status: 400, headers: jsonHeaders });
+    }
+    const body = (await request.json().catch(() => ({}))) as Partial<PlaybookJourney>;
+    const journey = await savePlaybookJourney(supabase, scriptJourneyMatch[1], body);
+    return Response.json({ journey }, { headers: jsonHeaders });
   }
 
   const scriptDuplicateMatch = url.pathname.match(/^\/api\/scripts\/([^/]+)\/duplicate$/);
@@ -3803,6 +3824,56 @@ async function saveScriptBuilder(supabase: SupabaseClient, scriptId: string, bod
   const saved = (await listCreatorScripts(supabase, existing.data.creator_id as string)).find((item) => item.id === scriptId);
   if (!saved) throw new Error("Saved script could not be reloaded");
   return saved;
+}
+
+// ── NODE-1C: journey persistence (editorial surface; no runtime impact) ─────
+
+function mapPlaybookJourneyRow(row: OfPlaybookJourney): PlaybookJourney {
+  const graph = (row.graph && typeof row.graph === "object" ? row.graph : { schemaVersion: 1, nodes: [], connections: [] }) as JourneyGraph;
+  return {
+    id: row.id,
+    creatorId: row.creator_id,
+    title: row.title,
+    status: row.status,
+    graph,
+    version: row.version,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+async function getPlaybookJourney(supabase: SupabaseClient, scriptId: string): Promise<PlaybookJourney | null> {
+  const result = await supabase.from("playbook_journeys").select("*").eq("script_id", scriptId).maybeSingle();
+  assertNoError(result.error);
+  if (!result.data) return null;
+  return mapPlaybookJourneyRow(result.data as OfPlaybookJourney);
+}
+
+async function savePlaybookJourney(supabase: SupabaseClient, scriptId: string, body: Partial<PlaybookJourney>): Promise<PlaybookJourney> {
+  const existing = await supabase.from("of_message_scripts").select("id, creator_id").eq("id", scriptId).single();
+  assertNoError(existing.error);
+  if (!existing.data) throw new ApiError(404, "Script not found");
+
+  const graph = body.graph;
+  if (!graph || typeof graph !== "object" || !Array.isArray(graph.nodes) || !Array.isArray(graph.connections)) {
+    throw new ApiError(422, "A journey graph with nodes and connections is required");
+  }
+
+  const status: PlaybookJourney["status"] = body.status === "active" || body.status === "archived" ? body.status : "draft";
+  const payload = {
+    script_id: scriptId,
+    creator_id: existing.data.creator_id as string,
+    title: body.title?.trim() || "Journey",
+    status,
+    schema_version: graph.schemaVersion ?? 1,
+    version: typeof body.version === "number" ? body.version : 1,
+    graph
+  };
+
+  const result = await supabase.from("playbook_journeys").upsert(payload, { onConflict: "script_id" }).select("*").single();
+  assertNoError(result.error);
+  if (!result.data) throw new Error("Journey could not be saved");
+  return mapPlaybookJourneyRow(result.data as OfPlaybookJourney);
 }
 
 async function duplicateScriptDefinition(supabase: SupabaseClient, scriptId: string) {

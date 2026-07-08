@@ -2055,6 +2055,13 @@ export interface JourneyGroup {
   id: string;
   label: string;
   colorKey?: string;
+  // Optional persisted layout (NODE-1C). When absent, geometry is derived from
+  // member node positions. Persisting it lets a stored graph round-trip the
+  // group box exactly as the canvas rendered it.
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
 }
 
 export interface JourneyViewport {
@@ -2089,6 +2096,25 @@ export interface PlaybookJourney {
   version: number;
   createdAt: string;
   updatedAt: string;
+}
+
+/**
+ * Persisted playbook-journey row (NODE-1C). One row per playbook (script),
+ * keyed by script_id. Stores the JourneyGraph as JSONB alongside light
+ * metadata. It does NOT touch runtime tables; the runtime continues to walk the
+ * compiled script referenced by each Conversation node's nodeFlowRef.
+ */
+export interface OfPlaybookJourney {
+  id: string;
+  script_id: string;
+  creator_id: string;
+  title: string;
+  status: "draft" | "active" | "archived";
+  schema_version: number;
+  version: number;
+  graph: JourneyGraph;
+  created_at: string;
+  updated_at: string;
 }
 
 /**
