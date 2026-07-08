@@ -492,7 +492,9 @@ function PlaybookJourneyWorkspace({
   onSimulate: () => void;
   onStatusChange: (status: OfMessageScript["status"]) => void;
 }) {
-  const [mode, setMode] = useState<"journey" | "advanced">("journey");
+  const [drill, setDrill] = useState<{ scriptId: string; label: string } | null>(null);
+  const [drillSession, setDrillSession] = useState<BuilderSession | null>(null);
+  const [drillLoading, setDrillLoading] = useState(false);
   const [openNodeId, setOpenNodeId] = useState<string | null>(null);
   const [journey, setJourney] = useState<PlaybookJourney | null>(null);
   const [persisted, setPersisted] = useState(false);
@@ -559,24 +561,137 @@ function PlaybookJourneyWorkspace({
     }
   }
 
-  // Advanced mode mounts the EXISTING conversation builder unchanged — the node
-  // flow editor and its runtime behaviour are untouched by NODE-1B. Only the
-  // back target changes (return to the journey view instead of the list).
-  if (mode === "advanced") {
+  // Resolve the drill session from the node's nodeFlowRef. When the reference is
+  // the playbook's own script (the case today) reuse the parent session so its
+  // save/publish/simulate/status wiring is untouched; otherwise load that script.
+  useEffect(() => {
+    if (!drill) {
+      setDrillSession(null);
+      setDrillLoading(false);
+      return;
+    }
+    if (drill.scriptId === session.script.id) {
+      setDrillSession(session);
+      setDrillLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setDrillLoading(true);
+    void (async () => {
+      try {
+        const detail = await fetchScript(drill.scriptId);
+        if (cancelled) return;
+        setDrillSession({ script: detail.script, flow: flowFromConversationFlow(detail.script), loadedAt: Date.now() });
+      } catch (err) {
+        if (cancelled) return;
+        setJourneyError(errorMessage(err, "Unable to open node flow"));
+        setDrill(null);
+      } finally {
+        if (!cancelled) setDrillLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [drill, session]);
+
+  function openNodeFlow(node: JourneyNode) {
+    const ref = node.nodeFlowRef;
+    if (!ref || ref.kind !== "script") return;
+    // Fold unsaved journey positions into the in-memory journey so returning from
+    // the node flow restores them (unsaved changes are not lost on drill).
+    if (draftGraph) setJourney((prev) => (prev ? { ...prev, graph: draftGraph } : prev));
+    setOpenNodeId(null);
+    setDrill({ scriptId: ref.scriptId, label: node.label });
+  }
+
+  function openPrimaryNodeFlow() {
+    const primary =
+      journey?.graph.nodes.find(
+        (node) => node.class === "conversation" && node.nodeFlowRef?.kind === "script" && node.nodeFlowRef.scriptId === session.script.id
+      ) ?? journey?.graph.nodes.find((node) => node.nodeFlowRef?.kind === "script");
+    if (primary) {
+      openNodeFlow(primary);
+      return;
+    }
+    if (draftGraph) setJourney((prev) => (prev ? { ...prev, graph: draftGraph } : prev));
+    setDrill({ scriptId: session.script.id, label: flowLabel(session.script.name) });
+  }
+
+  async function saveReferencedFlow(scriptId: string, flow: ScriptVisualBuilderConfig, publish: boolean) {
+    if (!drillSession) return;
+    const blocking = validateBuilderFlow(flow).filter((issue) => issue.severity === "error");
+    if (blocking.length) {
+      setJourneyError(`Resolve ${blocking.length} validation error${blocking.length === 1 ? "" : "s"} before saving.`);
+      return;
+    }
+    try {
+      const response = await saveScriptBuilder(scriptId, compileBuilderFlow(drillSession.script, flow));
+      const next = publish ? (await updateScript(response.script.id, { status: "active" })).script : response.script;
+      setDrillSession({ script: next, flow: flowFromConversationFlow(next), loadedAt: Date.now() });
+      setJourneyError(null);
+    } catch (err) {
+      setJourneyError(errorMessage(err, "Unable to save node flow"));
+    }
+  }
+
+  async function updateReferencedStatus(scriptId: string, status: OfMessageScript["status"]) {
+    try {
+      const result = await updateScript(scriptId, { status });
+      setDrillSession({ script: result.script, flow: flowFromConversationFlow(result.script), loadedAt: Date.now() });
+      setJourneyError(null);
+    } catch (err) {
+      setJourneyError(errorMessage(err, "Unable to update node flow status"));
+    }
+  }
+
+  // Drill-down: enter one bounded node's existing Node Flow, then return to the
+  // same journey context (the load effect stays keyed on the playbook script, so
+  // returning does not re-derive the journey).
+  if (drill) {
+    const isParentFlow = drill.scriptId === session.script.id;
     return (
-      <ReactFlowProvider>
-        <ConversationFlowBuilder
-          session={session}
-          workspace={workspace}
-          busy={busy}
-          error={error}
-          onBack={() => setMode("journey")}
-          onSave={onSave}
-          onPublish={onPublish}
-          onSimulate={onSimulate}
-          onStatusChange={onStatusChange}
-        />
-      </ReactFlowProvider>
+      <main className="animate-in-soft flex h-full min-h-0 flex-col gap-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <nav className="flex min-w-0 items-center gap-2 text-sm text-blue-100/60">
+            <button type="button" onClick={() => setDrill(null)} className="inline-flex items-center gap-1.5 rounded-lg border border-blue-400/20 bg-[#102338]/72 px-3 py-2 font-semibold text-blue-50 hover:border-blue-300/40">
+              <ChevronLeft className="h-4 w-4" aria-hidden="true" />
+              Journey
+            </button>
+            <span className="text-blue-100/30">/</span>
+            <span className="truncate font-medium text-white">{journey?.title ?? flowLabel(session.script.name)}</span>
+            <span className="text-blue-100/30">/</span>
+            <span className="inline-flex items-center gap-1.5 truncate text-cyan-300">
+              <Workflow className="h-3.5 w-3.5" aria-hidden="true" />
+              Node flow: {drill.label}
+            </span>
+          </nav>
+          <button type="button" onClick={() => setDrill(null)} className="inline-flex items-center gap-2 rounded-lg bg-cyan-400 px-3 py-2 text-sm font-semibold text-slate-950">
+            <ChevronLeft className="h-4 w-4" aria-hidden="true" />
+            Return to journey
+          </button>
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-hidden">
+          {drillLoading || !drillSession ? (
+            <div className="flex h-full items-center justify-center text-sm text-blue-100/55">Loading node flow…</div>
+          ) : (
+            <ReactFlowProvider>
+              <ConversationFlowBuilder
+                session={drillSession}
+                workspace={workspace}
+                busy={busy}
+                error={error}
+                onBack={() => setDrill(null)}
+                onSave={isParentFlow ? onSave : (flow) => void saveReferencedFlow(drill.scriptId, flow, false)}
+                onPublish={isParentFlow ? onPublish : (flow) => void saveReferencedFlow(drill.scriptId, flow, true)}
+                onSimulate={onSimulate}
+                onStatusChange={isParentFlow ? onStatusChange : (status) => void updateReferencedStatus(drill.scriptId, status)}
+              />
+            </ReactFlowProvider>
+          )}
+        </div>
+      </main>
     );
   }
 
@@ -613,9 +728,9 @@ function PlaybookJourneyWorkspace({
             <Play className="h-4 w-4" aria-hidden="true" />
             Simulate
           </button>
-          <button type="button" onClick={() => setMode("advanced")} className="inline-flex items-center gap-2 rounded-lg border border-blue-400/20 bg-[#102338]/72 px-3 py-2 text-sm font-semibold text-blue-50 hover:border-blue-300/40">
+          <button type="button" onClick={openPrimaryNodeFlow} className="inline-flex items-center gap-2 rounded-lg border border-blue-400/20 bg-[#102338]/72 px-3 py-2 text-sm font-semibold text-blue-50 hover:border-blue-300/40">
             <Workflow className="h-4 w-4" aria-hidden="true" />
-            Advanced builder
+            Open node flow
           </button>
         </div>
       </header>
@@ -627,20 +742,23 @@ function PlaybookJourneyWorkspace({
           <div className="flex h-full items-center justify-center text-sm text-blue-100/55">Loading journey…</div>
         ) : (
           <>
-            <JourneyCanvas key={session.script.id} journey={journey} onOpenNode={setOpenNodeId} onGraphChange={setDraftGraph} />
-            <JourneyNodeDrawer
-              node={openNode}
-              onClose={() => setOpenNodeId(null)}
-              onOpenAdvanced={(node) => {
-                if (node.class === "conversation") setMode("advanced");
+            <JourneyCanvas
+              key={session.script.id}
+              journey={journey}
+              onOpenNode={setOpenNodeId}
+              onGraphChange={setDraftGraph}
+              onDrillNode={(id) => {
+                const node = journey.graph.nodes.find((item) => item.id === id);
+                if (node) openNodeFlow(node);
               }}
             />
+            <JourneyNodeDrawer node={openNode} onClose={() => setOpenNodeId(null)} onOpenNodeFlow={(node) => openNodeFlow(node)} />
           </>
         )}
       </div>
 
       <p className="px-1 text-xs text-blue-100/50">
-        Journey view shows bounded capabilities. Runtime steps stay inside each node flow &mdash; open the advanced builder to edit the underlying conversation script (unchanged from today).
+        Journey view shows bounded capabilities. Open a node to work inside its existing flow, then return here &mdash; runtime execution is unchanged.
       </p>
     </main>
   );
