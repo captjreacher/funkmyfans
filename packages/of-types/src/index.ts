@@ -1858,3 +1858,331 @@ function humanizeIdentifier(value: string) {
     .trim()
     .replace(/\b\w/g, (char) => char.toUpperCase());
 }
+
+/* ==========================================================================
+ * Playbook Journey / Node Architecture (ADR-0002)
+ * See docs/architecture/adr-0002-playbook-journey-node-architecture.md
+ *
+ * These types define the JOURNEY layer that sits ABOVE the existing script
+ * runtime. They are authoring / orchestration contracts only and introduce no
+ * execution engine. A Conversation node's Node Flow is realised by an existing
+ * OfMessageScript (referenced via NodeFlowRef); that script is still compiled
+ * and executed by the existing runtime, unchanged.
+ * ========================================================================== */
+
+/** Bounded-capability classes a journey node may take. */
+export type JourneyNodeClass =
+  | "channel"
+  | "identity"
+  | "onboarding"
+  | "process"
+  | "conversation"
+  | "human";
+
+/** Provisional, transport-scoped channels a Channel node may represent. */
+export type JourneyChannelKind = "instagram" | "onlyfans" | "email" | "web_chat";
+
+/**
+ * The reduced, operator-facing stages of a Conversation node's Node Flow.
+ * A VIEW contract for the drill-down editor (Source -> Opening -> Reply ->
+ * Decision -> Response -> Exit). This is NOT the runtime step model.
+ */
+export type ConversationSurfaceStage =
+  | "source"
+  | "opening"
+  | "reply"
+  | "decision"
+  | "response"
+  | "exit";
+
+/**
+ * Reference from a node to the internal process that realises it (its Node Flow).
+ * A Conversation node points at an existing OfMessageScript by id; the script is
+ * still executed by the existing runtime. The union is intentionally open to
+ * future extension but MUST NOT imply a new execution engine.
+ */
+export type NodeFlowRef = {
+  kind: "script";
+  scriptId: string;
+  scriptVersion?: number;
+};
+
+/** A declared input a node accepts. */
+export interface JourneyNodeInput {
+  key: string;
+  label: string;
+  required?: boolean;
+  description?: string;
+}
+
+/** A declared output a node produces into node-local or journey context. */
+export interface JourneyNodeOutput {
+  key: string;
+  label: string;
+  description?: string;
+}
+
+/** A named outlet by which control leaves a node; bound by JourneyNodeConnection.from.port. */
+export interface JourneyNodeDestination {
+  key: string;
+  label: string;
+  description?: string;
+}
+
+/** The explicit IO / destinations contract every node MUST declare. */
+export interface JourneyNodeContract {
+  inputs: JourneyNodeInput[];
+  outputs: JourneyNodeOutput[];
+  destinations: JourneyNodeDestination[];
+}
+
+/* --- Per-class node configuration (discriminated by JourneyNode.class) ----- */
+
+export interface JourneyChannelNodeConfig {
+  channel: JourneyChannelKind;
+  /** Human label for the transport account / inbox; NOT a canonical identity. */
+  accountLabel?: string;
+  /** Key of the provisional, transport-scoped identity this channel emits. */
+  provisionalIdentityKey?: string;
+}
+
+export interface JourneyIdentityNodeConfig {
+  /** Strategy for resolving/linking a provisional identity to a canonical Subscriber. */
+  resolution: "auto_link" | "match_or_create" | "operator_review";
+  /** Whether an unresolved identity blocks progression. */
+  blockUntilResolved?: boolean;
+}
+
+export interface JourneyOnboardingNodeConfig {
+  /** What this creator-scoped onboarding node configures. */
+  scope: "creator_connection" | "permissions" | "service_configuration";
+}
+
+export interface JourneyProcessNodeConfig {
+  /** Registry-backed taxonomy key describing the bounded activity. */
+  activityKey?: string;
+}
+
+export interface JourneyConversationNodeConfig {
+  /** Bounded turn budget (sprint guidance: 3-6). A design-time contract, not a new runtime. */
+  minTurns?: number;
+  maxTurns?: number;
+  /** The visible drill-down stages an operator sees and approves. */
+  surface?: ConversationSurfaceStage[];
+}
+
+export interface JourneyHumanNodeConfig {
+  /** The kind of human involvement this node represents. */
+  mode: "handoff" | "review" | "intervention";
+  /** Destination queue for the handoff, by registry / queue key. */
+  queueKey?: string;
+}
+
+/* --- Node (discriminated union on `class`) -------------------------------- */
+
+export interface JourneyNodePosition {
+  x: number;
+  y: number;
+}
+
+interface JourneyNodeBase {
+  id: string;
+  label: string;
+  position: JourneyNodePosition;
+  /** Optional grouping key for visually clustering nodes on the canvas. */
+  group?: string;
+  /** The explicit IO / destinations contract for this node. */
+  contract: JourneyNodeContract;
+  /** Reference to the node's internal process, when it has one. */
+  nodeFlowRef?: NodeFlowRef;
+}
+
+export interface JourneyChannelNode extends JourneyNodeBase {
+  class: "channel";
+  config: JourneyChannelNodeConfig;
+}
+
+export interface JourneyIdentityNode extends JourneyNodeBase {
+  class: "identity";
+  config: JourneyIdentityNodeConfig;
+}
+
+export interface JourneyOnboardingNode extends JourneyNodeBase {
+  class: "onboarding";
+  config: JourneyOnboardingNodeConfig;
+}
+
+export interface JourneyProcessNode extends JourneyNodeBase {
+  class: "process";
+  config: JourneyProcessNodeConfig;
+}
+
+export interface JourneyConversationNode extends JourneyNodeBase {
+  class: "conversation";
+  config: JourneyConversationNodeConfig;
+}
+
+export interface JourneyHumanNode extends JourneyNodeBase {
+  class: "human";
+  config: JourneyHumanNodeConfig;
+}
+
+export type JourneyNode =
+  | JourneyChannelNode
+  | JourneyIdentityNode
+  | JourneyOnboardingNode
+  | JourneyProcessNode
+  | JourneyConversationNode
+  | JourneyHumanNode;
+
+/* --- Connections + graph document ----------------------------------------- */
+
+export interface JourneyNodeConnectionEndpoint {
+  nodeId: string;
+  /** Destination outlet key on the source node (matches JourneyNodeDestination.key). */
+  port?: string;
+}
+
+export interface JourneyNodeConnection {
+  id: string;
+  from: JourneyNodeConnectionEndpoint;
+  to: JourneyNodeConnectionEndpoint;
+  /** Operator-facing edge label, e.g. an outcome name. */
+  label?: string;
+}
+
+export interface JourneyGroup {
+  id: string;
+  label: string;
+  colorKey?: string;
+}
+
+export interface JourneyViewport {
+  x: number;
+  y: number;
+  zoom: number;
+}
+
+/**
+ * The persisted Journey graph document - the smallest surface NODE-1C needs:
+ * node class, position, grouping, source/destination relationships, node
+ * configuration and node-flow reference. Stored as JSONB alongside the existing
+ * builder_config / proposal_payload precedents, with NO changes to runtime tables.
+ */
+export interface JourneyGraph {
+  schemaVersion: 1;
+  nodes: JourneyNode[];
+  connections: JourneyNodeConnection[];
+  groups?: JourneyGroup[];
+  viewport?: JourneyViewport;
+  selectedNodeId?: string | null;
+}
+
+/** A Playbook Journey (the "Journey" orchestration map) owned by Playbook Studio. */
+export interface PlaybookJourney {
+  id: string;
+  creatorId: string;
+  title: string;
+  description?: string;
+  status: "draft" | "active" | "archived";
+  graph: JourneyGraph;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * Illustrative typed journey for Emma's New Subscriber funnel (ADR-0002 worked
+ * example). This is NOT the live migration (that is NODE-1E); it exists so the
+ * node contract is exercised by the TypeScript compiler:
+ *
+ *   OnlyFans (Channel) -> New Subscriber Chat (Conversation) -> Human Handoff (Human)
+ */
+export const EMMA_NEW_SUBSCRIBER_JOURNEY_EXAMPLE: PlaybookJourney = {
+  id: "journey-emma-new-subscriber",
+  creatorId: "creator-emma",
+  title: "New Subscriber Funnel",
+  description: "Emma's new-subscriber journey: welcome, interpret, hand off.",
+  status: "draft",
+  version: 1,
+  createdAt: "2026-01-01T00:00:00.000Z",
+  updatedAt: "2026-01-01T00:00:00.000Z",
+  graph: {
+    schemaVersion: 1,
+    selectedNodeId: "node-new-subscriber-chat",
+    nodes: [
+      {
+        id: "node-onlyfans-channel",
+        class: "channel",
+        label: "OnlyFans",
+        position: { x: 80, y: 200 },
+        contract: {
+          inputs: [],
+          outputs: [{ key: "provisional_subscriber_ref", label: "Provisional subscriber reference" }],
+          destinations: [{ key: "new_subscriber", label: "New subscriber" }]
+        },
+        config: {
+          channel: "onlyfans",
+          accountLabel: "Emma on OnlyFans",
+          provisionalIdentityKey: "of_subscriber_ref"
+        }
+      },
+      {
+        id: "node-new-subscriber-chat",
+        class: "conversation",
+        label: "New Subscriber Chat",
+        position: { x: 420, y: 200 },
+        nodeFlowRef: { kind: "script", scriptId: "script-new-subscriber", scriptVersion: 1 },
+        contract: {
+          inputs: [{ key: "provisional_subscriber_ref", label: "Provisional subscriber reference", required: true }],
+          outputs: [
+            { key: "conversation_state", label: "Conversation state" },
+            { key: "latest_interpretation", label: "Latest interpretation" }
+          ],
+          destinations: [
+            { key: "handoff", label: "Hand off to human" },
+            { key: "terminal", label: "Ended" }
+          ]
+        },
+        config: {
+          minTurns: 3,
+          maxTurns: 6,
+          surface: ["source", "opening", "reply", "decision", "response", "exit"]
+        }
+      },
+      {
+        id: "node-human-handoff",
+        class: "human",
+        label: "Human Handoff",
+        position: { x: 760, y: 200 },
+        contract: {
+          inputs: [
+            { key: "conversation_state", label: "Conversation state", required: true },
+            { key: "latest_interpretation", label: "Latest interpretation" }
+          ],
+          outputs: [{ key: "queue_item", label: "Queue item" }],
+          destinations: [{ key: "queued", label: "Queued for operator" }]
+        },
+        config: {
+          mode: "handoff",
+          queueKey: "new_subscriber_review"
+        }
+      }
+    ],
+    connections: [
+      {
+        id: "edge-channel-to-chat",
+        from: { nodeId: "node-onlyfans-channel", port: "new_subscriber" },
+        to: { nodeId: "node-new-subscriber-chat" },
+        label: "New subscriber"
+      },
+      {
+        id: "edge-chat-to-handoff",
+        from: { nodeId: "node-new-subscriber-chat", port: "handoff" },
+        to: { nodeId: "node-human-handoff" },
+        label: "Handoff"
+      }
+    ],
+    viewport: { x: 0, y: 0, zoom: 0.9 }
+  }
+};
