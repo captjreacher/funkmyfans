@@ -35,15 +35,17 @@ const nodeTypes = { journeyNode: JourneyNodeCard, journeyGroup: JourneyGroupBack
 export function JourneyCanvas({
   journey,
   onOpenNode,
-  onGraphChange
+  onGraphChange,
+  onDrillNode
 }: {
   journey: PlaybookJourney;
   onOpenNode: (id: string) => void;
   onGraphChange?: (graph: JourneyGraph) => void;
+  onDrillNode?: (id: string) => void;
 }) {
   return (
     <ReactFlowProvider>
-      <JourneyCanvasInner journey={journey} onOpenNode={onOpenNode} onGraphChange={onGraphChange} />
+      <JourneyCanvasInner journey={journey} onOpenNode={onOpenNode} onGraphChange={onGraphChange} onDrillNode={onDrillNode} />
     </ReactFlowProvider>
   );
 }
@@ -51,11 +53,13 @@ export function JourneyCanvas({
 function JourneyCanvasInner({
   journey,
   onOpenNode,
-  onGraphChange
+  onGraphChange,
+  onDrillNode
 }: {
   journey: PlaybookJourney;
   onOpenNode: (id: string) => void;
   onGraphChange?: (graph: JourneyGraph) => void;
+  onDrillNode?: (id: string) => void;
 }) {
   const { fitView } = useReactFlow();
 
@@ -220,6 +224,9 @@ function JourneyCanvasInner({
         onNodesChange={onNodesChange}
         onNodeClick={(_, node) => {
           if (node.type === "journeyNode") onOpenNode(node.id);
+        }}
+        onNodeDoubleClick={(_, node) => {
+          if (node.type === "journeyNode") onDrillNode?.(node.id);
         }}
         fitView
         fitViewOptions={{ padding: 0.2 }}

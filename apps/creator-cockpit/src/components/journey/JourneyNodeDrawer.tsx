@@ -1,4 +1,4 @@
-import { ArrowUpRight, ChevronRight, PanelRightClose, Wrench } from "lucide-react";
+import { ArrowUpRight, ChevronRight, PanelRightClose, Workflow, Wrench } from "lucide-react";
 import type { JourneyNode } from "@funkmyfans/of-types";
 import { CONVERSATION_SURFACE_STAGES, JOURNEY_CLASS_META, journeyNodePurpose } from "../../lib/journey";
 
@@ -18,11 +18,11 @@ const STAGE_LABEL: Record<string, string> = {
 export function JourneyNodeDrawer({
   node,
   onClose,
-  onOpenAdvanced
+  onOpenNodeFlow
 }: {
   node: JourneyNode | null;
   onClose: () => void;
-  onOpenAdvanced?: (node: JourneyNode) => void;
+  onOpenNodeFlow?: (node: JourneyNode) => void;
 }) {
   if (!node) return null;
   const meta = JOURNEY_CLASS_META[node.class];
@@ -82,26 +82,33 @@ export function JourneyNodeDrawer({
         <ContractList title="Outputs" items={node.contract.outputs.map((output) => ({ key: output.key, label: output.label }))} accent={meta.accent} />
         <ContractList title="Destinations" items={node.contract.destinations.map((destination) => ({ key: destination.key, label: destination.label }))} accent={meta.accent} />
 
-        <section className="rounded-lg border border-amber-300/20 bg-amber-300/[0.06] px-3 py-3">
-          <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-amber-200/80">
-            <Wrench className="h-3.5 w-3.5" aria-hidden="true" />
-            Node editor
-          </div>
-          <p className="mt-1.5 text-xs text-blue-100/62">
-            The focused editor for this node arrives in NODE-1D.
-            {isConversation ? " Until then, the existing conversation builder remains available and unchanged." : ""}
-          </p>
-          {isConversation && node.nodeFlowRef && onOpenAdvanced ? (
+        {node.nodeFlowRef && onOpenNodeFlow ? (
+          <section className="rounded-lg border border-cyan-300/20 bg-cyan-300/[0.06] px-3 py-3">
+            <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-cyan-200/80">
+              <Workflow className="h-3.5 w-3.5" aria-hidden="true" />
+              Node flow
+            </div>
+            <p className="mt-1.5 text-xs text-blue-100/62">
+              Open this node&rsquo;s flow to work inside its existing builder, then return to the journey. Runtime execution is unchanged.
+            </p>
             <button
               type="button"
-              onClick={() => onOpenAdvanced(node)}
+              onClick={() => onOpenNodeFlow(node)}
               className="mt-2.5 inline-flex items-center gap-2 rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-xs font-semibold text-white hover:border-white/30"
             >
-              Open advanced builder
+              Open node flow
               <ArrowUpRight className="h-3.5 w-3.5" aria-hidden="true" />
             </button>
-          ) : null}
-        </section>
+          </section>
+        ) : (
+          <section className="rounded-lg border border-white/10 bg-white/[0.03] px-3 py-3">
+            <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-blue-100/55">
+              <Wrench className="h-3.5 w-3.5" aria-hidden="true" />
+              Node editor
+            </div>
+            <p className="mt-1.5 text-xs text-blue-100/62">A focused editor for this node class arrives in a later slice.</p>
+          </section>
+        )}
       </div>
     </aside>
   );
