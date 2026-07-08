@@ -63,7 +63,9 @@ import {
   type NodeProps
 } from "@xyflow/react";
 import type {
+  JourneyNode,
   OfMessageScript,
+  PlaybookJourney,
   QueueWorkspaceItemSummary,
   ScriptVisualBuilderConfig,
   ScriptVisualBuilderConnection,
@@ -98,6 +100,9 @@ import {
   validateBuilderFlow,
   type FlowValidationIssue
 } from "../lib/flowBuilder";
+import { JourneyCanvas } from "../components/journey/JourneyCanvas";
+import { JourneyNodeDrawer } from "../components/journey/JourneyNodeDrawer";
+import { buildPlaybookJourney } from "../lib/journeyExamples";
 
 const libraryTabs = ["Template Library", "Drafts", "Active", "Archived"] as const;
 type LibraryTab = (typeof libraryTabs)[number];
@@ -219,6 +224,7 @@ export function Playbooks({
   const [builderSession, setBuilderSession] = useState<BuilderSession | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [creatorFilter, setCreatorFilter] = useState<string>("all");
 
   useEffect(() => {
     void loadWorkspace();
@@ -226,11 +232,13 @@ export function Playbooks({
 
   const scripts = workspace?.scripts ?? [];
   const filteredScripts = useMemo(() => {
-    if (tab === "Active") return scripts.filter((script) => script.status === "active" && !script.builder_config?.workspace?.archivedAt);
-    if (tab === "Drafts") return scripts.filter((script) => script.status !== "active" && !script.builder_config?.workspace?.archivedAt);
-    if (tab === "Archived") return scripts.filter((script) => Boolean(script.builder_config?.workspace?.archivedAt));
-    return scripts;
-  }, [scripts, tab]);
+    let list = scripts;
+    if (tab === "Active") list = list.filter((script) => script.status === "active" && !script.builder_config?.workspace?.archivedAt);
+    else if (tab === "Drafts") list = list.filter((script) => script.status !== "active" && !script.builder_config?.workspace?.archivedAt);
+    else if (tab === "Archived") list = list.filter((script) => Boolean(script.builder_config?.workspace?.archivedAt));
+    if (creatorFilter !== "all") list = list.filter((script) => script.creator_id === creatorFilter);
+    return list;
+  }, [scripts, tab, creatorFilter]);
 
   async function loadWorkspace(preferredId?: string) {
     try {
@@ -362,82 +370,203 @@ export function Playbooks({
 
   if (builderSession) {
     return (
-      <ReactFlowProvider>
-        <ConversationFlowBuilder
-          session={builderSession}
-          workspace={workspace}
-          busy={busy}
-          error={error}
-          onBack={() => setBuilderSession(null)}
-          onSave={(flow) => void saveFlow(builderSession, flow)}
-          onPublish={(flow) => void saveFlow(builderSession, flow, true)}
-          onSimulate={() => onOpenSimulations?.(builderSession.script.id)}
-          onStatusChange={(status) => void setFlowStatus(status)}
-        />
-      </ReactFlowProvider>
+      <PlaybookJourneyWorkspace
+        session={builderSession}
+        workspace={workspace}
+        busy={busy}
+        error={error}
+        onBack={() => setBuilderSession(null)}
+        onSave={(flow) => void saveFlow(builderSession, flow)}
+        onPublish={(flow) => void saveFlow(builderSession, flow, true)}
+        onSimulate={() => onOpenSimulations?.(builderSession.script.id)}
+        onStatusChange={(status) => void setFlowStatus(status)}
+      />
     );
   }
 
   return (
-    <main className="animate-in-soft space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
+    <main className="animate-in-soft space-y-5">
+      <header className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <div className="text-sm font-semibold uppercase tracking-[0.24em] text-cyan-300">Playbooks</div>
-          <h2 className="mt-1 text-2xl font-semibold text-white">Template library and conversation flows</h2>
+          <div className="text-xs font-semibold uppercase tracking-[0.24em] text-cyan-300">Playbooks</div>
+          <h2 className="mt-1 text-2xl font-semibold text-white">Journeys</h2>
+          <p className="mt-1 max-w-2xl text-sm text-blue-100/60">
+            Each creator&rsquo;s automation as a journey between bounded capabilities. Open a journey to see its node map; drill into a node for detail. The technical step builder now lives one level down, inside a node.
+          </p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <button type="button" onClick={() => void loadWorkspace()} className="inline-flex items-center gap-2 rounded-lg border border-blue-400/20 bg-[#102338]/72 px-3 py-2 text-sm font-semibold text-blue-50">
+          <button type="button" onClick={() => void loadWorkspace()} className="inline-flex items-center gap-2 rounded-lg border border-blue-400/20 bg-[#102338]/72 px-3 py-2 text-sm font-semibold text-blue-50 hover:border-blue-300/40">
             <RefreshCw className="h-4 w-4" aria-hidden="true" />
             Refresh
           </button>
           <button type="button" onClick={() => void createFlow()} disabled={busy} className="inline-flex items-center gap-2 rounded-lg bg-cyan-400 px-4 py-2 text-sm font-semibold text-slate-950 disabled:opacity-45">
             <Plus className="h-4 w-4" aria-hidden="true" />
-            Create Flow
+            New journey
           </button>
         </div>
-      </div>
+      </header>
 
       {error ? <div className="rounded-lg border border-rose-400/25 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">{error}</div> : null}
 
-      <nav className="premium-card flex gap-1 overflow-x-auto rounded-lg p-1">
-        {libraryTabs.map((item) => (
-          <button key={item} type="button" onClick={() => setTab(item)} className={`rounded-md px-3 py-2 text-sm font-semibold ${tab === item ? "selected-glow text-white" : "text-blue-100/64 hover:bg-[#1A3655]/55 hover:text-white"}`}>
-            {item}
-          </button>
-        ))}
-      </nav>
-
-      <section className="premium-card overflow-hidden rounded-lg">
-        <div className="grid grid-cols-[1.3fr_0.7fr_0.7fr_0.7fr_0.8fr] gap-3 border-b border-blue-500/18 px-4 py-3 text-xs font-semibold uppercase tracking-[0.14em] text-blue-100/52">
-          <div>Playbook / Flow</div>
-          <div>Creator</div>
-          <div>Trigger</div>
-          <div>Status</div>
-          <div className="text-right">Action</div>
-        </div>
-        <div className="divide-y divide-blue-500/12">
-          {filteredScripts.map((script) => (
-            <div key={script.id} className="grid grid-cols-[1.3fr_0.7fr_0.7fr_0.7fr_0.8fr] items-center gap-3 px-4 py-3 text-sm hover:bg-[#102338]/72">
-              <button type="button" onClick={() => void openBuilder(script)} className="min-w-0 text-left">
-                <div className="truncate font-semibold text-white">{flowLabel(script.name)}</div>
-                <div className="truncate text-xs text-blue-100/52">{script.description ?? script.category ?? "No description"}</div>
-              </button>
-              <div className="truncate text-blue-100/68">{creatorLabel(workspace, script.creator_id)}</div>
-              <div className="truncate text-blue-100/68">{script.trigger_event_type}</div>
-              <div><span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${statusTone(script)}`}>{script.builder_config?.workspace?.archivedAt ? "archived" : script.status}</span></div>
-              <div className="flex justify-end gap-2">
-                <button type="button" onClick={() => void createFlow(script)} disabled={busy} className="rounded-lg border border-blue-400/20 bg-[#102338]/72 px-3 py-2 text-xs font-semibold text-blue-50 disabled:opacity-45">
-                  Create from Template
-                </button>
-                <button type="button" onClick={() => void openBuilder(script)} className="rounded-lg bg-cyan-400 px-3 py-2 text-xs font-semibold text-slate-950">
-                  Open Builder
-                </button>
-              </div>
-            </div>
+      <div className="premium-card flex flex-col gap-3 rounded-xl p-3 lg:flex-row lg:items-center lg:justify-between">
+        <nav className="flex gap-1 overflow-x-auto rounded-lg bg-[#0b1c30]/60 p-1">
+          {libraryTabs.map((item) => (
+            <button key={item} type="button" onClick={() => setTab(item)} className={`whitespace-nowrap rounded-md px-3 py-2 text-sm font-semibold ${tab === item ? "selected-glow text-white" : "text-blue-100/64 hover:bg-[#1A3655]/55 hover:text-white"}`}>
+              {item}
+            </button>
           ))}
-          {!filteredScripts.length ? <div className="px-4 py-8 text-sm text-blue-100/58">No conversation flows in this view.</div> : null}
+        </nav>
+        <div className="flex items-center gap-2">
+          <label className="inline-flex items-center gap-2 rounded-lg border border-blue-400/20 bg-[#0b1c30]/60 px-3 py-2 text-sm text-blue-100/72">
+            <Filter className="h-4 w-4 text-cyan-300" aria-hidden="true" />
+            <span className="sr-only">Filter by creator</span>
+            <select value={creatorFilter} onChange={(event) => setCreatorFilter(event.target.value)} className="bg-transparent text-sm font-semibold text-white outline-none">
+              <option value="all" className="bg-[#0b1c30]">All creators</option>
+              {(workspace?.creators ?? []).map((creator) => (
+                <option key={creator.id} value={creator.id} className="bg-[#0b1c30]">
+                  {creator.display_name || creator.username}
+                </option>
+              ))}
+            </select>
+          </label>
+          <span className="whitespace-nowrap text-xs font-medium text-blue-100/50">{filteredScripts.length} shown</span>
         </div>
+      </div>
+
+      <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+        {filteredScripts.map((script) => (
+          <article key={script.id} className="premium-card group flex flex-col gap-3 rounded-xl p-4 transition hover:border-cyan-300/40">
+            <button type="button" onClick={() => void openBuilder(script)} className="min-w-0 text-left">
+              <div className="flex items-start justify-between gap-2">
+                <span className="inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-[0.16em] text-cyan-300">
+                  <Route className="h-3.5 w-3.5" aria-hidden="true" />
+                  Journey
+                </span>
+                <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${statusTone(script)}`}>{script.builder_config?.workspace?.archivedAt ? "archived" : script.status}</span>
+              </div>
+              <div className="mt-2 truncate text-base font-semibold text-white">{flowLabel(script.name)}</div>
+              <div className="mt-1 line-clamp-2 text-xs text-blue-100/55">{script.description ?? script.category ?? "No description"}</div>
+            </button>
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-blue-100/60">
+              <span className="inline-flex items-center gap-1"><UsersRound className="h-3.5 w-3.5 text-blue-100/45" aria-hidden="true" />{creatorLabel(workspace, script.creator_id)}</span>
+              <span className="inline-flex items-center gap-1"><Route className="h-3.5 w-3.5 text-blue-100/45" aria-hidden="true" />{script.trigger_event_type}</span>
+            </div>
+            <div className="mt-auto flex gap-2">
+              <button type="button" onClick={() => void openBuilder(script)} className="inline-flex flex-1 items-center justify-center gap-2 rounded-lg bg-cyan-400 px-3 py-2 text-xs font-semibold text-slate-950">
+                <MapIcon className="h-3.5 w-3.5" aria-hidden="true" />
+                Open journey
+              </button>
+              <button type="button" onClick={() => void createFlow(script)} disabled={busy} className="rounded-lg border border-blue-400/20 bg-[#102338]/72 px-3 py-2 text-xs font-semibold text-blue-50 disabled:opacity-45">
+                Duplicate
+              </button>
+            </div>
+          </article>
+        ))}
+        {!filteredScripts.length ? <div className="premium-card rounded-xl px-4 py-10 text-center text-sm text-blue-100/58 sm:col-span-2 xl:col-span-3">No journeys in this view.</div> : null}
       </section>
+    </main>
+  );
+}
+
+function PlaybookJourneyWorkspace({
+  session,
+  workspace,
+  busy,
+  error,
+  onBack,
+  onSave,
+  onPublish,
+  onSimulate,
+  onStatusChange
+}: {
+  session: BuilderSession;
+  workspace: ScriptsWorkspaceData | null;
+  busy: boolean;
+  error: string | null;
+  onBack: () => void;
+  onSave: (flow: ScriptVisualBuilderConfig) => void;
+  onPublish: (flow: ScriptVisualBuilderConfig) => void;
+  onSimulate: () => void;
+  onStatusChange: (status: OfMessageScript["status"]) => void;
+}) {
+  const [mode, setMode] = useState<"journey" | "advanced">("journey");
+  const [openNodeId, setOpenNodeId] = useState<string | null>(null);
+
+  const creatorName = useMemo(() => creatorLabel(workspace, session.script.creator_id), [workspace, session.script.creator_id]);
+  const journey = useMemo<PlaybookJourney>(() => buildPlaybookJourney(session.script, creatorName), [session.script, creatorName]);
+  const openNode = useMemo<JourneyNode | null>(() => journey.graph.nodes.find((node) => node.id === openNodeId) ?? null, [journey, openNodeId]);
+
+  // Advanced mode mounts the EXISTING conversation builder unchanged — the node
+  // flow editor and its runtime behaviour are untouched by NODE-1B. Only the
+  // back target changes (return to the journey view instead of the list).
+  if (mode === "advanced") {
+    return (
+      <ReactFlowProvider>
+        <ConversationFlowBuilder
+          session={session}
+          workspace={workspace}
+          busy={busy}
+          error={error}
+          onBack={() => setMode("journey")}
+          onSave={onSave}
+          onPublish={onPublish}
+          onSimulate={onSimulate}
+          onStatusChange={onStatusChange}
+        />
+      </ReactFlowProvider>
+    );
+  }
+
+  const statusLabel = session.script.builder_config?.workspace?.archivedAt ? "archived" : session.script.status;
+
+  return (
+    <main className="animate-in-soft flex h-full min-h-0 flex-col gap-4">
+      <header className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-3">
+          <button type="button" onClick={onBack} className="inline-flex items-center gap-1.5 rounded-lg border border-blue-400/20 bg-[#102338]/72 px-3 py-2 text-sm font-semibold text-blue-50 hover:border-blue-300/40">
+            <ChevronLeft className="h-4 w-4" aria-hidden="true" />
+            Journeys
+          </button>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.2em] text-cyan-300">
+              <Route className="h-3.5 w-3.5" aria-hidden="true" />
+              Journey
+            </div>
+            <div className="flex items-center gap-2">
+              <h2 className="truncate text-xl font-semibold text-white">{journey.title}</h2>
+              <span className={`rounded-full px-2.5 py-0.5 text-xs font-semibold ${statusTone(session.script)}`}>{statusLabel}</span>
+            </div>
+            <div className="truncate text-xs text-blue-100/55">{creatorName}</div>
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <button type="button" onClick={onSimulate} className="inline-flex items-center gap-2 rounded-lg border border-blue-400/20 bg-[#102338]/72 px-3 py-2 text-sm font-semibold text-blue-50 hover:border-blue-300/40">
+            <Play className="h-4 w-4" aria-hidden="true" />
+            Simulate
+          </button>
+          <button type="button" onClick={() => setMode("advanced")} className="inline-flex items-center gap-2 rounded-lg border border-blue-400/20 bg-[#102338]/72 px-3 py-2 text-sm font-semibold text-blue-50 hover:border-blue-300/40">
+            <Workflow className="h-4 w-4" aria-hidden="true" />
+            Advanced builder
+          </button>
+        </div>
+      </header>
+
+      {error ? <div className="rounded-lg border border-rose-400/25 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">{error}</div> : null}
+
+      <div className="relative min-h-0 flex-1 overflow-hidden rounded-xl premium-card">
+        <JourneyCanvas key={session.script.id} journey={journey} onOpenNode={setOpenNodeId} />
+        <JourneyNodeDrawer
+          node={openNode}
+          onClose={() => setOpenNodeId(null)}
+          onOpenAdvanced={(node) => {
+            if (node.class === "conversation") setMode("advanced");
+          }}
+        />
+      </div>
+
+      <p className="px-1 text-xs text-blue-100/50">
+        Journey view shows bounded capabilities. Runtime steps stay inside each node flow &mdash; open the advanced builder to edit the underlying conversation script (unchanged from today).
+      </p>
     </main>
   );
 }
