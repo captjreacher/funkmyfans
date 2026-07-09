@@ -22,6 +22,11 @@ const SCRIPT_ID = "11111111-1111-4111-8111-111111111111";
 const CREATOR_ID = "22222222-2222-4222-8222-222222222222";
 const NOW = "2026-01-01T00:00:00.000Z";
 
+// NOTE: EMMA_SCRIPT is a deliberately simplified 3-step transport stub so this
+// harness can mount the real Playbooks page without a backend. It is NOT the real
+// New Subscriber Funnel — that flow is the 44-step NSP-4 branched map seeded in
+// worker.ts newSubscriberFunnelTemplate() (see
+// docs/acceptance/nsf-1-new-subscriber-conversation-map-acceptance.md).
 const EMMA_SCRIPT = {
   id: SCRIPT_ID,
   creator_id: CREATOR_ID,
