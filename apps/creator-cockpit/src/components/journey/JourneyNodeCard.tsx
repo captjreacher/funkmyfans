@@ -1,14 +1,16 @@
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 import { ArrowDownLeft, ArrowUpRight, LogIn } from "lucide-react";
 import { JOURNEY_CLASS_META, journeyNodePurpose, type JourneyRFNode } from "../../lib/journey";
+import { READINESS_META } from "../../lib/journeyContracts";
 
 // Journey-level node card for the six canonical ADR-0002 classes. Shows only
 // journey-level information (name, class, purpose, connectivity). It never
 // renders internal runtime steps — those live inside the node flow.
 export function JourneyNodeCard({ data, selected }: NodeProps<JourneyRFNode>) {
-  const { journeyNode, inbound, outbound, isEntry } = data;
+  const { journeyNode, inbound, outbound, isEntry, capability } = data;
   const meta = JOURNEY_CLASS_META[journeyNode.class];
   const Icon = meta.icon;
+  const readiness = capability ? READINESS_META[capability.readiness] : null;
 
   return (
     <div
@@ -50,11 +52,21 @@ export function JourneyNodeCard({ data, selected }: NodeProps<JourneyRFNode>) {
 
       <div className="px-3 pb-2 pt-1.5 text-xs text-blue-100/62">{journeyNodePurpose(journeyNode)}</div>
 
-      <div className="flex items-center justify-between border-t border-white/8 px-3 py-2 text-[11px] text-blue-100/48">
+      <div className="flex items-center justify-between gap-2 border-t border-white/8 px-3 py-2 text-[11px] text-blue-100/48">
         <span className="inline-flex items-center gap-1">
           <ArrowDownLeft className="h-3 w-3" aria-hidden="true" />
           {inbound} in
         </span>
+        {readiness ? (
+          <span
+            className="inline-flex items-center gap-1 truncate rounded-full border border-white/10 bg-white/[0.04] px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-[0.08em]"
+            style={{ color: readiness.tone }}
+            title={capability?.readinessDetail}
+          >
+            <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: readiness.tone }} aria-hidden="true" />
+            {readiness.label}
+          </span>
+        ) : null}
         <span className="inline-flex items-center gap-1">
           {outbound} out
           <ArrowUpRight className="h-3 w-3" aria-hidden="true" />

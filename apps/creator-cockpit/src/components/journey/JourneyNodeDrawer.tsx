@@ -1,6 +1,7 @@
-import { ArrowUpRight, ChevronRight, PanelRightClose, Workflow, Wrench } from "lucide-react";
-import type { JourneyNode } from "@funkmyfans/of-types";
+import { AlertTriangle, ArrowUpRight, ChevronRight, PanelRightClose, Workflow, Wrench } from "lucide-react";
+import type { JourneyNode, JourneyNodeCapability } from "@funkmyfans/of-types";
 import { CONVERSATION_SURFACE_STAGES, JOURNEY_CLASS_META, journeyNodePurpose } from "../../lib/journey";
+import { OWNER_LABEL, READINESS_META } from "../../lib/journeyContracts";
 
 const STAGE_LABEL: Record<string, string> = {
   source: "Source",
@@ -17,10 +18,12 @@ const STAGE_LABEL: Record<string, string> = {
 // editing is NODE-1D; the existing builder remains reachable underneath.
 export function JourneyNodeDrawer({
   node,
+  capability,
   onClose,
   onOpenNodeFlow
 }: {
   node: JourneyNode | null;
+  capability?: JourneyNodeCapability | null;
   onClose: () => void;
   onOpenNodeFlow?: (node: JourneyNode) => void;
 }) {
@@ -58,6 +61,40 @@ export function JourneyNodeDrawer({
         <p className="text-xs text-blue-100/62">
           {meta.blurb}. {journeyNodePurpose(node)}.
         </p>
+
+        {capability ? (
+          <section className="rounded-lg border border-white/10 bg-white/[0.03] p-3">
+            <div className="flex items-center justify-between gap-2">
+              <SectionTitle>Capability contract</SectionTitle>
+              <ReadinessPill readiness={capability.readiness} />
+            </div>
+            <div className="mt-2 text-sm font-semibold text-white">{capability.capabilityType}</div>
+            <dl className="mt-2.5 space-y-2">
+              {capability.source ? <CapRow label="Source">{capability.source}</CapRow> : null}
+              <CapRow label="Entry">{capability.entrySummary}</CapRow>
+              <CapRow label="Exit">{capability.exitSummary}</CapRow>
+              <CapRow label="Owner">
+                {OWNER_LABEL[capability.owner]}
+                {capability.isHumanHandoff ? " · human handoff" : ""}
+              </CapRow>
+              <CapRow label="Node flow">{capability.hasNodeFlow ? "Referenced — open below" : "None referenced"}</CapRow>
+            </dl>
+            <p className="mt-2.5 text-[11px] text-blue-100/55">{capability.readinessDetail}</p>
+            {capability.warnings?.length ? (
+              <ul className="mt-2 space-y-1">
+                {capability.warnings.map((warning) => (
+                  <li
+                    key={warning}
+                    className="flex items-start gap-1.5 rounded-md border border-amber-300/25 bg-amber-300/[0.07] px-2 py-1 text-[11px] text-amber-100/85"
+                  >
+                    <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" aria-hidden="true" />
+                    <span>{warning}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+          </section>
+        ) : null}
 
         {isConversation ? (
           <section>
@@ -116,6 +153,28 @@ export function JourneyNodeDrawer({
 
 function SectionTitle({ children }: { children: React.ReactNode }) {
   return <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-blue-100/45">{children}</div>;
+}
+
+function ReadinessPill({ readiness }: { readiness: JourneyNodeCapability["readiness"] }) {
+  const meta = READINESS_META[readiness];
+  return (
+    <span
+      className="inline-flex items-center gap-1.5 rounded-full border border-white/12 bg-white/[0.04] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.1em]"
+      style={{ color: meta.tone }}
+    >
+      <span className="h-1.5 w-1.5 rounded-full" style={{ background: meta.tone }} aria-hidden="true" />
+      {meta.label}
+    </span>
+  );
+}
+
+function CapRow({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="flex flex-col gap-0.5">
+      <dt className="text-[10px] font-semibold uppercase tracking-[0.12em] text-blue-100/40">{label}</dt>
+      <dd className="text-xs text-blue-100/75">{children}</dd>
+    </div>
+  );
 }
 
 function ContractList({

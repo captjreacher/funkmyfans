@@ -11,6 +11,7 @@ import { Cog, Fingerprint, MessageSquare, Radio, UserCheck, UserPlus, type Lucid
 import type {
   JourneyChannelKind,
   JourneyNode,
+  JourneyNodeCapability,
   JourneyNodeClass,
   JourneyNodeDestination,
   OfMessageScript,
@@ -91,6 +92,8 @@ export type JourneyRFData = {
   destinations: JourneyNodeDestination[];
   isEntry: boolean;
   onOpen: (id: string) => void;
+  /** Derived capability metadata (NODE-1E). Optional so the canvas renders without it. */
+  capability?: JourneyNodeCapability;
 };
 export type JourneyRFNode = Node<JourneyRFData, "journeyNode">;
 

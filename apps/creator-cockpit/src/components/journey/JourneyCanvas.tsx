@@ -14,7 +14,7 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { Maximize2 } from "lucide-react";
-import type { JourneyGraph, JourneyNodeClass, PlaybookJourney } from "@funkmyfans/of-types";
+import type { JourneyGraph, JourneyNodeCapability, JourneyNodeClass, PlaybookJourney } from "@funkmyfans/of-types";
 import {
   JOURNEY_CLASS_META,
   type AnyJourneyRFNode,
@@ -36,16 +36,24 @@ export function JourneyCanvas({
   journey,
   onOpenNode,
   onGraphChange,
-  onDrillNode
+  onDrillNode,
+  capabilityById
 }: {
   journey: PlaybookJourney;
   onOpenNode: (id: string) => void;
   onGraphChange?: (graph: JourneyGraph) => void;
   onDrillNode?: (id: string) => void;
+  capabilityById?: Record<string, JourneyNodeCapability>;
 }) {
   return (
     <ReactFlowProvider>
-      <JourneyCanvasInner journey={journey} onOpenNode={onOpenNode} onGraphChange={onGraphChange} onDrillNode={onDrillNode} />
+      <JourneyCanvasInner
+        journey={journey}
+        onOpenNode={onOpenNode}
+        onGraphChange={onGraphChange}
+        onDrillNode={onDrillNode}
+        capabilityById={capabilityById}
+      />
     </ReactFlowProvider>
   );
 }
@@ -54,12 +62,14 @@ function JourneyCanvasInner({
   journey,
   onOpenNode,
   onGraphChange,
-  onDrillNode
+  onDrillNode,
+  capabilityById
 }: {
   journey: PlaybookJourney;
   onOpenNode: (id: string) => void;
   onGraphChange?: (graph: JourneyGraph) => void;
   onDrillNode?: (id: string) => void;
+  capabilityById?: Record<string, JourneyNodeCapability>;
 }) {
   const { fitView } = useReactFlow();
 
@@ -88,11 +98,12 @@ function JourneyCanvasInner({
           outbound,
           destinations: node.contract.destinations,
           isEntry: inbound === 0,
-          onOpen: onOpenNode
+          onOpen: onOpenNode,
+          capability: capabilityById?.[node.id]
         }
       };
     });
-  }, [journey, connectivity, onOpenNode]);
+  }, [journey, connectivity, onOpenNode, capabilityById]);
 
   const [journeyNodes, setJourneyNodes] = useState<JourneyRFNode[]>(buildJourneyNodes);
 
