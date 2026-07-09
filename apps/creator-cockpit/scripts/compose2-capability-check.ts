@@ -41,7 +41,10 @@ function check(name: string, cond: boolean, detail?: string): void {
 const canonicalSet = new Set<string>(CANONICAL_INTERPRETATION_SIGNALS);
 
 // ── 1. Registry: seeding, deterministic lookup, graceful unknown handling ────
-check("registry seeds 6 capabilities", CAPABILITY_CATALOGUE.length === 6, `size=${CAPABILITY_CATALOGUE.length}`);
+// COMPOSE-2 seeded 6 capabilities. Later sprints may ADD capabilities (COMPOSE-3
+// adds identity_resolution), so this guards that the 6 COMPOSE-2 capabilities are
+// all still present rather than pinning an exact count/order.
+check("registry seeds at least the 6 COMPOSE-2 capabilities", CAPABILITY_CATALOGUE.length >= 6, `size=${CAPABILITY_CATALOGUE.length}`);
 check("listCapabilities matches catalogue", listCapabilities().length === CAPABILITY_CATALOGUE.length);
 const expectedKeys = [
   "channel_source_entry",
@@ -51,7 +54,8 @@ const expectedKeys = [
   "boundary_safety_response",
   "human_handoff"
 ];
-check("catalogue keys are exactly the COMPOSE-1 set", JSON.stringify(capabilityKeys()) === JSON.stringify(expectedKeys), capabilityKeys().join(","));
+const presentKeys = new Set<string>(capabilityKeys());
+check("the 6 COMPOSE-2 capability keys are all present", expectedKeys.every((k) => presentKeys.has(k)), capabilityKeys().join(","));
 check("lookup is deterministic (same ref twice)", getCapability("human_handoff") === getCapability("human_handoff"));
 check("unknown key -> undefined", getCapability("does_not_exist") === undefined);
 check("empty/nullish key -> undefined", getCapability("") === undefined && getCapability(null) === undefined && getCapability(undefined) === undefined);

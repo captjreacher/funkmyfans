@@ -25,7 +25,9 @@ export const CAPABILITY_CATALOGUE: readonly CapabilityDescriptor[] = [
     status: "stable",
     requiresHuman: false,
     inputKeys: ["event_context"],
-    outputKeys: ["next_event"],
+    // COMPOSE-3: a channel entry also emits provisional identity evidence
+    // alongside the canonical event — the input the Identity capability consumes.
+    outputKeys: ["next_event", "provisional_identity"],
     // Adapter-backed; a channel has no Node Flow script (ADR-0002 Channel row).
     implementationRefs: []
   },
@@ -116,6 +118,27 @@ export const CAPABILITY_CATALOGUE: readonly CapabilityDescriptor[] = [
     ],
     outputKeys: ["human_handoff_request"],
     supportedOpportunityTypes: ["Manual Escalation", "AI Escalation", "Priority Reply"]
+  },
+  {
+    // COMPOSE-3: a system-owned identity capability, distinct from a Channel's
+    // transport entry. It consumes provisional identity evidence and resolves it
+    // to a canonical subscriber/relationship on exact same-platform evidence, or
+    // leaves it safely unresolved. It owns NO relationship intelligence (that is
+    // Hermes/FYV) and performs NO interpretation. It is a deterministic system
+    // seam with no per-creator Node Flow, so an Identity node binding it is
+    // capability_only unless a concrete flow is later attached.
+    capabilityKey: "identity_resolution",
+    version: 1,
+    label: "Identity Resolution",
+    description: "Resolves provisional, transport-scoped identity evidence to a canonical subscriber/relationship on exact same-platform evidence, or leaves it safely unresolved. Owns no relationship intelligence and no interpretation.",
+    category: "identity",
+    owner: "system",
+    status: "experimental",
+    requiresHuman: false,
+    inputKeys: ["provisional_identity", "event_context", "creator_context"],
+    outputKeys: ["identity_context", "relationship_update"],
+    // Deterministic system seam; the resolution is code-backed, not a Node Flow.
+    implementationRefs: []
   }
 ];
 

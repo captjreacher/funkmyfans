@@ -71,6 +71,8 @@ export const INSTAGRAM_QUALIFICATION_JOURNEY_EXAMPLE: PlaybookJourney = {
         label: "Instagram",
         position: { x: 60, y: 110 },
         group: "acquisition",
+        // COMPOSE-2/3: reusable channel entry capability (WHAT), adapter-backed.
+        capabilityRef: { capabilityKey: "channel_source_entry", version: 1 },
         contract: {
           inputs: [],
           outputs: [{ key: "provisional_ig_ref", label: "Provisional Instagram reference" }],
@@ -84,6 +86,7 @@ export const INSTAGRAM_QUALIFICATION_JOURNEY_EXAMPLE: PlaybookJourney = {
         label: "Web Chat",
         position: { x: 60, y: 330 },
         group: "acquisition",
+        capabilityRef: { capabilityKey: "channel_source_entry", version: 1 },
         contract: {
           inputs: [],
           outputs: [{ key: "provisional_web_ref", label: "Provisional web reference" }],
@@ -97,6 +100,8 @@ export const INSTAGRAM_QUALIFICATION_JOURNEY_EXAMPLE: PlaybookJourney = {
         label: "Identity Resolution",
         position: { x: 380, y: 220 },
         group: "acquisition",
+        // COMPOSE-3: the identity capability (WHAT); capability_only (no Node Flow).
+        capabilityRef: { capabilityKey: "identity_resolution", version: 1 },
         contract: {
           inputs: [{ key: "provisional_ref", label: "Provisional reference", required: true }],
           outputs: [{ key: "subscriber_id", label: "Canonical subscriber" }],
@@ -105,7 +110,7 @@ export const INSTAGRAM_QUALIFICATION_JOURNEY_EXAMPLE: PlaybookJourney = {
             { key: "needs_review", label: "Needs review" }
           ]
         },
-        config: { resolution: "match_or_create", blockUntilResolved: true }
+        config: { resolution: "match_or_create", blockUntilResolved: false }
       },
       {
         id: "node-qualification-chat",
@@ -147,6 +152,7 @@ export const INSTAGRAM_QUALIFICATION_JOURNEY_EXAMPLE: PlaybookJourney = {
         label: "Human Review",
         position: { x: 1060, y: 360 },
         group: "conversion",
+        capabilityRef: { capabilityKey: "human_handoff", version: 1 },
         contract: {
           inputs: [{ key: "conversation_state", label: "Conversation state", required: true }],
           outputs: [{ key: "queue_item", label: "Queue item" }],
