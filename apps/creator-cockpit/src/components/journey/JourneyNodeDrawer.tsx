@@ -96,6 +96,32 @@ export function JourneyNodeDrawer({
           </section>
         ) : null}
 
+        {capability?.capabilityKey ? (
+          <section className="rounded-lg border border-violet-300/20 bg-violet-300/[0.05] p-3">
+            <div className="flex items-center justify-between gap-2">
+              <SectionTitle>Reusable capability</SectionTitle>
+              <span className="inline-flex items-center rounded-full border border-white/12 bg-white/[0.04] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.1em] text-violet-100/80">
+                {capabilityBindingLabel(capability.capabilityBinding)}
+              </span>
+            </div>
+            <div className="mt-2 text-sm font-semibold text-white">{capability.capabilityLabel ?? "Unknown capability"}</div>
+            <dl className="mt-2.5 space-y-2">
+              <CapRow label="Key">{capability.capabilityKey}</CapRow>
+              {capability.capabilityCategory ? <CapRow label="Category">{capability.capabilityCategory}</CapRow> : null}
+              <CapRow label="Owner">{OWNER_LABEL[capability.owner]}</CapRow>
+              {capability.capabilityStatus ? <CapRow label="Status">{capability.capabilityStatus}</CapRow> : null}
+              <CapRow label="Implementation">
+                {capability.implementationAvailable ? "Available — concrete node flow attached" : "Not attached (semantic only)"}
+              </CapRow>
+            </dl>
+            {capability.boundedResponsibility ? (
+              <p className="mt-2.5 text-[11px] text-blue-100/60">{capability.boundedResponsibility}</p>
+            ) : (
+              <p className="mt-2.5 text-[11px] text-amber-100/80">This capability reference is not in the registry.</p>
+            )}
+          </section>
+        ) : null}
+
         {isConversation ? (
           <section>
             <SectionTitle>Operator surface</SectionTitle>
@@ -166,6 +192,19 @@ function ReadinessPill({ readiness }: { readiness: JourneyNodeCapability["readin
       {meta.label}
     </span>
   );
+}
+
+function capabilityBindingLabel(binding: JourneyNodeCapability["capabilityBinding"]): string {
+  switch (binding) {
+    case "capability_and_flow":
+      return "Capability + flow";
+    case "capability_only":
+      return "Capability only";
+    case "flow_only":
+      return "Flow only";
+    default:
+      return "Unbound";
+  }
 }
 
 function CapRow({ label, children }: { label: string; children: React.ReactNode }) {
