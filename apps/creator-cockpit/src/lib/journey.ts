@@ -7,10 +7,11 @@
 // continues to compile and execute that script unchanged.
 
 import type { Node } from "@xyflow/react";
-import { Cog, Fingerprint, MessageSquare, Radio, UserCheck, UserPlus, type LucideIcon } from "lucide-react";
+import { Cog, Fingerprint, HelpCircle, MessageSquare, Radio, UserCheck, UserPlus, type LucideIcon } from "lucide-react";
 import type {
   JourneyChannelKind,
   JourneyNode,
+  JourneyNodeCapability,
   JourneyNodeClass,
   JourneyNodeDestination,
   OfMessageScript,
@@ -33,6 +34,21 @@ export const JOURNEY_CLASS_META: Record<JourneyNodeClass, JourneyClassMeta> = {
   conversation: { label: "Conversation", icon: MessageSquare, accent: "#e66a8d", blurb: "Bounded conversation, normally 3–6 turns" },
   human: { label: "Human", icon: UserCheck, accent: "#f472b6", blurb: "Handoff, review or intervention" }
 };
+
+// Safe fallback for a node whose class is not one of the six canonical classes
+// (e.g. an older or malformed persisted graph). Lets the canvas and drawer
+// degrade gracefully instead of crashing on an undefined meta lookup (NODE-1F).
+export const JOURNEY_CLASS_FALLBACK_META: JourneyClassMeta = {
+  label: "Node",
+  icon: HelpCircle,
+  accent: "#94a3b8",
+  blurb: "Bounded capability"
+};
+
+/** Resolve class meta with a safe fallback for unknown/unsupported classes. */
+export function journeyClassMeta(cls: JourneyNodeClass | string): JourneyClassMeta {
+  return (JOURNEY_CLASS_META as Record<string, JourneyClassMeta>)[cls] ?? JOURNEY_CLASS_FALLBACK_META;
+}
 
 export const CONVERSATION_SURFACE_STAGES = ["source", "opening", "reply", "decision", "response", "exit"] as const;
 
@@ -91,6 +107,8 @@ export type JourneyRFData = {
   destinations: JourneyNodeDestination[];
   isEntry: boolean;
   onOpen: (id: string) => void;
+  /** Derived capability metadata (NODE-1E). Optional so the canvas renders without it. */
+  capability?: JourneyNodeCapability;
 };
 export type JourneyRFNode = Node<JourneyRFData, "journeyNode">;
 

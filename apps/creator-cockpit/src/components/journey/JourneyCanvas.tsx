@@ -14,9 +14,10 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { Maximize2 } from "lucide-react";
-import type { JourneyNodeClass, PlaybookJourney } from "@funkmyfans/of-types";
+import type { JourneyGraph, JourneyNodeCapability, JourneyNodeClass, PlaybookJourney } from "@funkmyfans/of-types";
 import {
   JOURNEY_CLASS_META,
+  journeyClassMeta,
   type AnyJourneyRFNode,
   type JourneyGroupRFNode,
   type JourneyRFNode
@@ -32,15 +33,45 @@ const GROUP_PAD_BOTTOM = 26;
 
 const nodeTypes = { journeyNode: JourneyNodeCard, journeyGroup: JourneyGroupBackdrop };
 
-export function JourneyCanvas({ journey, onOpenNode }: { journey: PlaybookJourney; onOpenNode: (id: string) => void }) {
+export function JourneyCanvas({
+  journey,
+  onOpenNode,
+  onGraphChange,
+  onDrillNode,
+  capabilityById
+}: {
+  journey: PlaybookJourney;
+  onOpenNode: (id: string) => void;
+  onGraphChange?: (graph: JourneyGraph) => void;
+  onDrillNode?: (id: string) => void;
+  capabilityById?: Record<string, JourneyNodeCapability>;
+}) {
   return (
     <ReactFlowProvider>
-      <JourneyCanvasInner journey={journey} onOpenNode={onOpenNode} />
+      <JourneyCanvasInner
+        journey={journey}
+        onOpenNode={onOpenNode}
+        onGraphChange={onGraphChange}
+        onDrillNode={onDrillNode}
+        capabilityById={capabilityById}
+      />
     </ReactFlowProvider>
   );
 }
 
-function JourneyCanvasInner({ journey, onOpenNode }: { journey: PlaybookJourney; onOpenNode: (id: string) => void }) {
+function JourneyCanvasInner({
+  journey,
+  onOpenNode,
+  onGraphChange,
+  onDrillNode,
+  capabilityById
+}: {
+  journey: PlaybookJourney;
+  onOpenNode: (id: string) => void;
+  onGraphChange?: (graph: JourneyGraph) => void;
+  onDrillNode?: (id: string) => void;
+  capabilityById?: Record<string, JourneyNodeCapability>;
+}) {
   const { fitView } = useReactFlow();
 
   const connectivity = useMemo(() => {
@@ -68,11 +99,12 @@ function JourneyCanvasInner({ journey, onOpenNode }: { journey: PlaybookJourney;
           outbound,
           destinations: node.contract.destinations,
           isEntry: inbound === 0,
-          onOpen: onOpenNode
+          onOpen: onOpenNode,
+          capability: capabilityById?.[node.id]
         }
       };
     });
-  }, [journey, connectivity, onOpenNode]);
+  }, [journey, connectivity, onOpenNode, capabilityById]);
 
   const [journeyNodes, setJourneyNodes] = useState<JourneyRFNode[]>(buildJourneyNodes);
 
@@ -82,10 +114,11 @@ function JourneyCanvasInner({ journey, onOpenNode }: { journey: PlaybookJourney;
     setJourneyNodes(buildJourneyNodes());
   }, [buildJourneyNodes]);
 
-  const groupNodes = useMemo<JourneyGroupRFNode[]>(() => {
+  // Group boxes are derived from current member positions so they track drags
+  // live. The same geometry is snapshotted into the serialized graph on save.
+  const groupBoxes = useMemo(() => {
     const groups = journey.graph.groups ?? [];
-    if (!groups.length) return [];
-    const result: JourneyGroupRFNode[] = [];
+    const boxes: Array<{ id: string; label: string; colorKey: string; x: number; y: number; width: number; height: number }> = [];
     for (const group of groups) {
       const members = journeyNodes.filter((node) => node.data.journeyNode.group === group.id);
       if (!members.length) continue;
@@ -93,13 +126,18 @@ function JourneyCanvasInner({ journey, onOpenNode }: { journey: PlaybookJourney;
       const minY = Math.min(...members.map((member) => member.position.y)) - GROUP_PAD_TOP;
       const maxX = Math.max(...members.map((member) => member.position.x)) + NODE_W + GROUP_PAD_X;
       const maxY = Math.max(...members.map((member) => member.position.y)) + NODE_H + GROUP_PAD_BOTTOM;
-      const width = maxX - minX;
-      const height = maxY - minY;
-      result.push({
-        id: `group-${group.id}`,
+      boxes.push({ id: group.id, label: group.label, colorKey: group.colorKey ?? "#4b6b96", x: minX, y: minY, width: maxX - minX, height: maxY - minY });
+    }
+    return boxes;
+  }, [journey, journeyNodes]);
+
+  const groupNodes = useMemo<JourneyGroupRFNode[]>(
+    () =>
+      groupBoxes.map((box) => ({
+        id: `group-${box.id}`,
         type: "journeyGroup",
-        position: { x: minX, y: minY },
-        data: { label: group.label, accent: group.colorKey ?? "#4b6b96" },
+        position: { x: box.x, y: box.y },
+        data: { label: box.label, accent: box.colorKey },
         draggable: false,
         selectable: false,
         focusable: false,
@@ -107,13 +145,12 @@ function JourneyCanvasInner({ journey, onOpenNode }: { journey: PlaybookJourney;
         zIndex: 0,
         // Explicit dimensions so React Flow treats the node as measured and
         // renders it (nodes sized only via style stay visibility:hidden).
-        width,
-        height,
-        style: { width, height }
-      });
-    }
-    return result;
-  }, [journey, journeyNodes]);
+        width: box.width,
+        height: box.height,
+        style: { width: box.width, height: box.height }
+      })),
+    [groupBoxes]
+  );
 
   const edges = useMemo<Edge[]>(
     () =>
@@ -138,6 +175,40 @@ function JourneyCanvasInner({ journey, onOpenNode }: { journey: PlaybookJourney;
   }, []);
 
   const allNodes = useMemo<AnyJourneyRFNode[]>(() => [...groupNodes, ...journeyNodes], [groupNodes, journeyNodes]);
+
+  // Serialize the live canvas (current positions + group geometry) back into a
+  // JourneyGraph so the workspace can persist exactly what is rendered.
+  const serializeGraph = useCallback((): JourneyGraph => {
+    const positionById = new Map(journeyNodes.map((node) => [node.id, node.position]));
+    const nodes = journey.graph.nodes.map((node) => {
+      const position = positionById.get(node.id);
+      if (!position) return node;
+      return { ...node, position: { x: Math.round(position.x), y: Math.round(position.y) } } as typeof node;
+    });
+    const groups = groupBoxes.length
+      ? groupBoxes.map((box) => ({
+          id: box.id,
+          label: box.label,
+          colorKey: box.colorKey,
+          x: Math.round(box.x),
+          y: Math.round(box.y),
+          width: Math.round(box.width),
+          height: Math.round(box.height)
+        }))
+      : journey.graph.groups;
+    return {
+      schemaVersion: 1,
+      selectedNodeId: journey.graph.selectedNodeId ?? null,
+      nodes,
+      connections: journey.graph.connections,
+      groups,
+      viewport: journey.graph.viewport
+    };
+  }, [journey, journeyNodes, groupBoxes]);
+
+  useEffect(() => {
+    onGraphChange?.(serializeGraph());
+  }, [serializeGraph, onGraphChange]);
 
   return (
     <div className="relative h-full w-full">
@@ -166,6 +237,9 @@ function JourneyCanvasInner({ journey, onOpenNode }: { journey: PlaybookJourney;
         onNodeClick={(_, node) => {
           if (node.type === "journeyNode") onOpenNode(node.id);
         }}
+        onNodeDoubleClick={(_, node) => {
+          if (node.type === "journeyNode") onDrillNode?.(node.id);
+        }}
         fitView
         fitViewOptions={{ padding: 0.2 }}
         minZoom={0.3}
@@ -192,7 +266,7 @@ function JourneyCanvasInner({ journey, onOpenNode }: { journey: PlaybookJourney;
 
 function miniMapNodeColor(node: AnyJourneyRFNode): string {
   if (node.type === "journeyGroup") return "rgba(75,107,150,0.25)";
-  return JOURNEY_CLASS_META[node.data.journeyNode.class].accent;
+  return journeyClassMeta(node.data.journeyNode.class).accent;
 }
 
 function JourneyLegend() {

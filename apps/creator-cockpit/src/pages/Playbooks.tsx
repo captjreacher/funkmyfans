@@ -63,7 +63,9 @@ import {
   type NodeProps
 } from "@xyflow/react";
 import type {
+  JourneyGraph,
   JourneyNode,
+  JourneyNodeCapability,
   OfMessageScript,
   PlaybookJourney,
   QueueWorkspaceItemSummary,
@@ -79,6 +81,8 @@ import {
   fetchQueueWorkspace,
   fetchScript,
   fetchScriptsWorkspace,
+  fetchScriptJourney,
+  saveScriptJourney,
   fetchSimulationDetail,
   saveScriptBuilder,
   simulationPurchase,
@@ -103,6 +107,8 @@ import {
 import { JourneyCanvas } from "../components/journey/JourneyCanvas";
 import { JourneyNodeDrawer } from "../components/journey/JourneyNodeDrawer";
 import { buildPlaybookJourney } from "../lib/journeyExamples";
+import { channelLabel } from "../lib/journey";
+import { deriveJourneyCapabilities } from "../lib/journeyContracts";
 
 const libraryTabs = ["Template Library", "Drafts", "Active", "Archived"] as const;
 type LibraryTab = (typeof libraryTabs)[number];
@@ -489,35 +495,243 @@ function PlaybookJourneyWorkspace({
   onSimulate: () => void;
   onStatusChange: (status: OfMessageScript["status"]) => void;
 }) {
-  const [mode, setMode] = useState<"journey" | "advanced">("journey");
+  const [drill, setDrill] = useState<{ scriptId: string; label: string } | null>(null);
+  const [drillSession, setDrillSession] = useState<BuilderSession | null>(null);
+  const [drillLoading, setDrillLoading] = useState(false);
   const [openNodeId, setOpenNodeId] = useState<string | null>(null);
+  const [journey, setJourney] = useState<PlaybookJourney | null>(null);
+  const [persisted, setPersisted] = useState(false);
+  const [draftGraph, setDraftGraph] = useState<JourneyGraph | null>(null);
+  const [baselineGraphJson, setBaselineGraphJson] = useState("");
+  const [journeyLoading, setJourneyLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [journeyError, setJourneyError] = useState<string | null>(null);
 
   const creatorName = useMemo(() => creatorLabel(workspace, session.script.creator_id), [workspace, session.script.creator_id]);
-  const journey = useMemo<PlaybookJourney>(() => buildPlaybookJourney(session.script, creatorName), [session.script, creatorName]);
-  const openNode = useMemo<JourneyNode | null>(() => journey.graph.nodes.find((node) => node.id === openNodeId) ?? null, [journey, openNodeId]);
 
-  // Advanced mode mounts the EXISTING conversation builder unchanged — the node
-  // flow editor and its runtime behaviour are untouched by NODE-1B. Only the
-  // back target changes (return to the journey view instead of the list).
-  if (mode === "advanced") {
+  // Load the persisted journey; fall back to the NODE-1B derivation when none
+  // exists (or if the backend is unreachable) so playbooks always open.
+  useEffect(() => {
+    let cancelled = false;
+    setJourneyLoading(true);
+    setJourneyError(null);
+    setDraftGraph(null);
+    void (async () => {
+      let loaded: PlaybookJourney;
+      let fromServer = false;
+      try {
+        const result = await fetchScriptJourney(session.script.id);
+        if (result.journey) {
+          loaded = result.journey;
+          fromServer = true;
+        } else {
+          loaded = buildPlaybookJourney(session.script, creatorName);
+        }
+      } catch {
+        loaded = buildPlaybookJourney(session.script, creatorName);
+      }
+      if (cancelled) return;
+      setJourney(loaded);
+      setPersisted(fromServer);
+      setBaselineGraphJson(JSON.stringify(loaded.graph));
+      setJourneyLoading(false);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [session.script, creatorName]);
+
+  const openNode = useMemo<JourneyNode | null>(() => journey?.graph.nodes.find((node) => node.id === openNodeId) ?? null, [journey, openNodeId]);
+
+  // NODE-1E: derive capability contracts for the current journey. The only
+  // evidence consulted is referenced-script existence (checked against the
+  // loaded workspace scripts + this playbook's own script). No runtime or
+  // operational health is read. Memoised on journey identity + evidence so the
+  // canvas keeps node identity stable across drags.
+  const knownScriptIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const item of workspace?.scripts ?? []) ids.add(item.id);
+    ids.add(session.script.id);
+    return ids;
+  }, [workspace, session.script.id]);
+
+  const sourceChannelLabel = useMemo(() => {
+    const channels = (journey?.graph.nodes ?? []).filter((node) => node.class === "channel");
+    if (channels.length !== 1) return undefined;
+    const channel = channels[0];
+    if (channel.class !== "channel") return undefined;
+    const base = channelLabel(channel.config.channel);
+    return channel.config.accountLabel ? `${base} · ${channel.config.accountLabel}` : base;
+  }, [journey]);
+
+  const capabilityById = useMemo<Record<string, JourneyNodeCapability>>(
+    () =>
+      journey
+        ? deriveJourneyCapabilities(journey.graph.nodes, {
+            scriptExists: (id) => knownScriptIds.has(id),
+            sourceChannelLabel
+          })
+        : {},
+    [journey, knownScriptIds, sourceChannelLabel]
+  );
+
+  const dirty = Boolean(draftGraph) && JSON.stringify(draftGraph) !== baselineGraphJson;
+  const canSave = !journeyLoading && Boolean(journey) && (dirty || !persisted);
+
+  async function handleSaveJourney() {
+    if (!journey) return;
+    setSaving(true);
+    setJourneyError(null);
+    try {
+      const payload: PlaybookJourney = { ...journey, graph: draftGraph ?? journey.graph };
+      const result = await saveScriptJourney(session.script.id, payload);
+      setJourney(result.journey);
+      setPersisted(true);
+      setBaselineGraphJson(JSON.stringify(result.journey.graph));
+      setDraftGraph(result.journey.graph);
+    } catch (saveErr) {
+      setJourneyError(errorMessage(saveErr, "Unable to save journey"));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // Resolve the drill session from the node's nodeFlowRef. When the reference is
+  // the playbook's own script (the case today) reuse the parent session so its
+  // save/publish/simulate/status wiring is untouched; otherwise load that script.
+  useEffect(() => {
+    if (!drill) {
+      setDrillSession(null);
+      setDrillLoading(false);
+      return;
+    }
+    if (drill.scriptId === session.script.id) {
+      setDrillSession(session);
+      setDrillLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setDrillLoading(true);
+    void (async () => {
+      try {
+        const detail = await fetchScript(drill.scriptId);
+        if (cancelled) return;
+        setDrillSession({ script: detail.script, flow: flowFromConversationFlow(detail.script), loadedAt: Date.now() });
+      } catch (err) {
+        if (cancelled) return;
+        setJourneyError(errorMessage(err, "Unable to open node flow"));
+        setDrill(null);
+      } finally {
+        if (!cancelled) setDrillLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [drill, session]);
+
+  function openNodeFlow(node: JourneyNode) {
+    const ref = node.nodeFlowRef;
+    if (!ref || ref.kind !== "script") return;
+    // Fold unsaved journey positions into the in-memory journey so returning from
+    // the node flow restores them (unsaved changes are not lost on drill).
+    if (draftGraph) setJourney((prev) => (prev ? { ...prev, graph: draftGraph } : prev));
+    setOpenNodeId(null);
+    setDrill({ scriptId: ref.scriptId, label: node.label });
+  }
+
+  function openPrimaryNodeFlow() {
+    const primary =
+      journey?.graph.nodes.find(
+        (node) => node.class === "conversation" && node.nodeFlowRef?.kind === "script" && node.nodeFlowRef.scriptId === session.script.id
+      ) ?? journey?.graph.nodes.find((node) => node.nodeFlowRef?.kind === "script");
+    if (primary) {
+      openNodeFlow(primary);
+      return;
+    }
+    if (draftGraph) setJourney((prev) => (prev ? { ...prev, graph: draftGraph } : prev));
+    setDrill({ scriptId: session.script.id, label: flowLabel(session.script.name) });
+  }
+
+  async function saveReferencedFlow(scriptId: string, flow: ScriptVisualBuilderConfig, publish: boolean) {
+    if (!drillSession) return;
+    const blocking = validateBuilderFlow(flow).filter((issue) => issue.severity === "error");
+    if (blocking.length) {
+      setJourneyError(`Resolve ${blocking.length} validation error${blocking.length === 1 ? "" : "s"} before saving.`);
+      return;
+    }
+    try {
+      const response = await saveScriptBuilder(scriptId, compileBuilderFlow(drillSession.script, flow));
+      const next = publish ? (await updateScript(response.script.id, { status: "active" })).script : response.script;
+      setDrillSession({ script: next, flow: flowFromConversationFlow(next), loadedAt: Date.now() });
+      setJourneyError(null);
+    } catch (err) {
+      setJourneyError(errorMessage(err, "Unable to save node flow"));
+    }
+  }
+
+  async function updateReferencedStatus(scriptId: string, status: OfMessageScript["status"]) {
+    try {
+      const result = await updateScript(scriptId, { status });
+      setDrillSession({ script: result.script, flow: flowFromConversationFlow(result.script), loadedAt: Date.now() });
+      setJourneyError(null);
+    } catch (err) {
+      setJourneyError(errorMessage(err, "Unable to update node flow status"));
+    }
+  }
+
+  // Drill-down: enter one bounded node's existing Node Flow, then return to the
+  // same journey context (the load effect stays keyed on the playbook script, so
+  // returning does not re-derive the journey).
+  if (drill) {
+    const isParentFlow = drill.scriptId === session.script.id;
     return (
-      <ReactFlowProvider>
-        <ConversationFlowBuilder
-          session={session}
-          workspace={workspace}
-          busy={busy}
-          error={error}
-          onBack={() => setMode("journey")}
-          onSave={onSave}
-          onPublish={onPublish}
-          onSimulate={onSimulate}
-          onStatusChange={onStatusChange}
-        />
-      </ReactFlowProvider>
+      <main className="animate-in-soft flex h-full min-h-0 flex-col gap-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <nav className="flex min-w-0 items-center gap-2 text-sm text-blue-100/60">
+            <button type="button" onClick={() => setDrill(null)} className="inline-flex items-center gap-1.5 rounded-lg border border-blue-400/20 bg-[#102338]/72 px-3 py-2 font-semibold text-blue-50 hover:border-blue-300/40">
+              <ChevronLeft className="h-4 w-4" aria-hidden="true" />
+              Journey
+            </button>
+            <span className="text-blue-100/30">/</span>
+            <span className="truncate font-medium text-white">{journey?.title ?? flowLabel(session.script.name)}</span>
+            <span className="text-blue-100/30">/</span>
+            <span className="inline-flex items-center gap-1.5 truncate text-cyan-300">
+              <Workflow className="h-3.5 w-3.5" aria-hidden="true" />
+              Node flow: {drill.label}
+            </span>
+          </nav>
+          <button type="button" onClick={() => setDrill(null)} className="inline-flex items-center gap-2 rounded-lg bg-cyan-400 px-3 py-2 text-sm font-semibold text-slate-950">
+            <ChevronLeft className="h-4 w-4" aria-hidden="true" />
+            Return to journey
+          </button>
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-hidden">
+          {drillLoading || !drillSession ? (
+            <div className="flex h-full items-center justify-center text-sm text-blue-100/55">Loading node flow…</div>
+          ) : (
+            <ReactFlowProvider>
+              <ConversationFlowBuilder
+                session={drillSession}
+                workspace={workspace}
+                busy={busy}
+                error={error}
+                onBack={() => setDrill(null)}
+                onSave={isParentFlow ? onSave : (flow) => void saveReferencedFlow(drill.scriptId, flow, false)}
+                onPublish={isParentFlow ? onPublish : (flow) => void saveReferencedFlow(drill.scriptId, flow, true)}
+                onSimulate={onSimulate}
+                onStatusChange={isParentFlow ? onStatusChange : (status) => void updateReferencedStatus(drill.scriptId, status)}
+              />
+            </ReactFlowProvider>
+          )}
+        </div>
+      </main>
     );
   }
 
   const statusLabel = session.script.builder_config?.workspace?.archivedAt ? "archived" : session.script.status;
+  const saveStateLabel = saving ? "Saving…" : dirty ? "Unsaved changes" : persisted ? "Saved" : "Not saved yet";
 
   return (
     <main className="animate-in-soft flex h-full min-h-0 flex-col gap-4">
@@ -533,39 +747,59 @@ function PlaybookJourneyWorkspace({
               Journey
             </div>
             <div className="flex items-center gap-2">
-              <h2 className="truncate text-xl font-semibold text-white">{journey.title}</h2>
+              <h2 className="truncate text-xl font-semibold text-white">{journey?.title ?? flowLabel(session.script.name)}</h2>
               <span className={`rounded-full px-2.5 py-0.5 text-xs font-semibold ${statusTone(session.script)}`}>{statusLabel}</span>
             </div>
             <div className="truncate text-xs text-blue-100/55">{creatorName}</div>
           </div>
         </div>
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs font-medium text-blue-100/55">{saveStateLabel}</span>
+          <button type="button" onClick={() => void handleSaveJourney()} disabled={!canSave || saving} className="inline-flex items-center gap-2 rounded-lg bg-cyan-400 px-3 py-2 text-sm font-semibold text-slate-950 disabled:opacity-45">
+            <Save className="h-4 w-4" aria-hidden="true" />
+            Save journey
+          </button>
           <button type="button" onClick={onSimulate} className="inline-flex items-center gap-2 rounded-lg border border-blue-400/20 bg-[#102338]/72 px-3 py-2 text-sm font-semibold text-blue-50 hover:border-blue-300/40">
             <Play className="h-4 w-4" aria-hidden="true" />
             Simulate
           </button>
-          <button type="button" onClick={() => setMode("advanced")} className="inline-flex items-center gap-2 rounded-lg border border-blue-400/20 bg-[#102338]/72 px-3 py-2 text-sm font-semibold text-blue-50 hover:border-blue-300/40">
+          <button type="button" onClick={openPrimaryNodeFlow} className="inline-flex items-center gap-2 rounded-lg border border-blue-400/20 bg-[#102338]/72 px-3 py-2 text-sm font-semibold text-blue-50 hover:border-blue-300/40">
             <Workflow className="h-4 w-4" aria-hidden="true" />
-            Advanced builder
+            Open node flow
           </button>
         </div>
       </header>
 
-      {error ? <div className="rounded-lg border border-rose-400/25 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">{error}</div> : null}
+      {journeyError || error ? <div className="rounded-lg border border-rose-400/25 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">{journeyError ?? error}</div> : null}
 
       <div className="relative min-h-0 flex-1 overflow-hidden rounded-xl premium-card">
-        <JourneyCanvas key={session.script.id} journey={journey} onOpenNode={setOpenNodeId} />
-        <JourneyNodeDrawer
-          node={openNode}
-          onClose={() => setOpenNodeId(null)}
-          onOpenAdvanced={(node) => {
-            if (node.class === "conversation") setMode("advanced");
-          }}
-        />
+        {journeyLoading || !journey ? (
+          <div className="flex h-full items-center justify-center text-sm text-blue-100/55">Loading journey…</div>
+        ) : (
+          <>
+            <JourneyCanvas
+              key={session.script.id}
+              journey={journey}
+              onOpenNode={setOpenNodeId}
+              onGraphChange={setDraftGraph}
+              capabilityById={capabilityById}
+              onDrillNode={(id) => {
+                const node = journey.graph.nodes.find((item) => item.id === id);
+                if (node) openNodeFlow(node);
+              }}
+            />
+            <JourneyNodeDrawer
+              node={openNode}
+              capability={openNode ? capabilityById[openNode.id] : null}
+              onClose={() => setOpenNodeId(null)}
+              onOpenNodeFlow={(node) => openNodeFlow(node)}
+            />
+          </>
+        )}
       </div>
 
       <p className="px-1 text-xs text-blue-100/50">
-        Journey view shows bounded capabilities. Runtime steps stay inside each node flow &mdash; open the advanced builder to edit the underlying conversation script (unchanged from today).
+        Journey view shows bounded capabilities. Open a node to work inside its existing flow, then return here &mdash; runtime execution is unchanged.
       </p>
     </main>
   );

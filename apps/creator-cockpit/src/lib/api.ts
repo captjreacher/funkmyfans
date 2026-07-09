@@ -24,6 +24,7 @@ import type {
   OfEvent,
   OfMessageScript,
   OfOutboundMessage,
+  PlaybookJourney,
   OfRecommendation,
   SettingsWorkspaceData,
   RevenueJourneyWorkspaceData,
@@ -366,6 +367,17 @@ export async function updateScript(scriptId: string, patch: Partial<OfMessageScr
 export async function saveScriptBuilder(scriptId: string, template: MessageScriptTemplate): Promise<{ script: OfMessageScript }> {
   assertUuid(scriptId, "script");
   return apiJson<{ script: OfMessageScript }>(`/scripts/${scriptId}/builder`, jsonInit("PUT", template));
+}
+
+// NODE-1C: journey persistence (one JourneyGraph per playbook). No runtime impact.
+export async function fetchScriptJourney(scriptId: string): Promise<{ journey: PlaybookJourney | null }> {
+  assertUuid(scriptId, "script");
+  return apiJson<{ journey: PlaybookJourney | null }>(`/scripts/${scriptId}/journey`);
+}
+
+export async function saveScriptJourney(scriptId: string, journey: PlaybookJourney): Promise<{ journey: PlaybookJourney }> {
+  assertUuid(scriptId, "script");
+  return apiJson<{ journey: PlaybookJourney }>(`/scripts/${scriptId}/journey`, jsonInit("PUT", journey));
 }
 
 export async function duplicateScript(scriptId: string): Promise<{ script: OfMessageScript }> {

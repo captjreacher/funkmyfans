@@ -2055,6 +2055,13 @@ export interface JourneyGroup {
   id: string;
   label: string;
   colorKey?: string;
+  // Optional persisted layout (NODE-1C). When absent, geometry is derived from
+  // member node positions. Persisting it lets a stored graph round-trip the
+  // group box exactly as the canvas rendered it.
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
 }
 
 export interface JourneyViewport {
@@ -2089,6 +2096,104 @@ export interface PlaybookJourney {
   version: number;
   createdAt: string;
   updatedAt: string;
+}
+
+/**
+ * Persisted playbook-journey row (NODE-1C). One row per playbook (script),
+ * keyed by script_id. Stores the JourneyGraph as JSONB alongside light
+ * metadata. It does NOT touch runtime tables; the runtime continues to walk the
+ * compiled script referenced by each Conversation node's nodeFlowRef.
+ */
+export interface OfPlaybookJourney {
+  id: string;
+  script_id: string;
+  creator_id: string;
+  title: string;
+  status: "draft" | "active" | "archived";
+  schema_version: number;
+  version: number;
+  graph: JourneyGraph;
+  created_at: string;
+  updated_at: string;
+}
+
+/* ==========================================================================
+ * NODE-1E: Journey Node Contract — capability metadata (derived, not persisted)
+ *
+ * A capability-facing descriptor for a journey node. For the journey canvas and
+ * node drawer it answers three questions WITHOUT reaching into a node's Node
+ * Flow implementation: what bounded capability is this, how does it connect
+ * (entry/exit) into the journey, and where does it hand off?
+ *
+ * It is a DERIVED VIEW, not part of JourneyGraph. It is computed
+ * deterministically from a node's class, declared IO contract, config and
+ * nodeFlowRef, plus a single evidence probe (whether a referenced script
+ * exists). Keeping it out of the persisted graph means NODE-1C stored graphs
+ * stay byte-compatible and no migration is required.
+ *
+ * Readiness is deterministic and evidence-based: the ONLY runtime-adjacent
+ * signal consulted is referenced-script existence. It never infers live
+ * operational health or runtime readiness.
+ * ========================================================================== */
+
+/**
+ * Evidence-based readiness of a node's capability.
+ * - `ready`               structurally complete: a referenced node flow exists,
+ *                         or the class needs no node flow and is configured.
+ * - `needs_configuration` a required binding/config is absent (e.g. a
+ *                         Conversation node with no nodeFlowRef).
+ * - `reference_missing`   a nodeFlowRef points at a script that does not exist
+ *                         (evidence: the script lookup failed).
+ * - `manual`              a human-owned capability; there is no automated
+ *                         implementation to validate (by design).
+ * - `unknown`             could not be determined; the safe fallback for
+ *                         unmapped classes or unverifiable references.
+ *
+ * NOTE: readiness describes structural / contract completeness from deterministic
+ * evidence. It is NOT a live operational-health or runtime-readiness signal.
+ */
+export type JourneyNodeReadiness =
+  | "ready"
+  | "needs_configuration"
+  | "reference_missing"
+  | "manual"
+  | "unknown";
+
+/** Which party owns a node's bounded capability. */
+export type JourneyNodeOwner = "channel" | "system" | "automation" | "human";
+
+/**
+ * Capability metadata for a single journey node (the NODE-1E "Journey Node
+ * Contract"). Derived at render; never copied into the persisted JourneyGraph.
+ * It carries the node's reference (nodeFlowRef) but never the Node Flow's
+ * contents — navigation into the implementation stays via nodeFlowRef alone.
+ */
+export interface JourneyNodeCapability {
+  nodeId: string;
+  label: string;
+  nodeClass: JourneyNodeClass;
+  /** Human-readable capability, e.g. "Automated conversation". */
+  capabilityType: string;
+  /** Channel / source context, when known (a Channel's own transport, or the journey's entry channel). */
+  source?: string;
+  /** Deterministic summary of how control ENTERS this node (from its declared inputs / class). */
+  entrySummary: string;
+  /** Deterministic summary of how control LEAVES this node (from its declared destinations). */
+  exitSummary: string;
+  /** The node's reference to its bounded implementation — the reference only, never its contents. */
+  nodeFlowRef?: NodeFlowRef;
+  /** Convenience: whether the node references a Node Flow at all. */
+  hasNodeFlow: boolean;
+  /** Which party owns this capability. */
+  owner: JourneyNodeOwner;
+  /** Marks a node where a human takes over. */
+  isHumanHandoff: boolean;
+  /** Evidence-based readiness (see JourneyNodeReadiness). */
+  readiness: JourneyNodeReadiness;
+  /** One-line, evidence-based explanation of the readiness value. */
+  readinessDetail: string;
+  /** Optional evidence notes / warnings (e.g. a referenced flow that was not found). */
+  warnings?: string[];
 }
 
 /**
