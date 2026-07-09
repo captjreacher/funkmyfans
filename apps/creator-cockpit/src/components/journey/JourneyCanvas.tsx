@@ -17,6 +17,7 @@ import { Maximize2 } from "lucide-react";
 import type { JourneyGraph, JourneyNodeCapability, JourneyNodeClass, PlaybookJourney } from "@funkmyfans/of-types";
 import {
   JOURNEY_CLASS_META,
+  journeyClassMeta,
   type AnyJourneyRFNode,
   type JourneyGroupRFNode,
   type JourneyRFNode
@@ -265,7 +266,7 @@ function JourneyCanvasInner({
 
 function miniMapNodeColor(node: AnyJourneyRFNode): string {
   if (node.type === "journeyGroup") return "rgba(75,107,150,0.25)";
-  return JOURNEY_CLASS_META[node.data.journeyNode.class].accent;
+  return journeyClassMeta(node.data.journeyNode.class).accent;
 }
 
 function JourneyLegend() {

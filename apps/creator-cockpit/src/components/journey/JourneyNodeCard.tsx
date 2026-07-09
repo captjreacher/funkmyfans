@@ -1,6 +1,6 @@
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 import { ArrowDownLeft, ArrowUpRight, LogIn } from "lucide-react";
-import { JOURNEY_CLASS_META, journeyNodePurpose, type JourneyRFNode } from "../../lib/journey";
+import { journeyClassMeta, journeyNodePurpose, type JourneyRFNode } from "../../lib/journey";
 import { READINESS_META } from "../../lib/journeyContracts";
 
 // Journey-level node card for the six canonical ADR-0002 classes. Shows only
@@ -8,7 +8,7 @@ import { READINESS_META } from "../../lib/journeyContracts";
 // renders internal runtime steps — those live inside the node flow.
 export function JourneyNodeCard({ data, selected }: NodeProps<JourneyRFNode>) {
   const { journeyNode, inbound, outbound, isEntry, capability } = data;
-  const meta = JOURNEY_CLASS_META[journeyNode.class];
+  const meta = journeyClassMeta(journeyNode.class);
   const Icon = meta.icon;
   const readiness = capability ? READINESS_META[capability.readiness] : null;
 

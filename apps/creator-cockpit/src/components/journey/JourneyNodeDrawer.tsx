@@ -1,6 +1,6 @@
 import { AlertTriangle, ArrowUpRight, ChevronRight, PanelRightClose, Workflow, Wrench } from "lucide-react";
 import type { JourneyNode, JourneyNodeCapability } from "@funkmyfans/of-types";
-import { CONVERSATION_SURFACE_STAGES, JOURNEY_CLASS_META, journeyNodePurpose } from "../../lib/journey";
+import { CONVERSATION_SURFACE_STAGES, journeyClassMeta, journeyNodePurpose } from "../../lib/journey";
 import { OWNER_LABEL, READINESS_META } from "../../lib/journeyContracts";
 
 const STAGE_LABEL: Record<string, string> = {
@@ -28,7 +28,7 @@ export function JourneyNodeDrawer({
   onOpenNodeFlow?: (node: JourneyNode) => void;
 }) {
   if (!node) return null;
-  const meta = JOURNEY_CLASS_META[node.class];
+  const meta = journeyClassMeta(node.class);
   const Icon = meta.icon;
   const isConversation = node.class === "conversation";
   const stages = isConversation && node.config.surface?.length ? node.config.surface : [...CONVERSATION_SURFACE_STAGES];
