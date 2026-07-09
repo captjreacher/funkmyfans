@@ -93,7 +93,7 @@ import type {
   SyncType,
   NormalizedInstagramEvent
 } from "@funkmyfans/of-types";
-import { mapConversationInstanceToConversation, mapConversationRuntimeStatusToLifecycleState, mapTaskToQueue, mapTaskToQueueItem, summarizeEventType, normalizeInstagramEvent, INSTAGRAM_PROVIDER } from "@funkmyfans/of-types";
+import { mapConversationInstanceToConversation, mapConversationRuntimeStatusToLifecycleState, mapTaskToQueue, mapTaskToQueueItem, summarizeEventType, normalizeInstagramEvent, INSTAGRAM_PROVIDER, buildCapabilityOutcome, mapOutcomeToOpportunitySignal } from "@funkmyfans/of-types";
 import { createClient } from "@supabase/supabase-js";
 import moonsirenIntelligenceFixture from "./fixtures/moonsiren-creator-intelligence-package-v1.json";
 
@@ -7478,6 +7478,55 @@ function opportunityFromMetadata(metadata: unknown): ConversationOpportunitySumm
   return candidate as unknown as ConversationOpportunitySummary;
 }
 
+/**
+ * COMPOSE-4: is the subscriber identity behind this conversation resolved? Used
+ * only to guard owner fabrication in the additive opportunity-signal annotation
+ * (it never changes routing, category, or the persisted opportunity row). A
+ * conversation with a canonical subscriber, or a resolved relationship-context
+ * identity status, counts as resolved.
+ */
+function deriveIdentityResolvedForConversation(conversation: OfConversationInstance): boolean {
+  const rc = normalizeRelationshipContext(isRecord(conversation.metadata) ? conversation.metadata.relationship_context : null);
+  const status = rc?.identity_status ?? "";
+  if (["exact", "confirmed", "probable", "qualified", "resolved"].includes(status)) return true;
+  return Boolean(conversation.subscriber_id);
+}
+
+/**
+ * COMPOSE-4: derive the deterministic { capability_outcome, opportunity_signal }
+ * annotation for an end-step handoff. Pure + defensive: any problem returns null
+ * so it can NEVER affect the conversation runtime. It is attached to the
+ * opportunity metadata additively; it does not create a Queue item and does not
+ * change the opportunity's route/category/status.
+ */
+function buildCompose4OpportunityAnnotation(
+  conversation: OfConversationInstance,
+  input: { outcomeKey: string; handoffKind: string; terminalType: string }
+): Record<string, unknown> | null {
+  try {
+    const outcome = buildCapabilityOutcome({
+      capabilityKey: "new_subscriber_welcome_discovery",
+      nodeId: null,
+      outcomeKey: input.outcomeKey,
+      handoffKind: input.handoffKind,
+      terminalType: input.terminalType,
+      producer: "conversation_runtime.end_step",
+      rawSignal: input.outcomeKey,
+      sourceEventId: conversation.originating_event_id ?? null,
+      sourceConversationId: conversation.id,
+      identityResolved: deriveIdentityResolvedForConversation(conversation)
+    });
+    const mapped = mapOutcomeToOpportunitySignal(outcome);
+    return {
+      capability_outcome: outcome,
+      opportunity_signal: mapped.produced ? mapped.signal : null,
+      opportunity_signal_skipped_reason: mapped.produced ? null : mapped.reason
+    };
+  } catch {
+    return null;
+  }
+}
+
 async function ensureConversationOpportunity(
   supabase: SupabaseClient,
   conversation: OfConversationInstance,
@@ -7493,6 +7542,14 @@ async function ensureConversationOpportunity(
     title?: string;
   }
 ): Promise<ConversationOpportunitySummary | null> {
+  // COMPOSE-4: additive, deterministic annotation of the capability outcome and
+  // the derived opportunity signal (evidence-preserving). Attached to metadata
+  // only; never changes route_key/category/status and never creates a Queue item.
+  const compose4 = buildCompose4OpportunityAnnotation(conversation, {
+    outcomeKey: input.outcomeKey,
+    handoffKind: input.handoffKind,
+    terminalType: input.terminalType
+  });
   const payload = {
     creator_id: conversation.creator_id,
     conversation_instance_id: conversation.id,
@@ -7517,7 +7574,9 @@ async function ensureConversationOpportunity(
       outcome_label: input.outcomeLabel,
       handoff_kind: input.handoffKind,
       handoff_reason: input.reason,
-      step_id: step.id
+      step_id: step.id,
+      // COMPOSE-4: additive, deterministic outcome→opportunity-signal annotation.
+      ...(compose4 ? { compose4 } : {})
     }
   } satisfies Record<string, unknown>;
 
