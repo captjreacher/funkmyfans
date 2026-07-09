@@ -80,10 +80,10 @@ function sourceFor(node: JourneyNode, ctx: JourneyContractContext): string | und
 
 function entrySummary(node: JourneyNode): string {
   if (node.class === "channel") {
-    const signal = node.contract.destinations[0]?.label;
+    const signal = node.contract?.destinations?.[0]?.label;
     return signal ? `Journey entry — detects “${signal}”` : "Journey entry point";
   }
-  const inputs = node.contract.inputs;
+  const inputs = node.contract?.inputs ?? [];
   if (!inputs.length) return "Journey entry point";
   const required = inputs.filter((input) => input.required);
   const chosen = (required.length ? required : inputs).map((input) => input.label);
@@ -91,7 +91,7 @@ function entrySummary(node: JourneyNode): string {
 }
 
 function exitSummary(node: JourneyNode): string {
-  const destinations = node.contract.destinations;
+  const destinations = node.contract?.destinations ?? [];
   if (!destinations.length) return "Terminal — no onward destination";
   const verb = node.class === "channel" ? "Hands off via" : "Exits via";
   return `${verb} ${destinations.map((destination) => destination.label).join(", ")}`;
