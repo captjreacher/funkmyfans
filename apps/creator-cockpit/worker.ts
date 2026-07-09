@@ -90,9 +90,10 @@ import type {
   JourneyGraph,
   OfPlaybookJourney,
   PlaybookJourney,
-  SyncType
+  SyncType,
+  NormalizedInstagramEvent
 } from "@funkmyfans/of-types";
-import { mapConversationInstanceToConversation, mapConversationRuntimeStatusToLifecycleState, mapTaskToQueue, mapTaskToQueueItem, summarizeEventType } from "@funkmyfans/of-types";
+import { mapConversationInstanceToConversation, mapConversationRuntimeStatusToLifecycleState, mapTaskToQueue, mapTaskToQueueItem, summarizeEventType, normalizeInstagramEvent, INSTAGRAM_PROVIDER } from "@funkmyfans/of-types";
 import { createClient } from "@supabase/supabase-js";
 import moonsirenIntelligenceFixture from "./fixtures/moonsiren-creator-intelligence-package-v1.json";
 
@@ -104,6 +105,9 @@ interface Env {
   BETTERFANS_BASE_URL?: string;
   BETTERFANS_EVENTS_SHARED_SECRET?: string;
   DEFAULT_BETTERFANS_ACCOUNT_ID?: string;
+  // COMPOSE-3: optional shared secret for the Instagram ingestion boundary.
+  // When unset, ingestion is open (parity with BetterFans behaviour).
+  INSTAGRAM_EVENTS_SHARED_SECRET?: string;
 }
 
 const jsonHeaders = {
@@ -1572,6 +1576,24 @@ function boundedPriority(value: unknown, label: string) {
       return Response.json({ ...result, automations }, { status: 200, headers: jsonHeaders });
     }
     return Response.json(result, { status: result.ok ? 200 : result.statusCode, headers: jsonHeaders });
+  }
+
+  // COMPOSE-3: Instagram ingestion boundary (the "Instagram Entry" Channel node,
+  // capability channel_source_entry). It ingests an Instagram-originated event
+  // into the canonical event store (of_events) and emits provisional identity
+  // EVIDENCE. It deliberately does NOT: run automations, interpret the message,
+  // resolve identity, or create any Opportunity/Queue item. Identity resolution
+  // is a separate capability (identity_resolution); interpretation/opportunity
+  // wiring is COMPOSE-4. Event ingestion succeeds independently of identity
+  // resolution success.
+  if (request.method === "POST" && url.pathname === "/api/events/instagram") {
+    if (!isAuthorizedInstagramEventIngest(request, env)) {
+      return Response.json({ ok: false, error: "Unauthorized Instagram event ingest request" }, { status: 401, headers: jsonHeaders });
+    }
+
+    const rawPayload = await request.json().catch(() => null);
+    const result = await ingestInstagramEvent(supabase, rawPayload);
+    return Response.json(result, { status: result.ok ? 200 : (result.statusCode ?? 500), headers: jsonHeaders });
   }
 
   const syncMatch = url.pathname.match(/^\/api\/creators\/([^/]+)\/sync\/(profile|stats|subscribers|chats|all)$/);
@@ -10813,6 +10835,142 @@ async function ingestBetterFansEvent(supabase: SupabaseClient, rawPayload: unkno
   };
 }
 
+/**
+ * COMPOSE-3: resolve the FMF creator an Instagram event belongs to. An event
+ * must have creator CONTEXT to be ingested (of_events.creator_id is NOT NULL);
+ * this is creator resolution, NOT subscriber identity resolution. Prefers an
+ * explicit FMF creator id, then an Instagram-provider creator matched by account
+ * id (username or metadata.instagram_account_id). Returns null when unknown so
+ * the caller can 404 — it never creates or mutates a creator.
+ */
+async function resolveInstagramCreator(supabase: SupabaseClient, event: NormalizedInstagramEvent) {
+  if (event.creatorId && isUuid(event.creatorId)) {
+    const byId = await supabase.from("of_creators").select("id, platform_provider").eq("id", event.creatorId).maybeSingle();
+    if (byId.data) return byId.data as { id: string; platform_provider: string };
+  }
+  if (event.creatorExternalId) {
+    // Instagram creators are represented with platform_provider = 'instagram'
+    // (COMPOSE-3 additive CHECK-constraint extension). Match by username first,
+    // then by a stored metadata account id. Values are passed as bound params.
+    const byUsername = await supabase
+      .from("of_creators")
+      .select("id, platform_provider")
+      .eq("platform_provider", INSTAGRAM_PROVIDER)
+      .eq("username", event.creatorExternalId)
+      .maybeSingle();
+    if (byUsername.data) return byUsername.data as { id: string; platform_provider: string };
+
+    const byMetadata = await supabase
+      .from("of_creators")
+      .select("id, platform_provider")
+      .eq("platform_provider", INSTAGRAM_PROVIDER)
+      .eq("metadata->>instagram_account_id", event.creatorExternalId)
+      .maybeSingle();
+    if (byMetadata.data) return byMetadata.data as { id: string; platform_provider: string };
+  }
+  return null;
+}
+
+/**
+ * COMPOSE-3: ingest one Instagram-originated event into the canonical event
+ * boundary. Deterministic validation + normalization happen in
+ * `normalizeInstagramEvent` (of-types); this adds the data-layer concerns:
+ * creator context, idempotent/deduplicated persistence (of_events unique
+ * (provider, provider_event_id)), and preservation of raw source evidence +
+ * provisional identity. It performs NO interpretation, resolves NO identity, and
+ * creates NO opportunity/queue item.
+ */
+async function ingestInstagramEvent(supabase: SupabaseClient, rawPayload: unknown) {
+  const receivedAt = new Date().toISOString();
+  const outcome = normalizeInstagramEvent(rawPayload, { receivedAt });
+  if (!outcome.ok) {
+    return { ok: false as const, statusCode: outcome.statusCode, error: outcome.error, field: outcome.field };
+  }
+
+  const { event } = outcome;
+  const creator = await resolveInstagramCreator(supabase, event);
+  if (!creator) {
+    return {
+      ok: false as const,
+      statusCode: 404,
+      error: `No Instagram-connected creator found for ${event.creatorId ?? event.creatorExternalId ?? "the supplied reference"}`
+    };
+  }
+
+  // Bind the resolved creator context into the provisional identity. This is
+  // still PROVISIONAL evidence — no subscriber has been resolved.
+  const provisionalIdentity = { ...event.provisionalIdentity, creatorId: creator.id };
+
+  // The raw source payload is preserved verbatim under `raw` for later audit;
+  // the normalized source + provisional identity sit alongside it. No
+  // relationship_context is written here — that is produced downstream by the
+  // identity_resolution seam, never at the channel boundary.
+  const eventPayload = {
+    creator_id: creator.id,
+    provider: INSTAGRAM_PROVIDER,
+    provider_event_id: event.providerEventId,
+    event_type: event.eventType,
+    payload: {
+      source: event.source,
+      provider_event_id: event.providerEventId,
+      event_type: event.eventType,
+      occurred_at: event.occurredAt,
+      provisional_identity: provisionalIdentity,
+      raw: event.raw
+    },
+    received_at: receivedAt,
+    // Ingested but not yet processed: interpretation/opportunity is deferred
+    // (COMPOSE-4). "received" is the honest canonical state.
+    processed_at: null,
+    processing_status: "received",
+    processing_error: null
+  };
+
+  const inserted = await supabase.from("of_events").insert(eventPayload).select("*").single();
+  if (inserted.error) {
+    // Idempotent ingestion: a duplicate (provider, provider_event_id) is not an
+    // error — return the already-persisted canonical event.
+    if (inserted.error.code === "23505" && event.providerEventId) {
+      const existing = await supabase
+        .from("of_events")
+        .select("*")
+        .eq("provider", INSTAGRAM_PROVIDER)
+        .eq("provider_event_id", event.providerEventId)
+        .single();
+      assertNoError(existing.error);
+      return {
+        ok: true as const,
+        deduped: true,
+        event: existing.data,
+        provisionalIdentity,
+        summary: summarizeEventType(event.eventType)
+      };
+    }
+
+    // Any other write failure: record a failed row for audit (mirrors BetterFans).
+    const failed = await supabase
+      .from("of_events")
+      .insert({
+        ...eventPayload,
+        provider_event_id: event.providerEventId ? `${event.providerEventId}:failed:${crypto.randomUUID()}` : null,
+        processing_status: "failed",
+        processing_error: inserted.error.message
+      })
+      .select("*")
+      .single();
+    assertNoError(failed.error);
+    return { ok: false as const, statusCode: 500, event: failed.data, error: inserted.error.message };
+  }
+
+  return {
+    ok: true as const,
+    deduped: false,
+    event: inserted.data,
+    provisionalIdentity,
+    summary: summarizeEventType(event.eventType)
+  };
+}
+
 function eventStreamStatus() {
   return {
     connectionStatus: "receiver_ready",
@@ -10826,6 +10984,11 @@ function eventStreamStatus() {
 function isAuthorizedEventIngest(request: Request, env: Env) {
   if (!env.BETTERFANS_EVENTS_SHARED_SECRET) return true;
   return request.headers.get("x-betterfans-event-secret") === env.BETTERFANS_EVENTS_SHARED_SECRET;
+}
+
+function isAuthorizedInstagramEventIngest(request: Request, env: Env) {
+  if (!env.INSTAGRAM_EVENTS_SHARED_SECRET) return true;
+  return request.headers.get("x-instagram-event-secret") === env.INSTAGRAM_EVENTS_SHARED_SECRET;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

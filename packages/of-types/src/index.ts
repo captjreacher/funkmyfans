@@ -1,6 +1,10 @@
 export type CreatorStatus = "pending" | "connected" | "attention" | "paused" | "disconnected";
 export type CreatorOnboardingStatus = "draft" | "pending" | "connected" | "syncing" | "ready" | "needs_attention";
-export type PlatformProvider = "betterfans" | "onlyfans" | "fansly" | "other";
+// COMPOSE-3 adds "instagram" so an Instagram-originated creator/account can be
+// represented as a platform provider (mirrored by the of_creators
+// platform_provider CHECK constraint migration). Additive: existing providers
+// and rows are unaffected.
+export type PlatformProvider = "betterfans" | "onlyfans" | "fansly" | "other" | "instagram";
 
 export type TaskPriority = "low" | "medium" | "high" | "urgent";
 export type TaskStatus = "open" | "in_progress" | "waiting" | "completed" | "cancelled" | "ignored" | "archived";
@@ -2251,18 +2255,25 @@ export interface CapabilityRef {
   version?: number;
 }
 
-/** The known/seeded capability keys (COMPOSE-2 v0.1). Authoring convenience; refs remain open `string`. */
+/**
+ * The known/seeded capability keys. COMPOSE-2 v0.1 seeded the first six;
+ * COMPOSE-3 adds `identity_resolution` (a system-owned identity capability,
+ * distinct from a Channel's transport entry). Authoring convenience; refs
+ * remain open `string` so unknown/older keys still degrade gracefully.
+ */
 export type CapabilityKey =
   | "channel_source_entry"
   | "new_subscriber_welcome_discovery"
   | "make_offer_ppv"
   | "silence_follow_up"
   | "boundary_safety_response"
-  | "human_handoff";
+  | "human_handoff"
+  | "identity_resolution";
 
 /** Coarse semantic grouping for a capability. Aligned with — but distinct from — JourneyNodeClass. */
 export type CapabilityCategory =
   | "channel"
+  | "identity"
   | "conversation"
   | "commerce"
   | "engagement"
@@ -2279,6 +2290,7 @@ export type CapabilityStatus = "stable" | "experimental" | "proposed";
  */
 export type CapabilityInputKey =
   | "event_context"          // triggering event (HOST / of_events)
+  | "provisional_identity"   // COMPOSE-3: provisional, transport-scoped identity evidence (pre-resolution)
   | "identity_context"       // canonical Subscriber identity (Subscriber Profile)
   | "relationship_context"   // RelationshipContextProjection (Hermes relationship context)
   | "conversation_context"   // conversation state / history (OfConversationInstance)
@@ -2293,6 +2305,8 @@ export type CapabilityInputKey =
 export type CapabilityOutputKey =
   | "outcome"                // terminal outcome (end step outcomeKey/terminalType)
   | "next_event"             // an emitted of_events row (e.g. no_response, offer_accepted)
+  | "provisional_identity"   // COMPOSE-3: provisional identity evidence emitted by a Channel boundary
+  | "identity_context"       // COMPOSE-3: canonical Subscriber identity produced by identity resolution
   | "conversation_action"    // a message/action within the conversation
   | "interpretation_input"   // an OfMessageClassification appended for a reply
   | "opportunity_signal"     // a Conversation Opportunity signal
@@ -2483,5 +2497,499 @@ export const EMMA_NEW_SUBSCRIBER_JOURNEY_EXAMPLE: PlaybookJourney = {
       }
     ],
     viewport: { x: 0, y: 0, zoom: 0.9 }
+  }
+};
+
+/* ==========================================================================
+ * COMPOSE-3: Instagram Entry + Identity Resolution
+ * See docs/architecture/compose-3-instagram-entry-and-identity-resolution.md
+ *
+ * Contracts + a small, dependency-free DETERMINISTIC CORE that proves the
+ * architectural path:
+ *
+ *   Instagram event
+ *     -> Channel: Instagram Entry (channel_source_entry)  [ingestion boundary]
+ *     -> provisional identity evidence                    [ProvisionalIdentity]
+ *     -> Identity Resolution (identity_resolution)         [resolveProvisionalIdentity]
+ *     -> downstream relationship context                  [RelationshipContextProjection]
+ *
+ * Hard boundaries preserved by these contracts:
+ *   - Channel ingestion produces provisional identity evidence; it NEVER claims
+ *     a person has been resolved (ProvisionalIdentity.resolutionState is always
+ *     "provisional").
+ *   - Identity resolution is a SEPARATE, deterministic step; it resolves ONLY on
+ *     exact, same-platform, same-creator evidence and never fabricates a contact,
+ *     relationship, or cross-platform match.
+ *   - Relationship context is emitted only as the existing RelationshipContextProjection
+ *     shape (Hermes/FYV boundary), so downstream consumers read it unchanged.
+ *   - Nothing here interprets a message or creates an Opportunity/Queue item
+ *     (that is COMPOSE-4). These functions are pure and hold no runtime state.
+ * ========================================================================== */
+
+/** Canonical provider string for Instagram-originated events. */
+export const INSTAGRAM_PROVIDER = "instagram" as const;
+
+/** Where an Instagram-originated event entered the system (audit provenance). */
+export interface InstagramEventSource {
+  platform: "instagram";
+  /** The Instagram account/business id the event targets, when known. */
+  accountId: string | null;
+  /** How the event reached the ingestion boundary (fixtures / adapter / webhook forward). */
+  receivedVia: string;
+}
+
+/**
+ * The minimum canonical contract emitted by the Instagram Channel boundary. It
+ * is transport-scoped EVIDENCE — never a resolved person. `resolutionState` is
+ * fixed to "provisional" to make the distinction unforgeable at the type level:
+ * a provisional external identity is NOT a resolved internal relationship
+ * identity, even when a username or platform id is present.
+ */
+export interface ProvisionalIdentity {
+  /** Source platform that produced the evidence. */
+  sourcePlatform: PlatformProvider;
+  /** External account/user id on the source platform, where available. */
+  externalId: string | null;
+  /** Username / handle on the source platform, where available. */
+  username: string | null;
+  /** FMF creator/account context (canonical creator id), where available. */
+  creatorId: string | null;
+  /** The creator's external account id on the source platform, where available. */
+  creatorExternalId: string | null;
+  /** Reference back to the source event (provider_event_id / of_events id). */
+  sourceEventRef: string | null;
+  /** When the evidence was observed (ISO 8601). */
+  evidenceAt: string;
+  /** Always "provisional" at the channel boundary — no resolution is claimed. */
+  resolutionState: "provisional";
+}
+
+/**
+ * A validated + normalized Instagram event, ready to persist into the canonical
+ * event boundary (of_events). `raw` preserves the source evidence verbatim for
+ * later audit/debugging; `provisionalIdentity` is the transport-scoped evidence
+ * the Channel boundary emits alongside the event.
+ */
+export interface NormalizedInstagramEvent {
+  provider: typeof INSTAGRAM_PROVIDER;
+  /** Provider event id preserved for idempotent/deduplicated ingestion, where available. */
+  providerEventId: string | null;
+  /** Normalized, non-empty event type. */
+  eventType: string;
+  /** FMF creator id, when the caller identified the creator directly. */
+  creatorId: string | null;
+  /** The creator's Instagram account id, when the caller identified by account. */
+  creatorExternalId: string | null;
+  /** When the source event occurred (ISO 8601), when available. */
+  occurredAt: string | null;
+  /** Source provenance metadata. */
+  source: InstagramEventSource;
+  /** Transport-scoped provisional identity evidence. */
+  provisionalIdentity: ProvisionalIdentity;
+  /** The raw source payload, preserved verbatim. */
+  raw: Record<string, unknown>;
+}
+
+/** Deterministic outcome of validating + normalizing an Instagram ingestion payload. */
+export type InstagramIngestionOutcome =
+  | { ok: true; event: NormalizedInstagramEvent; provisionalIdentity: ProvisionalIdentity }
+  | { ok: false; statusCode: number; error: string; field?: string };
+
+/**
+ * A minimal, canonical view of an EXISTING relationship record used as a
+ * resolution candidate. It reuses the existing contact/relationship boundary
+ * (of_subscriber_relationships) rather than inventing a competing model: the
+ * caller loads candidates and the resolver stays pure + deterministic.
+ */
+export interface IdentityCandidate {
+  /** Canonical of_subscriber_relationships id. */
+  subscriberRelationshipId: string;
+  /** Canonical subscriber id, when known. */
+  subscriberId?: string | null;
+  /** Creator that owns this relationship (scopes resolution — never cross-creator). */
+  creatorId: string;
+  /** Platform of the stored external identifier (scopes resolution — never cross-platform). */
+  platformProvider: PlatformProvider;
+  /** Stored external identifier (platform_subscriber_id), when known. */
+  externalId?: string | null;
+  /** Stored username/handle, when known. */
+  username?: string | null;
+}
+
+export type IdentityResolutionStatus = "resolved" | "unresolved";
+
+/** How a resolution was reached. "none" accompanies an unresolved result. */
+export type IdentityResolutionMethod = "external_id_exact" | "username_exact" | "none";
+
+/** The canonical identity a resolved provisional identity maps to. */
+export interface ResolvedIdentity {
+  subscriberRelationshipId: string;
+  subscriberId: string | null;
+  matchedOn: IdentityResolutionMethod;
+}
+
+/**
+ * The deterministic result of an identity-resolution attempt. `resolved` is null
+ * for an unresolved result — a valid, safe state that must NOT fabricate a
+ * contact or relationship.
+ */
+export interface IdentityResolutionResult {
+  status: IdentityResolutionStatus;
+  method: IdentityResolutionMethod;
+  /** Deterministic confidence: 1 exact external id, 0.9 exact username, 0 unresolved. */
+  confidence: number;
+  /** Echo of the provisional evidence the attempt consumed. */
+  provisional: ProvisionalIdentity;
+  /** The resolved canonical identity, or null when unresolved. */
+  resolved: ResolvedIdentity | null;
+  warnings: string[];
+}
+
+/* --- Deterministic core (pure; no I/O, no runtime state) ------------------- */
+
+function isComposeRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function composeString(value: unknown): string | null {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed.length ? trimmed : null;
+  }
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (typeof value === "bigint") return String(value);
+  return null;
+}
+
+function pickString(record: Record<string, unknown>, keys: string[]): string | null {
+  for (const key of keys) {
+    const found = composeString(record[key]);
+    if (found) return found;
+  }
+  return null;
+}
+
+function pickNestedString(record: Record<string, unknown>, path: string[], keys: string[]): string | null {
+  let cursor: unknown = record;
+  for (const segment of path) {
+    if (!isComposeRecord(cursor)) return null;
+    cursor = cursor[segment];
+  }
+  if (!isComposeRecord(cursor)) return null;
+  return pickString(cursor, keys);
+}
+
+/**
+ * Deterministically validate + normalize an Instagram-originated payload and
+ * emit provisional identity evidence. Pure: given the same input (and
+ * receivedAt) it always returns the same outcome. It performs NO interpretation
+ * and creates NO opportunity. Creator EXISTENCE is not checked here (that is a
+ * data-layer concern for the ingestion route); this validates SHAPE only.
+ */
+export function normalizeInstagramEvent(
+  raw: unknown,
+  options: { receivedAt?: string } = {}
+): InstagramIngestionOutcome {
+  if (!isComposeRecord(raw)) {
+    return { ok: false, statusCode: 400, error: "Instagram event payload must be a JSON object" };
+  }
+
+  const receivedAt = composeString(options.receivedAt) ?? new Date().toISOString();
+
+  const eventType = pickString(raw, ["eventType", "event_type", "type", "field"]);
+  if (!eventType) {
+    return { ok: false, statusCode: 400, error: "Instagram event type is required", field: "eventType" };
+  }
+
+  const creatorId = pickString(raw, ["creatorId", "creator_id"]);
+  const creatorExternalId = pickString(raw, ["instagramAccountId", "instagram_account_id", "accountId", "account_id", "igAccountId", "ig_account_id"]);
+  if (!creatorId && !creatorExternalId) {
+    return {
+      ok: false,
+      statusCode: 400,
+      error: "An Instagram creator reference (creatorId or instagramAccountId) is required",
+      field: "creatorId"
+    };
+  }
+
+  const providerEventId =
+    pickString(raw, ["providerEventId", "provider_event_id", "id", "eventId", "mid"]) ??
+    pickNestedString(raw, ["message"], ["mid", "id"]);
+
+  const externalId =
+    pickString(raw, ["senderId", "sender_id", "igUserId", "ig_user_id", "fromId", "from_id"]) ??
+    pickNestedString(raw, ["user"], ["id", "userId"]) ??
+    pickNestedString(raw, ["from"], ["id", "userId"]) ??
+    pickNestedString(raw, ["sender"], ["id", "userId"]);
+
+  const username =
+    pickString(raw, ["username", "handle", "senderUsername", "sender_username"]) ??
+    pickNestedString(raw, ["user"], ["username", "handle"]) ??
+    pickNestedString(raw, ["from"], ["username", "handle"]) ??
+    pickNestedString(raw, ["sender"], ["username", "handle"]);
+
+  const occurredAt = pickString(raw, ["occurredAt", "occurred_at", "timestamp", "receivedAt", "received_at"]);
+
+  const provisionalIdentity: ProvisionalIdentity = {
+    sourcePlatform: INSTAGRAM_PROVIDER,
+    externalId,
+    username,
+    creatorId,
+    creatorExternalId,
+    sourceEventRef: providerEventId,
+    evidenceAt: occurredAt ?? receivedAt,
+    resolutionState: "provisional"
+  };
+
+  const event: NormalizedInstagramEvent = {
+    provider: INSTAGRAM_PROVIDER,
+    providerEventId,
+    eventType,
+    creatorId,
+    creatorExternalId,
+    occurredAt,
+    source: { platform: "instagram", accountId: creatorExternalId, receivedVia: "http_ingest" },
+    provisionalIdentity,
+    raw
+  };
+
+  return { ok: true, event, provisionalIdentity };
+}
+
+/**
+ * Deterministically attempt to resolve provisional identity evidence to a
+ * canonical relationship. Resolution is EXACT only and strictly scoped:
+ *   - same platform (never cross-platform),
+ *   - same creator (never cross-creator),
+ *   - exact external-id match preferred, then exact (case-insensitive) username.
+ * There is no fuzzy or heuristic matching. An unresolved result is a valid,
+ * safe state and never fabricates a contact or relationship.
+ */
+export function resolveProvisionalIdentity(
+  provisional: ProvisionalIdentity,
+  candidates: readonly IdentityCandidate[]
+): IdentityResolutionResult {
+  const unresolved = (warning: string): IdentityResolutionResult => ({
+    status: "unresolved",
+    method: "none",
+    confidence: 0,
+    provisional,
+    resolved: null,
+    warnings: [warning]
+  });
+
+  // Without creator context we cannot scope a match safely; stay unresolved.
+  if (!provisional.creatorId) {
+    return unresolved("Creator context is missing; the provisional identity cannot be scoped and is left unresolved.");
+  }
+
+  const sameScope = (candidate: IdentityCandidate): boolean =>
+    candidate.platformProvider === provisional.sourcePlatform && candidate.creatorId === provisional.creatorId;
+
+  // 1. Exact external-id match (strongest deterministic evidence).
+  if (provisional.externalId) {
+    for (const candidate of candidates) {
+      if (sameScope(candidate) && candidate.externalId && candidate.externalId === provisional.externalId) {
+        return {
+          status: "resolved",
+          method: "external_id_exact",
+          confidence: 1,
+          provisional,
+          resolved: {
+            subscriberRelationshipId: candidate.subscriberRelationshipId,
+            subscriberId: candidate.subscriberId ?? null,
+            matchedOn: "external_id_exact"
+          },
+          warnings: []
+        };
+      }
+    }
+  }
+
+  // 2. Exact username match (case-insensitive; weaker than a stable id).
+  if (provisional.username) {
+    const target = provisional.username.toLowerCase();
+    for (const candidate of candidates) {
+      if (sameScope(candidate) && candidate.username && candidate.username.toLowerCase() === target) {
+        return {
+          status: "resolved",
+          method: "username_exact",
+          confidence: 0.9,
+          provisional,
+          resolved: {
+            subscriberRelationshipId: candidate.subscriberRelationshipId,
+            subscriberId: candidate.subscriberId ?? null,
+            matchedOn: "username_exact"
+          },
+          warnings: ["Resolved on an exact username match without a stable external identifier."]
+        };
+      }
+    }
+  }
+
+  return unresolved("No canonical subscriber matched the provisional Instagram identity.");
+}
+
+/**
+ * Derive the downstream relationship context for an identity-resolution result,
+ * emitted as the existing RelationshipContextProjection shape so downstream
+ * consumers (the Hermes/FYV relationship-context boundary) read it unchanged.
+ *
+ * Identity resolution is NOT relationship intelligence: this never invents a
+ * relationship posture, signals, or commercial summary. It reports identity
+ * status/confidence/usability + the known source only. An unresolved identity
+ * yields a safe, unusable projection with a warning — never a fabricated
+ * contact or relationship.
+ */
+export function projectRelationshipContextFromIdentity(result: IdentityResolutionResult): RelationshipContextProjection {
+  const knownSources = result.provisional.sourcePlatform ? [result.provisional.sourcePlatform] : [];
+
+  if (result.status === "resolved") {
+    const exact = result.method === "external_id_exact";
+    return {
+      identity_status: exact ? "exact" : "probable",
+      identity_confidence: result.confidence,
+      downstream_usability: exact ? "usable" : "qualified",
+      known_sources: knownSources,
+      // Identity resolution does not own relationship intelligence.
+      relationship_posture: null,
+      relationship_signals: [],
+      commercial_signal_summary: null,
+      warnings: result.warnings.slice()
+    };
+  }
+
+  return {
+    identity_status: "unresolved",
+    identity_confidence: 0,
+    downstream_usability: "unusable",
+    known_sources: knownSources,
+    relationship_posture: null,
+    relationship_signals: [],
+    commercial_signal_summary: null,
+    warnings: result.warnings.length
+      ? result.warnings.slice()
+      : ["Provisional Instagram identity did not resolve to a canonical subscriber."]
+  };
+}
+
+/**
+ * COMPOSE-3 reference journey (typed; exercised by the compiler + the
+ * deterministic check). It composes the target path:
+ *
+ *   Instagram Entry (Channel: channel_source_entry)
+ *     -> Identity Resolution (Identity: identity_resolution)
+ *       -> resolved   -> New Subscriber Welcome (Conversation) [downstream relationship context]
+ *       -> unresolved -> Identity Review (Human)               [graceful unresolved]
+ *
+ * Compatibility model (COMPOSE-2) exercised:
+ *   - Instagram Channel   = capability_only (B): a reusable capability, adapter-backed, no Node Flow.
+ *   - Identity Resolution = capability_only (B): capabilityRef WITHOUT a nodeFlowRef — an Identity node
+ *     is not required to have a concrete Node Flow.
+ *   - New Subscriber Welcome = capability_and_flow (A): capabilityRef + a concrete nodeFlowRef.
+ *   - Identity Review     = capability_only (B): human-owned, no Node Flow.
+ * capabilityRef (WHAT) stays strictly independent of nodeFlowRef (WHICH).
+ */
+export const INSTAGRAM_IDENTITY_JOURNEY_EXAMPLE: PlaybookJourney = {
+  id: "journey-instagram-identity-reference",
+  creatorId: "creator-demo",
+  title: "Instagram Entry → Identity Resolution",
+  description: "COMPOSE-3 reference: Instagram channel entry, provisional identity, identity resolution, downstream relationship context (resolved + unresolved paths).",
+  status: "draft",
+  version: 1,
+  createdAt: "2026-01-01T00:00:00.000Z",
+  updatedAt: "2026-01-01T00:00:00.000Z",
+  graph: {
+    schemaVersion: 1,
+    selectedNodeId: "node-identity-resolution",
+    groups: [
+      { id: "entry", label: "Channel entry", colorKey: "#38bdf8" },
+      { id: "identity", label: "Identity", colorKey: "#a78bfa" },
+      { id: "downstream", label: "Downstream", colorKey: "#e66a8d" }
+    ],
+    nodes: [
+      {
+        id: "node-instagram-entry",
+        class: "channel",
+        label: "Instagram Entry",
+        position: { x: 60, y: 200 },
+        group: "entry",
+        // State B (capability_only): reusable channel capability, adapter-backed, no Node Flow.
+        capabilityRef: { capabilityKey: "channel_source_entry", version: 1 },
+        contract: {
+          inputs: [],
+          outputs: [{ key: "provisional_identity", label: "Provisional Instagram identity" }],
+          destinations: [{ key: "inbound", label: "Inbound Instagram event" }]
+        },
+        config: { channel: "instagram", accountLabel: "Creator on Instagram", provisionalIdentityKey: "ig_provisional_identity" }
+      },
+      {
+        id: "node-identity-resolution",
+        class: "identity",
+        label: "Identity Resolution",
+        position: { x: 400, y: 200 },
+        group: "identity",
+        // State B (capability_only): capabilityRef WITHOUT a nodeFlowRef — an
+        // Identity node need not have a concrete Node Flow to be represented.
+        capabilityRef: { capabilityKey: "identity_resolution", version: 1 },
+        contract: {
+          inputs: [{ key: "provisional_identity", label: "Provisional Instagram identity", required: true }],
+          outputs: [
+            { key: "identity_context", label: "Canonical identity" },
+            { key: "relationship_context", label: "Relationship context" }
+          ],
+          destinations: [
+            { key: "resolved", label: "Resolved" },
+            { key: "unresolved", label: "Unresolved" }
+          ]
+        },
+        // Unresolved is a valid state; it must not hard-block, so resolution
+        // routes rather than gating (blockUntilResolved false).
+        config: { resolution: "match_or_create", blockUntilResolved: false }
+      },
+      {
+        id: "node-new-subscriber-welcome",
+        class: "conversation",
+        label: "New Subscriber Welcome",
+        position: { x: 760, y: 110 },
+        group: "downstream",
+        // State A (capability_and_flow): reusable capability WITH a concrete Node Flow.
+        capabilityRef: { capabilityKey: "new_subscriber_welcome_discovery", version: 1 },
+        nodeFlowRef: { kind: "script", scriptId: "demo-script-welcome", scriptVersion: 1 },
+        contract: {
+          inputs: [
+            { key: "identity_context", label: "Canonical identity", required: true },
+            { key: "relationship_context", label: "Relationship context" }
+          ],
+          outputs: [
+            { key: "conversation_state", label: "Conversation state" },
+            { key: "latest_interpretation", label: "Latest interpretation" }
+          ],
+          destinations: [{ key: "terminal", label: "Ended" }]
+        },
+        config: { minTurns: 3, maxTurns: 6, surface: ["source", "opening", "reply", "decision", "response", "exit"] }
+      },
+      {
+        id: "node-identity-review",
+        class: "human",
+        label: "Identity Review",
+        position: { x: 760, y: 320 },
+        group: "downstream",
+        // State B (capability_only): human-owned, no Node Flow.
+        capabilityRef: { capabilityKey: "human_handoff", version: 1 },
+        contract: {
+          inputs: [{ key: "provisional_identity", label: "Provisional Instagram identity", required: true }],
+          outputs: [{ key: "queue_item", label: "Queue item" }],
+          destinations: [{ key: "queued", label: "Queued for operator" }]
+        },
+        config: { mode: "review", queueKey: "identity_review" }
+      }
+    ],
+    connections: [
+      { id: "edge-ig-identity", from: { nodeId: "node-instagram-entry", port: "inbound" }, to: { nodeId: "node-identity-resolution" }, label: "Provisional identity" },
+      { id: "edge-identity-welcome", from: { nodeId: "node-identity-resolution", port: "resolved" }, to: { nodeId: "node-new-subscriber-welcome" }, label: "Resolved" },
+      { id: "edge-identity-review", from: { nodeId: "node-identity-resolution", port: "unresolved" }, to: { nodeId: "node-identity-review" }, label: "Unresolved" }
+    ],
+    viewport: { x: 0, y: 0, zoom: 0.85 }
   }
 };
