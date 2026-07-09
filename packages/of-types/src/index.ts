@@ -1995,6 +1995,15 @@ interface JourneyNodeBase {
   contract: JourneyNodeContract;
   /** Reference to the node's internal process, when it has one. */
   nodeFlowRef?: NodeFlowRef;
+  /**
+   * COMPOSE-2: optional reference to the reusable CAPABILITY this node
+   * represents (WHAT). Independent of `nodeFlowRef` (WHICH concrete Node Flow
+   * currently implements it) — the two are distinct and MUST NOT be merged.
+   * Additive + optional: NODE-1C graphs saved without it load unchanged, and it
+   * never affects runtime execution. Resolved to a CapabilityDescriptor by the
+   * (semantic, non-executing) Capability Registry.
+   */
+  capabilityRef?: CapabilityRef;
 }
 
 export interface JourneyChannelNode extends JourneyNodeBase {
@@ -2194,6 +2203,184 @@ export interface JourneyNodeCapability {
   readinessDetail: string;
   /** Optional evidence notes / warnings (e.g. a referenced flow that was not found). */
   warnings?: string[];
+
+  /* --- COMPOSE-2: reusable-capability metadata (additive; all optional) ------ */
+  /** The node's reusable-capability reference (WHAT), when bound. */
+  capabilityRef?: CapabilityRef;
+  /** Registry key echoed from capabilityRef, when the node is capability-bound. */
+  capabilityKey?: string;
+  /** Registry label, when the capabilityRef resolves in the Capability Registry. */
+  capabilityLabel?: string;
+  /** Semantic category, when the descriptor resolves. */
+  capabilityCategory?: CapabilityCategory;
+  /** Capability maturity, when the descriptor resolves. */
+  capabilityStatus?: CapabilityStatus;
+  /** One-line bounded responsibility (from the descriptor), when resolved. */
+  boundedResponsibility?: string;
+  /** Whether a concrete implementation exists (node nodeFlowRef, or descriptor implementationRefs). */
+  implementationAvailable?: boolean;
+  /** COMPOSE-2 compatibility state of this node's capability/flow binding. */
+  capabilityBinding?: CapabilityBindingState;
+}
+
+/* ==========================================================================
+ * COMPOSE-2: Capability Registry + Journey Composition Model
+ * See docs/architecture/compose-2-capability-registry-and-journey-composition.md
+ *
+ * A Capability is the reusable SEMANTIC definition of one bounded piece of work
+ * the system can perform. A Journey Node references WHICH reusable capability it
+ * represents via `capabilityRef` (a stable, script-independent semantic identity)
+ * and, INDEPENDENTLY, WHICH concrete Node Flow currently implements it via
+ * `nodeFlowRef` (a script). The two references are DIFFERENT concerns and MUST
+ * NOT be merged: capabilityRef is stable and reusable across creators/journeys;
+ * nodeFlowRef is the concrete, swappable implementation the runtime executes.
+ *
+ * The Capability Registry that resolves a capabilityRef is SEMANTIC METADATA
+ * only. It is not a runtime engine, not a script store, not a second Journey
+ * graph, and it does not replace nodeFlowRef.
+ * ========================================================================== */
+
+/**
+ * Stable, serialisable, script-independent semantic reference to a reusable
+ * capability. Carries no runtime state, no Node Flow steps, no Journey layout.
+ */
+export interface CapabilityRef {
+  /** Stable semantic key (snake_case). `string` (not a closed union) so unknown/older keys degrade gracefully. */
+  capabilityKey: string;
+  /** Optional contract version of the referenced Capability descriptor. */
+  version?: number;
+}
+
+/** The known/seeded capability keys (COMPOSE-2 v0.1). Authoring convenience; refs remain open `string`. */
+export type CapabilityKey =
+  | "channel_source_entry"
+  | "new_subscriber_welcome_discovery"
+  | "make_offer_ppv"
+  | "silence_follow_up"
+  | "boundary_safety_response"
+  | "human_handoff";
+
+/** Coarse semantic grouping for a capability. Aligned with — but distinct from — JourneyNodeClass. */
+export type CapabilityCategory =
+  | "channel"
+  | "conversation"
+  | "commerce"
+  | "engagement"
+  | "safety"
+  | "human";
+
+/** Maturity of a Capability descriptor. NOT a runtime-health signal. */
+export type CapabilityStatus = "stable" | "experimental" | "proposed";
+
+/**
+ * Canonical capability CONTEXT INPUT keys — the small shared vocabulary a
+ * capability draws context from, mapped to existing canonical boundaries so no
+ * capability invents its own context names. Keys only; no transport/execution.
+ */
+export type CapabilityInputKey =
+  | "event_context"          // triggering event (HOST / of_events)
+  | "identity_context"       // canonical Subscriber identity (Subscriber Profile)
+  | "relationship_context"   // RelationshipContextProjection (Hermes relationship context)
+  | "conversation_context"   // conversation state / history (OfConversationInstance)
+  | "interpretation_signals" // CanonicalInterpretationSignal[] (Conversation Interpretation)
+  | "opportunity_context"    // detected ConversationOpportunity, if any
+  | "creator_context";       // creator scope / archetype (Creator Workspace)
+
+/**
+ * Canonical capability CONTEXT OUTPUT / emission keys — what a capability may
+ * emit, mapped to existing canonical mechanisms. Keys only; no transport.
+ */
+export type CapabilityOutputKey =
+  | "outcome"                // terminal outcome (end step outcomeKey/terminalType)
+  | "next_event"             // an emitted of_events row (e.g. no_response, offer_accepted)
+  | "conversation_action"    // a message/action within the conversation
+  | "interpretation_input"   // an OfMessageClassification appended for a reply
+  | "opportunity_signal"     // a Conversation Opportunity signal
+  | "human_handoff_request"  // a Queue handoff request (NSP-5 minimum payload)
+  | "relationship_update";   // a relationship/context update
+
+/**
+ * ONE canonical interpretation-signal vocabulary for capability contracts
+ * (COMPOSE-2). It reconciles NSP-4's inline response categories with the
+ * existing ConversationIntent model; it is NOT a new interpretation SYSTEM and
+ * NOT a producer (COMPOSE-4 wires producers/consumers). A signal describes what
+ * a message MEANS and is distinct from an Opportunity (what to act on) and a
+ * Capability (the work performed).
+ */
+export type CanonicalInterpretationSignal =
+  | "greeting"
+  | "warm_enthusiastic"
+  | "compliment"
+  | "flirtatious"
+  | "shares_preference"
+  | "curious_about_creator"
+  | "casual_chat"
+  | "off_topic"
+  | "disengaged"
+  | "content_interest"
+  | "purchase_intent"
+  | "ppv_interest"
+  | "custom_request"
+  | "subscription_question"
+  | "price_objection"
+  | "not_ready"
+  | "boundary_testing"
+  | "unsupported_request"
+  | "complaint"
+  | "support_request"
+  | "silence";
+
+/**
+ * The four COMPOSE-2 capability/flow compatibility states a Journey node may be in.
+ * - `capability_and_flow` known reusable capability WITH a concrete Node Flow.
+ * - `capability_only`      known capability, no concrete Node Flow attached yet.
+ * - `flow_only`            legacy/backwards-compatible concrete flow, no capability mapping.
+ * - `unbound`              neither (orchestration/channel/group/manual/unknown legacy node).
+ */
+export type CapabilityBindingState =
+  | "capability_and_flow"
+  | "capability_only"
+  | "flow_only"
+  | "unbound";
+
+/**
+ * Typed descriptor for one reusable capability. The smallest sufficient
+ * contract: what it is, the bounded responsibility it owns, its category, the
+ * canonical context it may consume/emit, the interpretation signals and
+ * opportunity types it works with, any known concrete implementations, its
+ * owner and maturity. It holds NO runtime state and NO Node Flow steps.
+ */
+export interface CapabilityDescriptor {
+  capabilityKey: CapabilityKey;
+  version: number;
+  label: string;
+  /** One-line bounded responsibility this capability owns. */
+  description: string;
+  category: CapabilityCategory;
+  /** Which party owns this capability (reuses the JourneyNode owner axis). */
+  owner: JourneyNodeOwner;
+  status: CapabilityStatus;
+  /** True when a human necessarily owns the work (e.g. handoff/review). */
+  requiresHuman: boolean;
+  /** Canonical context keys this capability may consume. */
+  inputKeys: CapabilityInputKey[];
+  /** Canonical emission keys this capability may produce. */
+  outputKeys: CapabilityOutputKey[];
+  /** Interpretation signals this capability is designed to act on. */
+  supportedInterpretationSignals?: CanonicalInterpretationSignal[];
+  /**
+   * Canonical Conversation Opportunity types this capability can surface, named
+   * against docs/conversation-opportunity-catalogue-v1.md. Typed as `string[]`
+   * to avoid minting a duplicate opportunity vocabulary; the canonical
+   * opportunity type/mapping is owned by the Opportunity seam (COMPOSE-4).
+   */
+  supportedOpportunityTypes?: string[];
+  /**
+   * Concrete Node Flow implementations known at the SEMANTIC layer (often empty
+   * in v0.1). The live, per-creator implementation is normally attached at the
+   * Journey node via `nodeFlowRef`, not here.
+   */
+  implementationRefs?: NodeFlowRef[];
 }
 
 /**
@@ -2202,6 +2389,10 @@ export interface JourneyNodeCapability {
  * node contract is exercised by the TypeScript compiler:
  *
  *   OnlyFans (Channel) -> New Subscriber Chat (Conversation) -> Human Handoff (Human)
+ *
+ * COMPOSE-2: each node now also carries a `capabilityRef` (WHAT reusable
+ * capability), independent of the Conversation node's `nodeFlowRef` (WHICH
+ * concrete script implements it).
  */
 export const EMMA_NEW_SUBSCRIBER_JOURNEY_EXAMPLE: PlaybookJourney = {
   id: "journey-emma-new-subscriber",
@@ -2221,6 +2412,7 @@ export const EMMA_NEW_SUBSCRIBER_JOURNEY_EXAMPLE: PlaybookJourney = {
         class: "channel",
         label: "OnlyFans",
         position: { x: 80, y: 200 },
+        capabilityRef: { capabilityKey: "channel_source_entry", version: 1 },
         contract: {
           inputs: [],
           outputs: [{ key: "provisional_subscriber_ref", label: "Provisional subscriber reference" }],
@@ -2237,6 +2429,7 @@ export const EMMA_NEW_SUBSCRIBER_JOURNEY_EXAMPLE: PlaybookJourney = {
         class: "conversation",
         label: "New Subscriber Chat",
         position: { x: 420, y: 200 },
+        capabilityRef: { capabilityKey: "new_subscriber_welcome_discovery", version: 1 },
         nodeFlowRef: { kind: "script", scriptId: "script-new-subscriber", scriptVersion: 1 },
         contract: {
           inputs: [{ key: "provisional_subscriber_ref", label: "Provisional subscriber reference", required: true }],
@@ -2260,6 +2453,7 @@ export const EMMA_NEW_SUBSCRIBER_JOURNEY_EXAMPLE: PlaybookJourney = {
         class: "human",
         label: "Human Handoff",
         position: { x: 760, y: 200 },
+        capabilityRef: { capabilityKey: "human_handoff", version: 1 },
         contract: {
           inputs: [
             { key: "conversation_state", label: "Conversation state", required: true },

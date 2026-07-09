@@ -18,6 +18,7 @@ import type {
   JourneyNodeReadiness
 } from "@funkmyfans/of-types";
 import { channelLabel } from "./journey";
+import { capabilityBindingState, getCapabilityByRef } from "./capabilityRegistry";
 
 export interface JourneyContractContext {
   /**
@@ -158,6 +159,18 @@ export function deriveJourneyNodeCapability(
   ctx: JourneyContractContext = {}
 ): JourneyNodeCapability {
   const { readiness, detail, warnings } = deriveReadiness(node, ctx);
+
+  // COMPOSE-2: resolve the reusable-capability reference (WHAT) via the semantic
+  // registry, independently of the concrete Node Flow (WHICH). Never affects
+  // readiness, which stays evidence-based on nodeFlowRef existence (NODE-1E).
+  const descriptor = getCapabilityByRef(node.capabilityRef);
+  const binding = capabilityBindingState(node);
+  const capabilityWarnings = [...warnings];
+  if (node.capabilityRef && !descriptor) {
+    capabilityWarnings.push(`Capability "${node.capabilityRef.capabilityKey}" is not in the registry.`);
+  }
+  const implementationAvailable = Boolean(node.nodeFlowRef) || Boolean(descriptor?.implementationRefs?.length);
+
   return {
     nodeId: node.id,
     label: node.label,
@@ -172,7 +185,16 @@ export function deriveJourneyNodeCapability(
     isHumanHandoff: node.class === "human",
     readiness,
     readinessDetail: detail,
-    warnings: warnings.length ? warnings : undefined
+    warnings: capabilityWarnings.length ? capabilityWarnings : undefined,
+    // COMPOSE-2 additive capability metadata (all optional; safe when unbound).
+    capabilityRef: node.capabilityRef,
+    capabilityKey: node.capabilityRef?.capabilityKey,
+    capabilityLabel: descriptor?.label,
+    capabilityCategory: descriptor?.category,
+    capabilityStatus: descriptor?.status,
+    boundedResponsibility: descriptor?.description,
+    implementationAvailable,
+    capabilityBinding: binding
   };
 }
 

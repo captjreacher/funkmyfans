@@ -161,6 +161,9 @@ export function deriveJourneyFromScript(script: OfMessageScript, creatorName: st
     class: "channel",
     label: channelLabel(channel),
     position: { x: 60, y: 200 },
+    // COMPOSE-2: the generic channel entry is a reusable capability across
+    // playbooks; the concrete transport is adapter-backed (no nodeFlowRef).
+    capabilityRef: { capabilityKey: "channel_source_entry", version: 1 },
     contract: {
       inputs: [],
       outputs: [{ key: "provisional_subscriber_ref", label: "Provisional subscriber reference" }],
@@ -174,6 +177,11 @@ export function deriveJourneyFromScript(script: OfMessageScript, creatorName: st
     class: "conversation",
     label: playbookTitle(script),
     position: { x: 400, y: 200 },
+    // COMPOSE-2: a generic derived playbook keeps its concrete Node Flow
+    // (nodeFlowRef) but is intentionally left WITHOUT a capabilityRef — this is
+    // the backwards-compatible "flow_only" state (C). Only journeys whose
+    // conversation capability is known (e.g. Emma's new-subscriber welcome) bind
+    // a capabilityRef; a semantic capability is not assumed for arbitrary flows.
     nodeFlowRef: { kind: "script", scriptId: script.id, scriptVersion: script.version_number ?? undefined },
     contract: {
       inputs: [{ key: "provisional_subscriber_ref", label: "Provisional subscriber reference", required: true }],
@@ -202,6 +210,9 @@ export function deriveJourneyFromScript(script: OfMessageScript, creatorName: st
       class: "human",
       label: "Human Handoff",
       position: { x: 740, y: 200 },
+      // COMPOSE-2: human handoff is a reusable capability with no Node Flow
+      // (capability_only / state B) — a human owns the work.
+      capabilityRef: { capabilityKey: "human_handoff", version: 1 },
       contract: {
         inputs: [{ key: "conversation_state", label: "Conversation state", required: true }],
         outputs: [{ key: "queue_item", label: "Queue item" }],
