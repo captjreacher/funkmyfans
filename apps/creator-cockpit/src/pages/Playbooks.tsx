@@ -65,6 +65,7 @@ import {
 import type {
   JourneyGraph,
   JourneyNode,
+  JourneyNodeCapability,
   OfMessageScript,
   PlaybookJourney,
   QueueWorkspaceItemSummary,
@@ -106,6 +107,8 @@ import {
 import { JourneyCanvas } from "../components/journey/JourneyCanvas";
 import { JourneyNodeDrawer } from "../components/journey/JourneyNodeDrawer";
 import { buildPlaybookJourney } from "../lib/journeyExamples";
+import { channelLabel } from "../lib/journey";
+import { deriveJourneyCapabilities } from "../lib/journeyContracts";
 
 const libraryTabs = ["Template Library", "Drafts", "Active", "Archived"] as const;
 type LibraryTab = (typeof libraryTabs)[number];
@@ -540,6 +543,38 @@ function PlaybookJourneyWorkspace({
 
   const openNode = useMemo<JourneyNode | null>(() => journey?.graph.nodes.find((node) => node.id === openNodeId) ?? null, [journey, openNodeId]);
 
+  // NODE-1E: derive capability contracts for the current journey. The only
+  // evidence consulted is referenced-script existence (checked against the
+  // loaded workspace scripts + this playbook's own script). No runtime or
+  // operational health is read. Memoised on journey identity + evidence so the
+  // canvas keeps node identity stable across drags.
+  const knownScriptIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const item of workspace?.scripts ?? []) ids.add(item.id);
+    ids.add(session.script.id);
+    return ids;
+  }, [workspace, session.script.id]);
+
+  const sourceChannelLabel = useMemo(() => {
+    const channels = (journey?.graph.nodes ?? []).filter((node) => node.class === "channel");
+    if (channels.length !== 1) return undefined;
+    const channel = channels[0];
+    if (channel.class !== "channel") return undefined;
+    const base = channelLabel(channel.config.channel);
+    return channel.config.accountLabel ? `${base} · ${channel.config.accountLabel}` : base;
+  }, [journey]);
+
+  const capabilityById = useMemo<Record<string, JourneyNodeCapability>>(
+    () =>
+      journey
+        ? deriveJourneyCapabilities(journey.graph.nodes, {
+            scriptExists: (id) => knownScriptIds.has(id),
+            sourceChannelLabel
+          })
+        : {},
+    [journey, knownScriptIds, sourceChannelLabel]
+  );
+
   const dirty = Boolean(draftGraph) && JSON.stringify(draftGraph) !== baselineGraphJson;
   const canSave = !journeyLoading && Boolean(journey) && (dirty || !persisted);
 
@@ -747,12 +782,18 @@ function PlaybookJourneyWorkspace({
               journey={journey}
               onOpenNode={setOpenNodeId}
               onGraphChange={setDraftGraph}
+              capabilityById={capabilityById}
               onDrillNode={(id) => {
                 const node = journey.graph.nodes.find((item) => item.id === id);
                 if (node) openNodeFlow(node);
               }}
             />
-            <JourneyNodeDrawer node={openNode} onClose={() => setOpenNodeId(null)} onOpenNodeFlow={(node) => openNodeFlow(node)} />
+            <JourneyNodeDrawer
+              node={openNode}
+              capability={openNode ? capabilityById[openNode.id] : null}
+              onClose={() => setOpenNodeId(null)}
+              onOpenNodeFlow={(node) => openNodeFlow(node)}
+            />
           </>
         )}
       </div>
