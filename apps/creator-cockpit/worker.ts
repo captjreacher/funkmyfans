@@ -96,9 +96,11 @@ import type {
   StoredOpportunityRef,
   StandaloneOpportunityRefs,
   StandaloneOpportunityPersistResult,
-  LiveOpportunityEvidence
+  StandaloneOpportunityUpsertResult,
+  LiveOpportunityEvidence,
+  LiveOpportunityMode
 } from "@funkmyfans/of-types";
-import { mapConversationInstanceToConversation, mapConversationRuntimeStatusToLifecycleState, mapTaskToQueue, mapTaskToQueueItem, summarizeEventType, normalizeInstagramEvent, INSTAGRAM_PROVIDER, buildCapabilityOutcome, mapOutcomeToOpportunitySignal, persistStandaloneOpportunity, runLiveOpportunityPersistence } from "@funkmyfans/of-types";
+import { mapConversationInstanceToConversation, mapConversationRuntimeStatusToLifecycleState, mapTaskToQueue, mapTaskToQueueItem, summarizeEventType, normalizeInstagramEvent, INSTAGRAM_PROVIDER, buildCapabilityOutcome, mapOutcomeToOpportunitySignal, persistStandaloneOpportunity, runLiveOpportunityPersistence, deriveLiveOpportunity, resolveLiveOpportunityMode, evaluateCreatorAllowlist, decideLiveOpportunityAction } from "@funkmyfans/of-types";
 // COMPOSE-6: producer→canonical interpretation mapping (COMPOSE-2, pure, type-only deps).
 import { canonicalFromNsp4, isCanonicalInterpretationSignal } from "./src/lib/interpretationSignals";
 import { createClient } from "@supabase/supabase-js";
@@ -119,10 +121,18 @@ interface Env {
   // boundary (POST /api/internal/opportunities/persist). When unset, the endpoint
   // is open (parity with the other ingestion boundaries).
   COMPOSE5_PERSIST_SHARED_SECRET?: string;
-  // COMPOSE-6: activation flag for LIVE standalone opportunity persistence at the
-  // conversation-runtime terminal seam. Conservative default: OFF. Enabled only
-  // when set to "true"/"1". No Queue item is ever created regardless of this flag.
+  // COMPOSE-6: legacy activation flag for LIVE standalone opportunity persistence.
+  // Retained for backward compatibility ("true"/"1" → enabled); superseded by
+  // COMPOSE6_LIVE_OPPORTUNITY_PERSISTENCE_MODE below. No Queue item is ever created.
   COMPOSE6_LIVE_OPPORTUNITY_PERSISTENCE_ENABLED?: string;
+  // COMPOSE-7: activation mode for LIVE standalone opportunity persistence.
+  //   off (default) | shadow (derive + observe, never write) | enabled (persist).
+  // Unknown/malformed values fail closed to "off". Takes precedence over the legacy
+  // boolean flag when set; when unset, the legacy flag is honoured.
+  COMPOSE6_LIVE_OPPORTUNITY_PERSISTENCE_MODE?: string;
+  // COMPOSE-7: optional comma/whitespace-separated allowlist of STABLE creator ids.
+  // Unset → all creators (mode still gates). Present-but-empty → fail closed (nobody).
+  COMPOSE6_LIVE_OPPORTUNITY_CREATOR_ALLOWLIST?: string;
 }
 
 const jsonHeaders = {
@@ -6567,11 +6577,15 @@ async function processConversationInstance(
 
     if (currentStep.step_type === "set_variable") {
       if (metadata.variableKey) variables[metadata.variableKey] = resolveRuntimeVariableValue(metadata.variableKey, metadata.variableValue, variables);
-      // COMPOSE-6: additively derive the canonical interpretation signal from the
+      // COMPOSE-6/7: additively derive the canonical interpretation signal from the
       // producer's response-class output. The producer and its raw value are preserved
       // (variables[variableKey] is untouched); the canonical signal is recorded as a
       // separate derived output and threaded forward for the terminal persistence seam.
-      const compose6Canonical = deriveCompose6CanonicalSignal(metadata.variableKey, variables);
+      // COMPOSE-7: gated by mode — in "off" there is NO mapping side effect beyond the
+      // existing runtime (shadow + enabled both derive it).
+      const compose6Canonical = liveOpportunityMode(env) !== "off"
+        ? deriveCompose6CanonicalSignal(metadata.variableKey, variables)
+        : null;
       conversation = await updateConversationState(supabase, conversation.id, {
         variables,
         current_step_id: nextStep?.id ?? null,
@@ -11099,7 +11113,7 @@ async function ingestInstagramEvent(supabase: SupabaseClient, rawPayload: unknow
  * missing-relation degradation used elsewhere in this worker.
  */
 const STANDALONE_OPPORTUNITY_COLUMNS =
-  "id, creator_id, conversation_instance_id, queue_id, queue_item_id, source_event_id, source_step_id, route_key, opportunity_classification, category, title, summary, status, priority, queue_handoff, recommended_next_objective, created_at, updated_at, resolved_at, metadata";
+  "id, creator_id, conversation_instance_id, queue_id, queue_item_id, source_event_id, source_step_id, route_key, opportunity_classification, category, title, summary, status, priority, queue_handoff, recommended_next_objective, created_at, updated_at, resolved_at, metadata, dedupe_key";
 
 function createSupabaseStandaloneOpportunityStore(supabase: SupabaseClient): StandaloneOpportunityStore {
   return {
@@ -11132,6 +11146,35 @@ function createSupabaseStandaloneOpportunityStore(supabase: SupabaseClient): Sta
         .single();
       assertNoError(res.error);
       return res.data as ConversationOpportunitySummary;
+    },
+    // COMPOSE-7: concurrency-safe, DB-authoritative write. Attempts an insert; on a
+    // unique-violation (23505) against uq_of_conversation_opportunities_dedupe_key —
+    // i.e. a concurrent identical write already won the race — it updates that row
+    // instead and reports `deduped`. The DATABASE (not this code) prevents duplicate
+    // rows, so no select-then-insert race window exists. Never touches any Queue table.
+    async upsertByDedupeKey(dedupeKey: string, payload: Record<string, unknown>): Promise<StandaloneOpportunityUpsertResult> {
+      const insertRes = await supabase
+        .from("of_conversation_opportunities")
+        .insert(payload)
+        .select(STANDALONE_OPPORTUNITY_COLUMNS)
+        .single();
+      if (!insertRes.error) {
+        return { opportunity: insertRes.data as ConversationOpportunitySummary, deduped: false };
+      }
+      // Unique-violation → an identical logical opportunity already exists: update it.
+      if (insertRes.error.code === "23505") {
+        const updateRes = await supabase
+          .from("of_conversation_opportunities")
+          .update({ ...payload, updated_at: new Date().toISOString() })
+          .eq("dedupe_key", dedupeKey)
+          .select(STANDALONE_OPPORTUNITY_COLUMNS)
+          .single();
+        assertNoError(updateRes.error);
+        return { opportunity: updateRes.data as ConversationOpportunitySummary, deduped: true };
+      }
+      assertNoError(insertRes.error);
+      // Unreachable (assertNoError throws), but satisfies the type checker.
+      return { opportunity: insertRes.data as ConversationOpportunitySummary, deduped: false };
     }
   };
 }
@@ -11179,13 +11222,16 @@ async function persistStandaloneConversationOpportunity(
 }
 
 /**
- * COMPOSE-6: is LIVE standalone opportunity persistence enabled? Conservative
- * default OFF; enabled only when the env flag is "true"/"1". This never affects
- * the Queue and never changes conversation control flow.
+ * COMPOSE-7: resolve the LIVE persistence activation mode (off | shadow | enabled).
+ * Honours COMPOSE6_LIVE_OPPORTUNITY_PERSISTENCE_MODE, with backward-compatible
+ * fallback to the legacy boolean flag when MODE is unset. Unknown/malformed values
+ * fail closed to "off". Never affects the Queue or conversation control flow.
  */
-function isLiveOpportunityPersistenceEnabled(env: Env): boolean {
-  const flag = (env.COMPOSE6_LIVE_OPPORTUNITY_PERSISTENCE_ENABLED ?? "").trim().toLowerCase();
-  return flag === "true" || flag === "1";
+function liveOpportunityMode(env: Env): LiveOpportunityMode {
+  return resolveLiveOpportunityMode(
+    env.COMPOSE6_LIVE_OPPORTUNITY_PERSISTENCE_MODE,
+    env.COMPOSE6_LIVE_OPPORTUNITY_PERSISTENCE_ENABLED
+  );
 }
 
 /**
@@ -11206,13 +11252,55 @@ function deriveCompose6CanonicalSignal(variableKey: string | undefined, variable
 }
 
 /**
- * COMPOSE-6: LIVE terminal persistence seam. Flag-gated and fully guarded: it
- * assembles runtime evidence, runs the pure COMPOSE-6 orchestrator (COMPOSE-4
- * derivation + COMPOSE-5 standalone persistence via the Supabase store), and
- * records observability history. It NEVER creates a Queue item and NEVER throws
- * into conversation execution (invariant: persistence failure must not corrupt or
- * block the conversation). nodeId is null: the live runtime cannot identify the
- * Journey node at this seam (documented gap — never fabricated).
+ * COMPOSE-7: classify a live-persistence failure into a deterministic reason code
+ * so failure logs distinguish a DB conflict from a validation rejection from an
+ * unexpected error.
+ */
+function classifyLiveOpportunityFailure(err: unknown): "db_conflict" | "validation" | "unexpected" {
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  if (msg.includes("23505") || msg.includes("duplicate key") || msg.includes("unique")) return "db_conflict";
+  if (msg.includes("violates") || msg.includes("null value") || msg.includes("invalid") || msg.includes("required") || msg.includes("check constraint")) return "validation";
+  return "unexpected";
+}
+
+/**
+ * COMPOSE-7: concise structured observability for the live seam. Uses the existing
+ * of_conversation_history convention only. Records stable internal IDs + deterministic
+ * reason codes; never the raw message body or sensitive identity evidence.
+ */
+async function recordLiveOpportunityHistory(
+  supabase: SupabaseClient,
+  conversation: OfConversationInstance,
+  step: OfMessageScriptStep,
+  eventType: string,
+  transitionKey: string,
+  detail: string,
+  payload: Record<string, unknown>
+): Promise<void> {
+  await recordConversationHistory(supabase, {
+    conversationId: conversation.id,
+    creatorId: conversation.creator_id,
+    eventId: conversation.last_event_id,
+    stepId: step.id,
+    transitionKey,
+    eventType,
+    fromStatus: conversation.status,
+    toStatus: conversation.status,
+    detail,
+    // Queue is never touched by this path.
+    payload: { queue_item_created: false, ...payload }
+  });
+}
+
+/**
+ * COMPOSE-6/7: LIVE terminal persistence seam. Mode-gated (off | shadow | enabled),
+ * creator-allowlist-gated (fail closed), and fully guarded. It assembles runtime
+ * evidence and either (shadow) derives + observes without any write, or (enabled)
+ * persists via the pure orchestrator against the DB-authoritative Supabase store.
+ * It NEVER creates a Queue item and NEVER throws into conversation execution
+ * (invariant: persistence failure must not corrupt or block the conversation).
+ * nodeId is null: the live runtime cannot identify the Journey node here (documented
+ * gap — never fabricated).
  */
 async function maybePersistLiveConversationOpportunity(
   supabase: SupabaseClient,
@@ -11221,26 +11309,67 @@ async function maybePersistLiveConversationOpportunity(
   step: OfMessageScriptStep,
   input: { outcomeKey: string; handoffKind: string; terminalType: string; variables: Record<string, unknown> }
 ): Promise<void> {
-  if (!isLiveOpportunityPersistenceEnabled(env)) return;
+  const mode = liveOpportunityMode(env);
+  // Creator allowlist gate uses the stable creator id, never a display name.
+  const allow = evaluateCreatorAllowlist(env.COMPOSE6_LIVE_OPPORTUNITY_CREATOR_ALLOWLIST, conversation.creator_id);
+  const action = decideLiveOpportunityAction(mode, allow);
+  if (action === "skip_off") return; // no mapping or persistence side effect beyond existing runtime
+
+  if (action === "skip_not_allowed") {
+    try {
+      await recordLiveOpportunityHistory(
+        supabase, conversation, step, "opportunity_skipped",
+        `compose7-skip:${conversation.id}:${step.id}`,
+        `COMPOSE-7 live persistence skipped for this creator (${allow.reason}).`,
+        { mode, reason_code: allow.reason, allowlist_configured: allow.configured, allowlist_malformed: allow.malformed, persisted: false }
+      );
+    } catch { /* best-effort observability only */ }
+    return;
+  }
+
+  const rawClass = typeof input.variables.__compose6_last_response_class === "string" ? input.variables.__compose6_last_response_class : null;
+  const canonicalRaw = typeof input.variables.__compose6_last_canonical_signal === "string" ? input.variables.__compose6_last_canonical_signal : "";
+  const canonicalSignals = isCanonicalInterpretationSignal(canonicalRaw) ? [canonicalRaw] : undefined;
+  const evidence: LiveOpportunityEvidence = {
+    creatorId: conversation.creator_id,
+    conversationInstanceId: conversation.id,
+    capabilityKey: "new_subscriber_welcome_discovery",
+    nodeId: null,
+    outcomeKey: input.outcomeKey,
+    handoffKind: input.handoffKind,
+    terminalType: input.terminalType,
+    producer: "conversation_runtime.end_step",
+    rawSignal: rawClass ?? input.outcomeKey,
+    canonicalSignals,
+    sourceEventId: conversation.originating_event_id ?? null,
+    sourceStepId: step.id,
+    identityResolved: deriveIdentityResolvedForConversation(conversation)
+  };
+
   try {
-    const rawClass = typeof input.variables.__compose6_last_response_class === "string" ? input.variables.__compose6_last_response_class : null;
-    const canonicalRaw = typeof input.variables.__compose6_last_canonical_signal === "string" ? input.variables.__compose6_last_canonical_signal : "";
-    const canonicalSignals = isCanonicalInterpretationSignal(canonicalRaw) ? [canonicalRaw] : undefined;
-    const evidence: LiveOpportunityEvidence = {
-      creatorId: conversation.creator_id,
-      conversationInstanceId: conversation.id,
-      capabilityKey: "new_subscriber_welcome_discovery",
-      nodeId: null,
-      outcomeKey: input.outcomeKey,
-      handoffKind: input.handoffKind,
-      terminalType: input.terminalType,
-      producer: "conversation_runtime.end_step",
-      rawSignal: rawClass ?? input.outcomeKey,
-      canonicalSignals,
-      sourceEventId: conversation.originating_event_id ?? null,
-      sourceStepId: step.id,
-      identityResolved: deriveIdentityResolvedForConversation(conversation)
-    };
+    if (action === "shadow") {
+      // Derive + observe only. NEVER writes.
+      const { outcome, mapping } = deriveLiveOpportunity(evidence);
+      await recordLiveOpportunityHistory(
+        supabase, conversation, step, "opportunity_shadow_evaluated",
+        `compose7-shadow:${conversation.id}:${step.id}:${outcome.outcomeType}`,
+        `COMPOSE-7 shadow evaluated ${outcome.outcomeType} (${mapping.produced ? "would persist" : "no opportunity"}).`,
+        {
+          mode,
+          reason_code: mapping.produced ? "shadow_would_persist" : "shadow_signal_rejected",
+          capability_key: outcome.capabilityKey,
+          outcome_type: outcome.outcomeType,
+          canonical_signals: outcome.canonicalSignals,
+          identity_resolved: outcome.identityResolved,
+          opportunity_produced: mapping.produced,
+          opportunity_signal_reason: mapping.produced ? null : mapping.reason,
+          persisted: false
+        }
+      );
+      return;
+    }
+
+    // enabled: run the full path against the DB-authoritative store.
     const store = createSupabaseStandaloneOpportunityStore(supabase);
     const { outcome, mapping, persist } = await runLiveOpportunityPersistence(store, evidence);
     const eventType = persist.persisted
@@ -11248,19 +11377,16 @@ async function maybePersistLiveConversationOpportunity(
         ? "opportunity_deduplicated"
         : "opportunity_persisted"
       : "opportunity_signal_rejected";
-    await recordConversationHistory(supabase, {
-      conversationId: conversation.id,
-      creatorId: conversation.creator_id,
-      eventId: conversation.last_event_id,
-      stepId: step.id,
-      transitionKey: `compose6:${conversation.id}:${step.id}:${outcome.outcomeType}`,
-      eventType,
-      fromStatus: conversation.status,
-      toStatus: conversation.status,
-      detail: persist.persisted
-        ? `COMPOSE-6 ${persist.deduped ? "deduplicated" : "persisted"} ${mapping.produced ? mapping.signal.category : ""} opportunity (${outcome.outcomeType}).`
-        : `COMPOSE-6 produced no opportunity (${outcome.outcomeType}).`,
-      payload: {
+    const reasonCode = persist.persisted ? (persist.deduped ? "deduplicated" : "persisted") : "signal_rejected";
+    await recordLiveOpportunityHistory(
+      supabase, conversation, step, eventType,
+      `compose6:${conversation.id}:${step.id}:${outcome.outcomeType}`,
+      persist.persisted
+        ? `COMPOSE-7 ${persist.deduped ? "deduplicated" : "persisted"} ${mapping.produced ? mapping.signal.category : ""} opportunity (${outcome.outcomeType}).`
+        : `COMPOSE-7 produced no opportunity (${outcome.outcomeType}).`,
+      {
+        mode,
+        reason_code: reasonCode,
         capability_key: outcome.capabilityKey,
         outcome_type: outcome.outcomeType,
         canonical_signals: outcome.canonicalSignals,
@@ -11270,27 +11396,19 @@ async function maybePersistLiveConversationOpportunity(
         persisted: persist.persisted,
         deduped: persist.persisted ? persist.deduped : false,
         opportunity_id: persist.persisted ? persist.opportunityId : null,
-        not_persisted_reason: persist.persisted ? null : persist.reason,
-        // COMPOSE-6 invariant: the live path NEVER creates a Queue item.
-        queue_item_created: false
+        not_persisted_reason: persist.persisted ? null : persist.reason
       }
-    });
+    );
   } catch (err) {
     // Persistence MUST NOT corrupt or block conversation execution. Swallow and
-    // record best-effort observability only.
+    // record best-effort observability with a deterministic failure reason code.
     try {
-      await recordConversationHistory(supabase, {
-        conversationId: conversation.id,
-        creatorId: conversation.creator_id,
-        eventId: conversation.last_event_id,
-        stepId: step.id,
-        transitionKey: `compose6-error:${conversation.id}:${step.id}`,
-        eventType: "opportunity_persist_failed",
-        fromStatus: conversation.status,
-        toStatus: conversation.status,
-        detail: "COMPOSE-6 live opportunity persistence failed; conversation execution unaffected.",
-        payload: { error: err instanceof Error ? err.message : String(err), queue_item_created: false }
-      });
+      await recordLiveOpportunityHistory(
+        supabase, conversation, step, "opportunity_persist_failed",
+        `compose7-error:${conversation.id}:${step.id}`,
+        "COMPOSE-7 live opportunity persistence failed; conversation execution unaffected.",
+        { mode, reason_code: classifyLiveOpportunityFailure(err), error: err instanceof Error ? err.message : String(err), persisted: false }
+      );
     } catch {
       // best-effort observability only
     }
