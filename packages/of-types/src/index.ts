@@ -3701,3 +3701,90 @@ export async function persistStandaloneOpportunity(
     dedupeKey: decision.dedupeKey
   };
 }
+
+/* ==========================================================================
+ * COMPOSE-6: Live Opportunity Persistence Wiring
+ * See docs/architecture/compose-6-live-opportunity-persistence-wiring.md
+ *
+ * A single pure orchestrator that COMPOSES the already-proven boundaries so the
+ * LIVE conversation interpretation runtime can persist opportunities without
+ * duplicating any mapping or persistence logic:
+ *
+ *   runtime evidence (producer class + canonical signal + terminal outcome)
+ *     → buildCapabilityOutcome        (COMPOSE-4)
+ *     → mapOutcomeToOpportunitySignal (COMPOSE-4)
+ *     → persistStandaloneOpportunity  (COMPOSE-5, via the injected store port)
+ *
+ * It creates NO Queue item (the COMPOSE-5 store port has no queue method),
+ * preserves every COMPOSE-4 guard + the evidence lineage, and is deterministic
+ * given a deterministic store. The worker calls it with the Supabase standalone
+ * store; the deterministic check calls it with an in-memory store.
+ * ========================================================================== */
+
+/** Runtime evidence gathered at the live terminal seam (never fabricated). */
+export interface LiveOpportunityEvidence {
+  creatorId: string;
+  conversationInstanceId: string | null;
+  /** Capability the conversation node represents (WHAT), not the Node Flow (WHICH). */
+  capabilityKey: string;
+  /** Journey node id where genuinely available; null when the runtime cannot identify it. */
+  nodeId: string | null;
+  outcomeKey: string | null;
+  handoffKind: string | null;
+  terminalType: string | null;
+  /** Which live producer emitted the raw evidence. */
+  producer: string;
+  /** The producer's raw output (e.g. response_class), where available. */
+  rawSignal: string | null;
+  /** Canonical signals derived from the producer output (COMPOSE-2 tables); optional. */
+  canonicalSignals?: CanonicalInterpretationSignal[];
+  /** Deterministic confidence override, where the runtime has one. */
+  confidence?: number;
+  sourceEventId: string | null;
+  sourceStepId: string | null;
+  /** COMPOSE-3 link: whether a canonical identity backs this conversation. */
+  identityResolved: boolean;
+}
+
+/** Full result of a live persistence attempt (for observability + tests). */
+export interface LiveOpportunityPersistenceOutcome {
+  outcome: CapabilityOutcome;
+  mapping: OutcomeToOpportunityResult;
+  persist: StandaloneOpportunityPersistResult;
+}
+
+/**
+ * COMPOSE-6 pure orchestrator. Deterministically derives the capability outcome,
+ * maps it to an opportunity signal, and persists a produced signal through the
+ * COMPOSE-5 standalone boundary. Reuses the COMPOSE-4/5 pure functions verbatim —
+ * NO duplicated mapping or persistence logic. Creates NO Queue item. Unsupported /
+ * weak / unresolved-owner / conversation-less evidence yields a non-persist result
+ * (the guards live in mapOutcomeToOpportunitySignal + resolveStandaloneOpportunityPersistence).
+ */
+export async function runLiveOpportunityPersistence(
+  store: StandaloneOpportunityStore,
+  evidence: LiveOpportunityEvidence
+): Promise<LiveOpportunityPersistenceOutcome> {
+  const outcome = buildCapabilityOutcome({
+    capabilityKey: evidence.capabilityKey,
+    nodeId: evidence.nodeId,
+    outcomeKey: evidence.outcomeKey,
+    handoffKind: evidence.handoffKind,
+    terminalType: evidence.terminalType,
+    producer: evidence.producer,
+    rawSignal: evidence.rawSignal,
+    canonicalSignals: evidence.canonicalSignals,
+    confidence: evidence.confidence,
+    sourceEventId: evidence.sourceEventId,
+    sourceConversationId: evidence.conversationInstanceId,
+    identityResolved: evidence.identityResolved
+  });
+  const mapping = mapOutcomeToOpportunitySignal(outcome);
+  const persist = await persistStandaloneOpportunity(store, mapping, {
+    creatorId: evidence.creatorId,
+    conversationInstanceId: evidence.conversationInstanceId,
+    sourceStepId: evidence.sourceStepId,
+    sourceNodeId: evidence.nodeId
+  });
+  return { outcome, mapping, persist };
+}

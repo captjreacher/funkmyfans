@@ -95,9 +95,12 @@ import type {
   StandaloneOpportunityStore,
   StoredOpportunityRef,
   StandaloneOpportunityRefs,
-  StandaloneOpportunityPersistResult
+  StandaloneOpportunityPersistResult,
+  LiveOpportunityEvidence
 } from "@funkmyfans/of-types";
-import { mapConversationInstanceToConversation, mapConversationRuntimeStatusToLifecycleState, mapTaskToQueue, mapTaskToQueueItem, summarizeEventType, normalizeInstagramEvent, INSTAGRAM_PROVIDER, buildCapabilityOutcome, mapOutcomeToOpportunitySignal, persistStandaloneOpportunity } from "@funkmyfans/of-types";
+import { mapConversationInstanceToConversation, mapConversationRuntimeStatusToLifecycleState, mapTaskToQueue, mapTaskToQueueItem, summarizeEventType, normalizeInstagramEvent, INSTAGRAM_PROVIDER, buildCapabilityOutcome, mapOutcomeToOpportunitySignal, persistStandaloneOpportunity, runLiveOpportunityPersistence } from "@funkmyfans/of-types";
+// COMPOSE-6: producer→canonical interpretation mapping (COMPOSE-2, pure, type-only deps).
+import { canonicalFromNsp4, isCanonicalInterpretationSignal } from "./src/lib/interpretationSignals";
 import { createClient } from "@supabase/supabase-js";
 import moonsirenIntelligenceFixture from "./fixtures/moonsiren-creator-intelligence-package-v1.json";
 
@@ -116,6 +119,10 @@ interface Env {
   // boundary (POST /api/internal/opportunities/persist). When unset, the endpoint
   // is open (parity with the other ingestion boundaries).
   COMPOSE5_PERSIST_SHARED_SECRET?: string;
+  // COMPOSE-6: activation flag for LIVE standalone opportunity persistence at the
+  // conversation-runtime terminal seam. Conservative default: OFF. Enabled only
+  // when set to "true"/"1". No Queue item is ever created regardless of this flag.
+  COMPOSE6_LIVE_OPPORTUNITY_PERSISTENCE_ENABLED?: string;
 }
 
 const jsonHeaders = {
@@ -6560,6 +6567,11 @@ async function processConversationInstance(
 
     if (currentStep.step_type === "set_variable") {
       if (metadata.variableKey) variables[metadata.variableKey] = resolveRuntimeVariableValue(metadata.variableKey, metadata.variableValue, variables);
+      // COMPOSE-6: additively derive the canonical interpretation signal from the
+      // producer's response-class output. The producer and its raw value are preserved
+      // (variables[variableKey] is untouched); the canonical signal is recorded as a
+      // separate derived output and threaded forward for the terminal persistence seam.
+      const compose6Canonical = deriveCompose6CanonicalSignal(metadata.variableKey, variables);
       conversation = await updateConversationState(supabase, conversation.id, {
         variables,
         current_step_id: nextStep?.id ?? null,
@@ -6578,7 +6590,14 @@ async function processConversationInstance(
         fromStatus: statusBefore,
         toStatus: conversation.status,
         detail: metadata.variableKey ? `Set variable ${metadata.variableKey}.` : "Set variable step processed.",
-        payload: { variable_key: metadata.variableKey ?? null, variable_value: metadata.variableValue ?? null }
+        payload: {
+          variable_key: metadata.variableKey ?? null,
+          variable_value: metadata.variableValue ?? null,
+          // COMPOSE-6 observability: canonical interpretation signal derived from the producer.
+          ...(compose6Canonical
+            ? { canonical_interpretation_signal: compose6Canonical, response_class: variables.__compose6_last_response_class ?? null }
+            : {})
+        }
       });
       currentStep = nextStep;
       continue;
@@ -6792,6 +6811,17 @@ async function processConversationInstance(
       const outcomeKey = metadata.outcomeKey ?? "complete";
       const outcomeLabel = metadata.outcomeLabel ?? metadata.label ?? "Complete";
       const terminalType = metadata.terminalType ?? "completed";
+      // COMPOSE-6: LIVE standalone opportunity persistence at the terminal seam.
+      // Flag-gated and fully guarded — it derives outcome→signal (COMPOSE-4) and
+      // persists a produced signal (COMPOSE-5) WITHOUT creating a Queue item, and
+      // NEVER alters the terminal control flow below (failures are swallowed +
+      // recorded). Runs for every terminal (handoff + completed).
+      await maybePersistLiveConversationOpportunity(supabase, env, conversation, currentStep, {
+        outcomeKey,
+        handoffKind: typeof metadata.handoffKind === "string" ? metadata.handoffKind : outcomeKey,
+        terminalType,
+        variables
+      });
       if (terminalType === "handoff" && metadata.queueHandoff) {
         const handoffReason = `handoff:${outcomeKey}`;
         const resumedHandoff =
@@ -11146,6 +11176,125 @@ async function persistStandaloneConversationOpportunity(
   };
   const store = createSupabaseStandaloneOpportunityStore(supabase);
   return persistStandaloneOpportunity(store, result, refs);
+}
+
+/**
+ * COMPOSE-6: is LIVE standalone opportunity persistence enabled? Conservative
+ * default OFF; enabled only when the env flag is "true"/"1". This never affects
+ * the Queue and never changes conversation control flow.
+ */
+function isLiveOpportunityPersistenceEnabled(env: Env): boolean {
+  const flag = (env.COMPOSE6_LIVE_OPPORTUNITY_PERSISTENCE_ENABLED ?? "").trim().toLowerCase();
+  return flag === "true" || flag === "1";
+}
+
+/**
+ * COMPOSE-6: derive the canonical interpretation signal from a producer response
+ * class during live processing and thread it forward on the conversation variables
+ * for the terminal persistence seam. The producer output is PRESERVED (the
+ * response_class variable is untouched); unknown or other-vocabulary classes
+ * degrade to no canonical signal. Returns the canonical signal string, or null.
+ */
+function deriveCompose6CanonicalSignal(variableKey: string | undefined, variables: Record<string, unknown>): string | null {
+  if (variableKey !== "response_class" && variableKey !== "next_response_class") return null;
+  const responseClass = String(variables[variableKey] ?? "").trim();
+  if (!responseClass) return null;
+  const canonical = canonicalFromNsp4(responseClass) ?? null;
+  variables.__compose6_last_response_class = responseClass;
+  variables.__compose6_last_canonical_signal = canonical ?? "";
+  return canonical;
+}
+
+/**
+ * COMPOSE-6: LIVE terminal persistence seam. Flag-gated and fully guarded: it
+ * assembles runtime evidence, runs the pure COMPOSE-6 orchestrator (COMPOSE-4
+ * derivation + COMPOSE-5 standalone persistence via the Supabase store), and
+ * records observability history. It NEVER creates a Queue item and NEVER throws
+ * into conversation execution (invariant: persistence failure must not corrupt or
+ * block the conversation). nodeId is null: the live runtime cannot identify the
+ * Journey node at this seam (documented gap — never fabricated).
+ */
+async function maybePersistLiveConversationOpportunity(
+  supabase: SupabaseClient,
+  env: Env,
+  conversation: OfConversationInstance,
+  step: OfMessageScriptStep,
+  input: { outcomeKey: string; handoffKind: string; terminalType: string; variables: Record<string, unknown> }
+): Promise<void> {
+  if (!isLiveOpportunityPersistenceEnabled(env)) return;
+  try {
+    const rawClass = typeof input.variables.__compose6_last_response_class === "string" ? input.variables.__compose6_last_response_class : null;
+    const canonicalRaw = typeof input.variables.__compose6_last_canonical_signal === "string" ? input.variables.__compose6_last_canonical_signal : "";
+    const canonicalSignals = isCanonicalInterpretationSignal(canonicalRaw) ? [canonicalRaw] : undefined;
+    const evidence: LiveOpportunityEvidence = {
+      creatorId: conversation.creator_id,
+      conversationInstanceId: conversation.id,
+      capabilityKey: "new_subscriber_welcome_discovery",
+      nodeId: null,
+      outcomeKey: input.outcomeKey,
+      handoffKind: input.handoffKind,
+      terminalType: input.terminalType,
+      producer: "conversation_runtime.end_step",
+      rawSignal: rawClass ?? input.outcomeKey,
+      canonicalSignals,
+      sourceEventId: conversation.originating_event_id ?? null,
+      sourceStepId: step.id,
+      identityResolved: deriveIdentityResolvedForConversation(conversation)
+    };
+    const store = createSupabaseStandaloneOpportunityStore(supabase);
+    const { outcome, mapping, persist } = await runLiveOpportunityPersistence(store, evidence);
+    const eventType = persist.persisted
+      ? persist.deduped
+        ? "opportunity_deduplicated"
+        : "opportunity_persisted"
+      : "opportunity_signal_rejected";
+    await recordConversationHistory(supabase, {
+      conversationId: conversation.id,
+      creatorId: conversation.creator_id,
+      eventId: conversation.last_event_id,
+      stepId: step.id,
+      transitionKey: `compose6:${conversation.id}:${step.id}:${outcome.outcomeType}`,
+      eventType,
+      fromStatus: conversation.status,
+      toStatus: conversation.status,
+      detail: persist.persisted
+        ? `COMPOSE-6 ${persist.deduped ? "deduplicated" : "persisted"} ${mapping.produced ? mapping.signal.category : ""} opportunity (${outcome.outcomeType}).`
+        : `COMPOSE-6 produced no opportunity (${outcome.outcomeType}).`,
+      payload: {
+        capability_key: outcome.capabilityKey,
+        outcome_type: outcome.outcomeType,
+        canonical_signals: outcome.canonicalSignals,
+        identity_resolved: outcome.identityResolved,
+        opportunity_produced: mapping.produced,
+        opportunity_signal_reason: mapping.produced ? null : mapping.reason,
+        persisted: persist.persisted,
+        deduped: persist.persisted ? persist.deduped : false,
+        opportunity_id: persist.persisted ? persist.opportunityId : null,
+        not_persisted_reason: persist.persisted ? null : persist.reason,
+        // COMPOSE-6 invariant: the live path NEVER creates a Queue item.
+        queue_item_created: false
+      }
+    });
+  } catch (err) {
+    // Persistence MUST NOT corrupt or block conversation execution. Swallow and
+    // record best-effort observability only.
+    try {
+      await recordConversationHistory(supabase, {
+        conversationId: conversation.id,
+        creatorId: conversation.creator_id,
+        eventId: conversation.last_event_id,
+        stepId: step.id,
+        transitionKey: `compose6-error:${conversation.id}:${step.id}`,
+        eventType: "opportunity_persist_failed",
+        fromStatus: conversation.status,
+        toStatus: conversation.status,
+        detail: "COMPOSE-6 live opportunity persistence failed; conversation execution unaffected.",
+        payload: { error: err instanceof Error ? err.message : String(err), queue_item_created: false }
+      });
+    } catch {
+      // best-effort observability only
+    }
+  }
 }
 
 function eventStreamStatus() {
