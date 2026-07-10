@@ -2993,3 +2993,404 @@ export const INSTAGRAM_IDENTITY_JOURNEY_EXAMPLE: PlaybookJourney = {
     viewport: { x: 0, y: 0, zoom: 0.85 }
   }
 };
+
+/* ==========================================================================
+ * COMPOSE-4: Canonical Interpretation Signals → Capability Outcome → Opportunity
+ * See docs/architecture/compose-4-interpretation-opportunity-boundary.md
+ *
+ * A small, dependency-free DETERMINISTIC boundary that proves:
+ *
+ *   conversation/event evidence
+ *     → existing producer (inline regex / ConversationIntent)   [COMPOSE-2 tables]
+ *     → canonical interpretation signal                         [CanonicalInterpretationSignal]
+ *     → capability outcome                                      [CapabilityOutcome]
+ *     → opportunity signal                                      [OpportunitySignal]
+ *     → existing Opportunity boundary                           [ConversationOpportunity input adapter]
+ *
+ * Hard boundaries preserved:
+ *   - A capability outcome is DERIVED deterministically; it is NOT executed by
+ *     the Capability Registry and is NOT a Node Flow internal.
+ *   - Interpretation signals are NOT opportunities; capability outcomes are NOT
+ *     Queue items — this boundary NEVER creates a Queue item.
+ *   - Opportunities preserve the evidence chain (producer raw signal + canonical
+ *     signals flow through to the opportunity signal).
+ *   - Unsupported / weak / unknown evidence degrades safely (no opportunity).
+ *   - Unresolved identity must NOT fabricate an opportunity owner (COMPOSE-3
+ *     link): owner-bearing categories require a resolved identity.
+ *   - Everything here is pure and holds no runtime state.
+ * ========================================================================== */
+
+/** The bounded outcome a capability reached, independent of how a Node Flow executed it. */
+export type CapabilityOutcomeType =
+  | "relationship_continuation"
+  | "offer_opportunity"
+  | "content_preference"
+  | "silence_follow_up"
+  | "boundary_safety"
+  | "human_handoff"
+  | "no_action";
+
+/** Evidence chain carried from producer → signal → outcome → opportunity signal. */
+export interface CapabilityOutcomeEvidence {
+  /** Which producer emitted the raw evidence (e.g. "inline_regex", "conversation_intelligence", "conversation_runtime.end_step"). */
+  producer: string;
+  /** The producer's raw output (response_class / ConversationIntent / end-step outcomeKey), where available. */
+  rawSignal: string | null;
+  /** Canonical interpretation signals mapped from the raw evidence. */
+  canonicalSignals: CanonicalInterpretationSignal[];
+  /** Source event reference, where available. */
+  sourceEventId: string | null;
+  /** Source conversation reference, where available. */
+  sourceConversationId: string | null;
+  /** Optional deterministic notes (never free-form AI text). */
+  notes: string[];
+}
+
+/**
+ * The minimum deterministic capability-outcome model. DERIVED (never executed):
+ * source capability, source node (where available), source refs, canonical
+ * signals consumed/produced, outcome type, evidence, confidence/readiness,
+ * actionability and whether human review is required.
+ */
+export interface CapabilityOutcome {
+  capabilityKey: string;
+  nodeId: string | null;
+  outcomeType: CapabilityOutcomeType;
+  /** The runtime end-step outcome key, where available. */
+  outcomeKey: string | null;
+  /** completed / handoff, where available. */
+  terminalType: string | null;
+  canonicalSignals: CanonicalInterpretationSignal[];
+  evidence: CapabilityOutcomeEvidence;
+  /** Deterministic readiness/confidence in [0,1]. */
+  confidence: number;
+  /** Whether the outcome warrants an opportunity. */
+  actionable: boolean;
+  /** Whether a human necessarily owns the next step. */
+  requiresHuman: boolean;
+  /** COMPOSE-3 link: whether a canonical identity backs this outcome. */
+  identityResolved: boolean;
+}
+
+/** Existing runtime opportunity categories (queueOpportunityCategory): reused, not re-minted. */
+export type OpportunitySignalCategory = "revenue" | "operations" | "relationship";
+
+/**
+ * A deterministic opportunity SIGNAL, aligned field-for-field with the existing
+ * ConversationOpportunity model so it can be adapted to the existing persistence
+ * boundary. It is a signal only — producing it creates NO ConversationOpportunity
+ * row and NO Queue item by itself.
+ */
+export interface OpportunitySignal {
+  capabilityKey: string;
+  outcomeType: CapabilityOutcomeType;
+  /** Maps to ConversationOpportunity.route_key. */
+  routeKey: string;
+  /** Maps to ConversationOpportunity.opportunity_classification. */
+  opportunityClassification: string;
+  /** Maps to ConversationOpportunity.category (existing runtime vocabulary). */
+  category: OpportunitySignalCategory;
+  title: string;
+  summary: string;
+  priority: TaskPriority;
+  /** Whether the EXISTING lifecycle would route this to a human. No Queue item is created here. */
+  queueHandoff: boolean;
+  recommendedNextObjective: string | null;
+  canonicalSignals: CanonicalInterpretationSignal[];
+  requiresHuman: boolean;
+  identityResolved: boolean;
+  sourceEventId: string | null;
+  sourceConversationId: string | null;
+  /** Preserved evidence chain. */
+  evidence: CapabilityOutcomeEvidence;
+}
+
+/** Result of the deterministic outcome → opportunity-signal boundary. */
+export type OutcomeToOpportunityResult =
+  | { produced: true; signal: OpportunitySignal }
+  | { produced: false; reason: string };
+
+/** Below this deterministic confidence an outcome is treated as too weak to become an opportunity. */
+export const OPPORTUNITY_MIN_CONFIDENCE = 0.5;
+
+function composeToken(value: string | null | undefined): string {
+  return (value ?? "").trim().toLowerCase();
+}
+
+/**
+ * Deterministically classify a capability outcome type from the runtime
+ * end-step outcome key and/or handoff kind. Unknown inputs degrade to
+ * "no_action".
+ */
+export function outcomeTypeFor(params: {
+  outcomeKey?: string | null;
+  handoffKind?: string | null;
+  terminalType?: string | null;
+}): CapabilityOutcomeType {
+  const handoff = composeToken(params.handoffKind);
+  const key = composeToken(params.outcomeKey);
+  const probe = handoff || key;
+  if (probe === "buying_signal" || key === "buying_signal") return "offer_opportunity";
+  if (probe === "human_review" || probe === "exception" || probe === "human_handoff") return "human_handoff";
+  if (probe === "relationship_continuation" || probe === "engaged") return "relationship_continuation";
+  if (probe === "content_preference" || probe === "shares_preference" || probe === "content_interest") return "content_preference";
+  if (probe === "boundary_safety" || probe === "boundary_testing" || probe === "unsupported_request") return "boundary_safety";
+  if (probe === "no_response" || probe === "silence" || probe === "silent_no_reply") return "silence_follow_up";
+  return "no_action";
+}
+
+/** Representative canonical signals an outcome type consumes/produces (typed, compile-time canonical). */
+export function canonicalSignalsForOutcomeType(outcomeType: CapabilityOutcomeType): CanonicalInterpretationSignal[] {
+  switch (outcomeType) {
+    case "offer_opportunity":
+      return ["purchase_intent", "ppv_interest"];
+    case "relationship_continuation":
+      return ["warm_enthusiastic"];
+    case "content_preference":
+      return ["content_interest", "shares_preference"];
+    case "silence_follow_up":
+      return ["silence"];
+    case "boundary_safety":
+      return ["boundary_testing", "unsupported_request"];
+    case "human_handoff":
+    case "no_action":
+    default:
+      return [];
+  }
+}
+
+const OUTCOME_DEFAULT_CONFIDENCE: Record<CapabilityOutcomeType, number> = {
+  offer_opportunity: 0.9,
+  human_handoff: 0.9,
+  boundary_safety: 0.85,
+  content_preference: 0.75,
+  relationship_continuation: 0.7,
+  silence_follow_up: 0.4,
+  no_action: 0.2
+};
+
+const OUTCOME_ACTIONABLE: Record<CapabilityOutcomeType, boolean> = {
+  offer_opportunity: true,
+  relationship_continuation: true,
+  content_preference: true,
+  human_handoff: true,
+  boundary_safety: true,
+  silence_follow_up: false,
+  no_action: false
+};
+
+const OUTCOME_REQUIRES_HUMAN: Record<CapabilityOutcomeType, boolean> = {
+  human_handoff: true,
+  boundary_safety: true,
+  offer_opportunity: false,
+  relationship_continuation: false,
+  content_preference: false,
+  silence_follow_up: false,
+  no_action: false
+};
+
+/**
+ * Build a deterministic CapabilityOutcome from runtime evidence. Pure and total.
+ * Canonical signals are taken from the producer evidence when supplied (preserving
+ * the chain), else derived from the outcome type.
+ */
+export function buildCapabilityOutcome(params: {
+  capabilityKey: string;
+  nodeId?: string | null;
+  outcomeKey?: string | null;
+  handoffKind?: string | null;
+  terminalType?: string | null;
+  outcomeType?: CapabilityOutcomeType;
+  producer?: string;
+  rawSignal?: string | null;
+  canonicalSignals?: CanonicalInterpretationSignal[];
+  confidence?: number;
+  sourceEventId?: string | null;
+  sourceConversationId?: string | null;
+  identityResolved?: boolean;
+  notes?: string[];
+}): CapabilityOutcome {
+  const outcomeType = params.outcomeType ?? outcomeTypeFor(params);
+  const canonicalSignals =
+    params.canonicalSignals && params.canonicalSignals.length
+      ? params.canonicalSignals.slice()
+      : canonicalSignalsForOutcomeType(outcomeType);
+  const confidence =
+    typeof params.confidence === "number" && params.confidence >= 0 && params.confidence <= 1
+      ? params.confidence
+      : OUTCOME_DEFAULT_CONFIDENCE[outcomeType];
+
+  return {
+    capabilityKey: params.capabilityKey,
+    nodeId: params.nodeId ?? null,
+    outcomeType,
+    outcomeKey: params.outcomeKey ?? null,
+    terminalType: params.terminalType ?? null,
+    canonicalSignals,
+    evidence: {
+      producer: params.producer ?? "unknown",
+      rawSignal: params.rawSignal ?? params.outcomeKey ?? null,
+      canonicalSignals: canonicalSignals.slice(),
+      sourceEventId: params.sourceEventId ?? null,
+      sourceConversationId: params.sourceConversationId ?? null,
+      notes: params.notes ? params.notes.slice() : []
+    },
+    confidence,
+    actionable: OUTCOME_ACTIONABLE[outcomeType],
+    requiresHuman: OUTCOME_REQUIRES_HUMAN[outcomeType],
+    identityResolved: Boolean(params.identityResolved)
+  };
+}
+
+interface OpportunityMappingDef {
+  category: OpportunitySignalCategory;
+  classification: string;
+  priority: TaskPriority;
+  queueHandoff: boolean;
+  /** Owner-bearing opportunities (a subscriber to act on) require a resolved identity. */
+  requiresOwner: boolean;
+  title: string;
+  summary: string;
+  objective: string;
+}
+
+// Only these outcome types map to an opportunity signal. Others degrade safely.
+const OPPORTUNITY_MAPPING: Partial<Record<CapabilityOutcomeType, OpportunityMappingDef>> = {
+  offer_opportunity: {
+    category: "revenue",
+    classification: "buying_signal",
+    priority: "high",
+    queueHandoff: true,
+    requiresOwner: true,
+    title: "Buying signal opportunity",
+    summary: "The subscriber is signalling purchase intent and should be routed for a revenue follow-up.",
+    objective: "Review the buying signal and send the next sales follow-up."
+  },
+  relationship_continuation: {
+    category: "relationship",
+    classification: "relationship_continuation",
+    priority: "medium",
+    queueHandoff: true,
+    requiresOwner: true,
+    title: "Relationship continuation",
+    summary: "The subscriber is engaged; continue the relationship and keep them warm.",
+    objective: "Continue the relationship naturally and keep the subscriber warm."
+  },
+  content_preference: {
+    category: "relationship",
+    classification: "content_preference",
+    priority: "medium",
+    queueHandoff: false,
+    requiresOwner: true,
+    title: "Content preference discovered",
+    summary: "The subscriber shared a content preference that should tailor future content.",
+    objective: "Use the discovered preference to tailor the next content offer."
+  },
+  human_handoff: {
+    category: "operations",
+    classification: "human_review",
+    priority: "high",
+    queueHandoff: true,
+    requiresOwner: false,
+    title: "Human review",
+    summary: "The conversation requires human review before it continues.",
+    objective: "Review the conversation and decide the safe next step."
+  },
+  boundary_safety: {
+    category: "operations",
+    classification: "safety_review",
+    priority: "high",
+    queueHandoff: true,
+    requiresOwner: false,
+    title: "Safety review",
+    summary: "A boundary/safety condition needs human review.",
+    objective: "Review the safety condition and respond within policy."
+  }
+};
+
+/**
+ * Deterministically map a capability outcome to an opportunity signal. Maps ONLY
+ * explicitly supported outcomes; refuses weak/unknown evidence; and refuses to
+ * fabricate an owner when identity is unresolved for owner-bearing categories.
+ * Creates NO ConversationOpportunity row and NO Queue item.
+ */
+export function mapOutcomeToOpportunitySignal(outcome: CapabilityOutcome): OutcomeToOpportunityResult {
+  const def = OPPORTUNITY_MAPPING[outcome.outcomeType];
+  if (!def) {
+    return { produced: false, reason: `outcome type "${outcome.outcomeType}" is not a supported opportunity` };
+  }
+  if (!outcome.actionable) {
+    return { produced: false, reason: "capability outcome is not actionable" };
+  }
+  if (outcome.confidence < OPPORTUNITY_MIN_CONFIDENCE) {
+    return { produced: false, reason: `evidence too weak (confidence ${outcome.confidence} < ${OPPORTUNITY_MIN_CONFIDENCE})` };
+  }
+  if (def.requiresOwner && !outcome.identityResolved) {
+    return { produced: false, reason: "unresolved identity; refusing to fabricate an opportunity owner" };
+  }
+
+  const signal: OpportunitySignal = {
+    capabilityKey: outcome.capabilityKey,
+    outcomeType: outcome.outcomeType,
+    routeKey: outcome.outcomeKey ?? outcome.outcomeType,
+    opportunityClassification: def.classification,
+    category: def.category,
+    title: def.title,
+    summary: def.summary,
+    priority: def.priority,
+    queueHandoff: def.queueHandoff,
+    recommendedNextObjective: def.objective,
+    canonicalSignals: outcome.canonicalSignals.slice(),
+    requiresHuman: outcome.requiresHuman,
+    identityResolved: outcome.identityResolved,
+    sourceEventId: outcome.evidence.sourceEventId,
+    sourceConversationId: outcome.evidence.sourceConversationId,
+    evidence: {
+      ...outcome.evidence,
+      canonicalSignals: outcome.evidence.canonicalSignals.slice(),
+      notes: outcome.evidence.notes.slice()
+    }
+  };
+  return { produced: true, signal };
+}
+
+/**
+ * Pure adapter: shape an OpportunitySignal into the EXISTING
+ * of_conversation_opportunities insert payload (status "detected", NO queue
+ * linkage). It does NOT persist and creates NO Queue item — it documents the
+ * persistence seam so the runtime can upsert through the existing
+ * ensureConversationOpportunity path (onConflict conversation_instance_id,route_key)
+ * without this boundary owning persistence or the Queue.
+ */
+export function opportunitySignalToConversationOpportunityInput(
+  signal: OpportunitySignal,
+  refs: { creatorId: string; conversationInstanceId: string | null; sourceStepId?: string | null }
+): Record<string, unknown> {
+  return {
+    creator_id: refs.creatorId,
+    conversation_instance_id: refs.conversationInstanceId,
+    queue_id: null,
+    queue_item_id: null,
+    source_event_id: signal.sourceEventId,
+    source_step_id: refs.sourceStepId ?? null,
+    route_key: signal.routeKey,
+    opportunity_classification: signal.opportunityClassification,
+    category: signal.category,
+    title: signal.title,
+    summary: signal.summary,
+    status: "detected",
+    priority: signal.priority,
+    queue_handoff: signal.queueHandoff,
+    recommended_next_objective: signal.recommendedNextObjective,
+    resolved_at: null,
+    metadata: {
+      source: "compose4_outcome_boundary",
+      capability_key: signal.capabilityKey,
+      outcome_type: signal.outcomeType,
+      canonical_signals: signal.canonicalSignals,
+      requires_human: signal.requiresHuman,
+      identity_resolved: signal.identityResolved,
+      evidence: signal.evidence
+    }
+  };
+}
