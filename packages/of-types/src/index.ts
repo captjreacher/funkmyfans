@@ -3394,3 +3394,310 @@ export function opportunitySignalToConversationOpportunityInput(
     }
   };
 }
+
+/* ==========================================================================
+ * COMPOSE-5: Standalone Opportunity Persistence Boundary
+ * See docs/architecture/compose-5-standalone-opportunity-persistence-boundary.md
+ *
+ * COMPOSE-4 proved the derivation
+ *   canonical interpretation signal → capability outcome → opportunity signal
+ * and shaped an OpportunitySignal into the existing of_conversation_opportunities
+ * payload (opportunitySignalToConversationOpportunityInput), but deliberately did
+ * NOT persist it — the only existing write path (worker ensureConversationOpportunity)
+ * is coupled to Queue creation (ensureConversationHandoffQueueItem).
+ *
+ * COMPOSE-5 adds the smallest deterministic seam that PERSISTS a produced
+ * opportunity signal into the existing Opportunity boundary WITHOUT creating a
+ * Queue item — additively, alongside (never modifying) the coupled path:
+ *
+ *   opportunity signal
+ *     → standalone persistence decision   [resolveStandaloneOpportunityPersistence]
+ *     → idempotent write plan              [planStandaloneOpportunityWrite]
+ *     → persisted opportunity (status "detected", queue links null)
+ *     → Queue UNTOUCHED
+ *
+ * Architectural invariants preserved:
+ *   - Interpretation signals / capability outcomes / opportunity signals are NOT
+ *     Queue items; this seam creates NO Queue item and touches NO Queue table —
+ *     the injected StandaloneOpportunityStore port exposes ONLY the opportunity
+ *     store, so the pure orchestrator is STRUCTURALLY incapable of queue writes.
+ *   - A persisted opportunity NEVER auto-creates a Queue item: queue_id and
+ *     queue_item_id stay null and status is "detected" (never "queued").
+ *   - Evidence lineage (producer raw signal + canonical signals + COMPOSE-4
+ *     evidence chain) survives into the persisted metadata.
+ *   - Idempotency: a deterministic dedupe key prevents duplicate opportunities.
+ *   - Unsupported / weak / unresolved-owner signals do NOT persist (the COMPOSE-4
+ *     mapping guards flow through as non-persist reasons; owner-fabrication is
+ *     independently re-asserted here).
+ *   - Everything here is pure and holds no runtime state; the ONLY IO is the
+ *     injected store port (implemented over Supabase in the worker).
+ * ========================================================================== */
+
+/** Canonical persisted status for a standalone (non-queued) detected opportunity. */
+export const STANDALONE_OPPORTUNITY_STATUS: ConversationOpportunityStatus = "detected";
+
+/** Marker written into metadata so a standalone-persisted row is unambiguous + queryable for dedupe. */
+export const STANDALONE_OPPORTUNITY_METADATA_KEY = "compose5";
+
+function c5IsRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function c5Token(value: string | null | undefined): string {
+  return (value ?? "").trim().toLowerCase();
+}
+
+/**
+ * Owner-bearing categories require a resolved identity before an opportunity may
+ * be persisted (COMPOSE-3 link). Derived from the COMPOSE-4 OPPORTUNITY_MAPPING
+ * requiresOwner rule: revenue + relationship are owner-bearing; operations
+ * (human_review / safety_review) is not.
+ */
+export function standaloneOpportunityRequiresOwner(category: OpportunitySignalCategory): boolean {
+  return category === "revenue" || category === "relationship";
+}
+
+/** References needed to persist an opportunity signal into of_conversation_opportunities. */
+export interface StandaloneOpportunityRefs {
+  creatorId: string;
+  /** of_conversation_opportunities.conversation_instance_id is NOT NULL — required to persist. */
+  conversationInstanceId: string | null;
+  /** Existing runtime step id, where available (maps to source_step_id). */
+  sourceStepId?: string | null;
+  /** Capability-graph node id, where available (preserved in metadata.compose5.source_node_id). */
+  sourceNodeId?: string | null;
+}
+
+/**
+ * The smallest deterministic contract carrying a COMPOSE-4 opportunity signal
+ * into the existing persistence payload. Every field below is preserved by
+ * resolveStandaloneOpportunityPersistence.
+ */
+export interface StandaloneOpportunityPersistenceContract {
+  category: OpportunitySignalCategory;
+  opportunityClassification: string;
+  routeKey: string;
+  capabilityKey: string;
+  outcomeType: CapabilityOutcomeType;
+  sourceNodeId: string | null;
+  sourceEventId: string | null;
+  conversationInstanceId: string;
+  sourceStepId: string | null;
+  canonicalSignals: CanonicalInterpretationSignal[];
+  evidence: CapabilityOutcomeEvidence;
+  identityResolved: boolean;
+  dedupeKey: string;
+  status: ConversationOpportunityStatus;
+}
+
+/**
+ * Deterministic idempotency key for a standalone opportunity. Stable across
+ * replays of the SAME opportunity signal for the SAME conversation and distinct
+ * across capability / outcome / category / route. Pure string composition — no
+ * hashing, no randomness, no clock.
+ */
+export function buildStandaloneOpportunityDedupeKey(
+  signal: OpportunitySignal,
+  refs: Pick<StandaloneOpportunityRefs, "conversationInstanceId">
+): string {
+  return [
+    "compose5",
+    c5Token(refs.conversationInstanceId) || "no-conversation",
+    c5Token(signal.capabilityKey),
+    c5Token(signal.outcomeType),
+    c5Token(signal.category),
+    c5Token(signal.routeKey)
+  ].join(":");
+}
+
+/**
+ * Pure adapter: shape an OpportunitySignal into the standalone
+ * of_conversation_opportunities insert payload. Builds on the COMPOSE-4 pure
+ * adapter (opportunitySignalToConversationOpportunityInput) and overlays the
+ * standalone guarantees (status "detected", queue links null) + an additive
+ * metadata.compose5 lineage block carrying the deterministic dedupe key. Does
+ * NOT persist and creates NO Queue item.
+ */
+export function buildStandaloneOpportunityPayload(
+  signal: OpportunitySignal,
+  refs: StandaloneOpportunityRefs & { conversationInstanceId: string }
+): { payload: Record<string, unknown>; dedupeKey: string } {
+  const dedupeKey = buildStandaloneOpportunityDedupeKey(signal, refs);
+  const base = opportunitySignalToConversationOpportunityInput(signal, {
+    creatorId: refs.creatorId,
+    conversationInstanceId: refs.conversationInstanceId,
+    sourceStepId: refs.sourceStepId ?? null
+  });
+  const baseMetadata = c5IsRecord(base.metadata) ? base.metadata : {};
+  const payload: Record<string, unknown> = {
+    ...base,
+    // Defensive re-assertion: a standalone row can NEVER look queued.
+    status: STANDALONE_OPPORTUNITY_STATUS,
+    queue_id: null,
+    queue_item_id: null,
+    metadata: {
+      ...baseMetadata,
+      [STANDALONE_OPPORTUNITY_METADATA_KEY]: {
+        persistence_boundary: "standalone",
+        persisted_without_queue: true,
+        dedupe_key: dedupeKey,
+        source_node_id: refs.sourceNodeId ?? null,
+        status: STANDALONE_OPPORTUNITY_STATUS
+      }
+    }
+  };
+  return { payload, dedupeKey };
+}
+
+/** Decision produced by the pure resolver: persist (with payload) or explicitly not. */
+export type StandaloneOpportunityPersistenceDecision =
+  | { persist: false; reason: string }
+  | {
+      persist: true;
+      /** of_conversation_opportunities insert payload (no id / no timestamps). */
+      payload: Record<string, unknown>;
+      dedupeKey: string;
+      routeKey: string;
+      conversationInstanceId: string;
+      contract: StandaloneOpportunityPersistenceContract;
+    };
+
+/**
+ * Pure resolver: turn the RESULT of mapOutcomeToOpportunitySignal into a
+ * standalone persistence decision. Non-persist reasons (unsupported / weak /
+ * unresolved-owner) flow straight through from the COMPOSE-4 mapping — this
+ * boundary re-applies, never weakens, those guards. It additionally refuses to
+ * persist without a conversation reference and independently re-asserts the
+ * owner-fabrication guard for owner-bearing categories.
+ */
+export function resolveStandaloneOpportunityPersistence(
+  result: OutcomeToOpportunityResult,
+  refs: StandaloneOpportunityRefs
+): StandaloneOpportunityPersistenceDecision {
+  if (!result.produced) {
+    return { persist: false, reason: result.reason };
+  }
+  const signal = result.signal;
+  if (!refs.conversationInstanceId) {
+    return { persist: false, reason: "no conversation reference; refusing to persist a detached opportunity" };
+  }
+  // Independent re-assertion of the COMPOSE-3/4 owner guard: never fabricate an
+  // owner for an owner-bearing opportunity when identity is unresolved, even if a
+  // caller hand-built a produced signal that bypassed mapOutcomeToOpportunitySignal.
+  if (standaloneOpportunityRequiresOwner(signal.category) && !signal.identityResolved) {
+    return { persist: false, reason: "unresolved identity for an owner-bearing opportunity; refusing to fabricate an owner" };
+  }
+
+  const { payload, dedupeKey } = buildStandaloneOpportunityPayload(signal, {
+    ...refs,
+    conversationInstanceId: refs.conversationInstanceId
+  });
+
+  const contract: StandaloneOpportunityPersistenceContract = {
+    category: signal.category,
+    opportunityClassification: signal.opportunityClassification,
+    routeKey: signal.routeKey,
+    capabilityKey: signal.capabilityKey,
+    outcomeType: signal.outcomeType,
+    sourceNodeId: refs.sourceNodeId ?? null,
+    sourceEventId: signal.sourceEventId,
+    conversationInstanceId: refs.conversationInstanceId,
+    sourceStepId: refs.sourceStepId ?? null,
+    canonicalSignals: signal.canonicalSignals.slice(),
+    evidence: {
+      ...signal.evidence,
+      canonicalSignals: signal.evidence.canonicalSignals.slice(),
+      notes: signal.evidence.notes.slice()
+    },
+    identityResolved: signal.identityResolved,
+    dedupeKey,
+    status: STANDALONE_OPPORTUNITY_STATUS
+  };
+
+  return {
+    persist: true,
+    payload,
+    dedupeKey,
+    routeKey: signal.routeKey,
+    conversationInstanceId: refs.conversationInstanceId,
+    contract
+  };
+}
+
+/** A minimal already-persisted opportunity row reference the store returns for dedupe. */
+export interface StoredOpportunityRef {
+  id: string;
+  status?: string | null;
+  route_key?: string | null;
+  metadata?: Record<string, unknown> | null;
+}
+
+/**
+ * IO port for standalone opportunity persistence. Deliberately exposes ONLY the
+ * opportunity store — it has NO Queue methods, so the pure orchestrator below is
+ * structurally incapable of creating a Queue item. The worker implements this
+ * over Supabase; the deterministic check implements it in-memory.
+ */
+export interface StandaloneOpportunityStore {
+  /** Detected (non-queued) opportunities for this conversation + route_key. */
+  findDetected(conversationInstanceId: string, routeKey: string): Promise<StoredOpportunityRef[]>;
+  insert(payload: Record<string, unknown>): Promise<ConversationOpportunitySummary>;
+  update(id: string, patch: Record<string, unknown>): Promise<ConversationOpportunitySummary>;
+}
+
+/**
+ * Pure idempotency planner: given the detected rows already present for this
+ * (conversation, route_key), decide whether to insert a fresh row or update the
+ * existing one whose metadata.compose5.dedupe_key matches. Deterministic.
+ */
+export function planStandaloneOpportunityWrite(
+  existing: StoredOpportunityRef[],
+  dedupeKey: string
+): { op: "insert" } | { op: "update"; id: string } {
+  const match = existing.find((row) => {
+    const md = row.metadata;
+    const c5 = c5IsRecord(md) ? md[STANDALONE_OPPORTUNITY_METADATA_KEY] : null;
+    const key = c5IsRecord(c5) ? c5.dedupe_key : null;
+    return typeof key === "string" && key === dedupeKey;
+  });
+  return match ? { op: "update", id: match.id } : { op: "insert" };
+}
+
+/** Result of a standalone persistence attempt. */
+export type StandaloneOpportunityPersistResult =
+  | { persisted: false; reason: string }
+  | {
+      persisted: true;
+      deduped: boolean;
+      opportunityId: string;
+      opportunity: ConversationOpportunitySummary;
+      dedupeKey: string;
+    };
+
+/**
+ * Pure orchestrator: resolve the decision, then — only when persisting — plan an
+ * idempotent write through the injected store. Creates NO Queue item (the port
+ * has none). Deterministic given a deterministic store. Weak / unsupported /
+ * unresolved-owner / conversation-less inputs short-circuit with no store call.
+ */
+export async function persistStandaloneOpportunity(
+  store: StandaloneOpportunityStore,
+  result: OutcomeToOpportunityResult,
+  refs: StandaloneOpportunityRefs
+): Promise<StandaloneOpportunityPersistResult> {
+  const decision = resolveStandaloneOpportunityPersistence(result, refs);
+  if (!decision.persist) {
+    return { persisted: false, reason: decision.reason };
+  }
+  const existing = await store.findDetected(decision.conversationInstanceId, decision.routeKey);
+  const plan = planStandaloneOpportunityWrite(existing, decision.dedupeKey);
+  const opportunity =
+    plan.op === "update" ? await store.update(plan.id, decision.payload) : await store.insert(decision.payload);
+  return {
+    persisted: true,
+    deduped: plan.op === "update",
+    opportunityId: opportunity.id,
+    opportunity,
+    dedupeKey: decision.dedupeKey
+  };
+}

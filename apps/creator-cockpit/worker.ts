@@ -91,9 +91,13 @@ import type {
   OfPlaybookJourney,
   PlaybookJourney,
   SyncType,
-  NormalizedInstagramEvent
+  NormalizedInstagramEvent,
+  StandaloneOpportunityStore,
+  StoredOpportunityRef,
+  StandaloneOpportunityRefs,
+  StandaloneOpportunityPersistResult
 } from "@funkmyfans/of-types";
-import { mapConversationInstanceToConversation, mapConversationRuntimeStatusToLifecycleState, mapTaskToQueue, mapTaskToQueueItem, summarizeEventType, normalizeInstagramEvent, INSTAGRAM_PROVIDER, buildCapabilityOutcome, mapOutcomeToOpportunitySignal } from "@funkmyfans/of-types";
+import { mapConversationInstanceToConversation, mapConversationRuntimeStatusToLifecycleState, mapTaskToQueue, mapTaskToQueueItem, summarizeEventType, normalizeInstagramEvent, INSTAGRAM_PROVIDER, buildCapabilityOutcome, mapOutcomeToOpportunitySignal, persistStandaloneOpportunity } from "@funkmyfans/of-types";
 import { createClient } from "@supabase/supabase-js";
 import moonsirenIntelligenceFixture from "./fixtures/moonsiren-creator-intelligence-package-v1.json";
 
@@ -108,6 +112,10 @@ interface Env {
   // COMPOSE-3: optional shared secret for the Instagram ingestion boundary.
   // When unset, ingestion is open (parity with BetterFans behaviour).
   INSTAGRAM_EVENTS_SHARED_SECRET?: string;
+  // COMPOSE-5: optional shared secret for the standalone opportunity persistence
+  // boundary (POST /api/internal/opportunities/persist). When unset, the endpoint
+  // is open (parity with the other ingestion boundaries).
+  COMPOSE5_PERSIST_SHARED_SECRET?: string;
 }
 
 const jsonHeaders = {
@@ -1594,6 +1602,29 @@ function boundedPriority(value: unknown, label: string) {
     const rawPayload = await request.json().catch(() => null);
     const result = await ingestInstagramEvent(supabase, rawPayload);
     return Response.json(result, { status: result.ok ? 200 : (result.statusCode ?? 500), headers: jsonHeaders });
+  }
+
+  // COMPOSE-5: standalone opportunity persistence boundary. Given deterministic
+  // runtime evidence it derives a capability outcome → opportunity signal
+  // (COMPOSE-4) and PERSISTS a produced signal into of_conversation_opportunities
+  // as a "detected" opportunity WITHOUT creating a Queue item. It deliberately
+  // does NOT run automations, resolve identity, promote to the Queue, or touch
+  // conversation-runtime execution. Weak / unsupported / unresolved-owner signals
+  // persist nothing. Queue promotion belongs to a later sprint.
+  if (request.method === "POST" && url.pathname === "/api/internal/opportunities/persist") {
+    if (!isAuthorizedOpportunityPersist(request, env)) {
+      return Response.json({ ok: false, error: "Unauthorized opportunity persist request" }, { status: 401, headers: jsonHeaders });
+    }
+    const rawBody = (await request.json().catch(() => null)) as Record<string, unknown> | null;
+    if (!isRecord(rawBody)) {
+      return Response.json({ ok: false, error: "Invalid JSON body" }, { status: 400, headers: jsonHeaders });
+    }
+    try {
+      const result = await persistStandaloneConversationOpportunity(supabase, rawBody);
+      return Response.json({ ok: true, result }, { status: 200, headers: jsonHeaders });
+    } catch (err) {
+      return Response.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, { status: 500, headers: jsonHeaders });
+    }
   }
 
   const syncMatch = url.pathname.match(/^\/api\/creators\/([^/]+)\/sync\/(profile|stats|subscribers|chats|all)$/);
@@ -11030,6 +11061,93 @@ async function ingestInstagramEvent(supabase: SupabaseClient, rawPayload: unknow
   };
 }
 
+/**
+ * COMPOSE-5: Supabase-backed StandaloneOpportunityStore — the ONLY IO in the
+ * standalone opportunity persistence seam. It reads/writes
+ * of_conversation_opportunities exclusively and has NO access to any Queue table,
+ * so persistence through it can never create a Queue item. Mirrors the existing
+ * missing-relation degradation used elsewhere in this worker.
+ */
+const STANDALONE_OPPORTUNITY_COLUMNS =
+  "id, creator_id, conversation_instance_id, queue_id, queue_item_id, source_event_id, source_step_id, route_key, opportunity_classification, category, title, summary, status, priority, queue_handoff, recommended_next_objective, created_at, updated_at, resolved_at, metadata";
+
+function createSupabaseStandaloneOpportunityStore(supabase: SupabaseClient): StandaloneOpportunityStore {
+  return {
+    async findDetected(conversationInstanceId: string, routeKey: string): Promise<StoredOpportunityRef[]> {
+      const res = await supabase
+        .from("of_conversation_opportunities")
+        .select("id, status, route_key, metadata")
+        .eq("conversation_instance_id", conversationInstanceId)
+        .eq("route_key", routeKey)
+        .eq("status", "detected");
+      if (res.error && isMissingSchemaCacheRelationError(res.error, "of_conversation_opportunities")) return [];
+      assertNoError(res.error);
+      return (res.data ?? []) as StoredOpportunityRef[];
+    },
+    async insert(payload: Record<string, unknown>): Promise<ConversationOpportunitySummary> {
+      const res = await supabase
+        .from("of_conversation_opportunities")
+        .insert(payload)
+        .select(STANDALONE_OPPORTUNITY_COLUMNS)
+        .single();
+      assertNoError(res.error);
+      return res.data as ConversationOpportunitySummary;
+    },
+    async update(id: string, patch: Record<string, unknown>): Promise<ConversationOpportunitySummary> {
+      const res = await supabase
+        .from("of_conversation_opportunities")
+        .update({ ...patch, updated_at: new Date().toISOString() })
+        .eq("id", id)
+        .select(STANDALONE_OPPORTUNITY_COLUMNS)
+        .single();
+      assertNoError(res.error);
+      return res.data as ConversationOpportunitySummary;
+    }
+  };
+}
+
+/**
+ * COMPOSE-5: derive a capability outcome from explicit runtime evidence, map it
+ * to an opportunity signal (COMPOSE-4), and PERSIST a produced signal as a
+ * STANDALONE opportunity (status "detected", no Queue item). This is the new
+ * persistence seam. It is purely additive: it does NOT call
+ * processConversationInstance, the handoff gate, ensureConversationOpportunity,
+ * ensureConversationHandoffQueueItem, or any Queue table. Weak / unsupported /
+ * unresolved-owner signals persist nothing (deterministic non-persist result).
+ */
+async function persistStandaloneConversationOpportunity(
+  supabase: SupabaseClient,
+  body: Record<string, unknown>
+): Promise<StandaloneOpportunityPersistResult> {
+  const creatorId = stringValue(body.creatorId);
+  const conversationInstanceId = stringValue(body.conversationInstanceId);
+  if (!creatorId || !conversationInstanceId) {
+    return { persisted: false, reason: "creatorId and conversationInstanceId are required" };
+  }
+  const outcome = buildCapabilityOutcome({
+    capabilityKey: stringValue(body.capabilityKey, "new_subscriber_welcome_discovery"),
+    nodeId: typeof body.nodeId === "string" ? body.nodeId : null,
+    outcomeKey: typeof body.outcomeKey === "string" ? body.outcomeKey : null,
+    handoffKind: typeof body.handoffKind === "string" ? body.handoffKind : null,
+    terminalType: typeof body.terminalType === "string" ? body.terminalType : null,
+    producer: stringValue(body.producer, "compose5.persist_endpoint"),
+    rawSignal: typeof body.rawSignal === "string" ? body.rawSignal : null,
+    confidence: typeof body.confidence === "number" ? body.confidence : undefined,
+    sourceEventId: typeof body.sourceEventId === "string" ? body.sourceEventId : null,
+    sourceConversationId: conversationInstanceId,
+    identityResolved: body.identityResolved === true
+  });
+  const result = mapOutcomeToOpportunitySignal(outcome);
+  const refs: StandaloneOpportunityRefs = {
+    creatorId,
+    conversationInstanceId,
+    sourceStepId: typeof body.sourceStepId === "string" ? body.sourceStepId : null,
+    sourceNodeId: outcome.nodeId
+  };
+  const store = createSupabaseStandaloneOpportunityStore(supabase);
+  return persistStandaloneOpportunity(store, result, refs);
+}
+
 function eventStreamStatus() {
   return {
     connectionStatus: "receiver_ready",
@@ -11048,6 +11166,11 @@ function isAuthorizedEventIngest(request: Request, env: Env) {
 function isAuthorizedInstagramEventIngest(request: Request, env: Env) {
   if (!env.INSTAGRAM_EVENTS_SHARED_SECRET) return true;
   return request.headers.get("x-instagram-event-secret") === env.INSTAGRAM_EVENTS_SHARED_SECRET;
+}
+
+function isAuthorizedOpportunityPersist(request: Request, env: Env) {
+  if (!env.COMPOSE5_PERSIST_SHARED_SECRET) return true;
+  return request.headers.get("x-compose5-persist-secret") === env.COMPOSE5_PERSIST_SHARED_SECRET;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
