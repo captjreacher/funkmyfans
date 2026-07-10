@@ -3535,6 +3535,10 @@ export function buildStandaloneOpportunityPayload(
     status: STANDALONE_OPPORTUNITY_STATUS,
     queue_id: null,
     queue_item_id: null,
+    // COMPOSE-7: first-class deterministic dedupe column. A unique index over this
+    // column gives the DATABASE authority over duplicate prevention (NULLs remain
+    // distinct, so legacy queue-coupled rows with a null dedupe_key are unconstrained).
+    dedupe_key: dedupeKey,
     metadata: {
       ...baseMetadata,
       [STANDALONE_OPPORTUNITY_METADATA_KEY]: {
@@ -3632,17 +3636,31 @@ export interface StoredOpportunityRef {
   metadata?: Record<string, unknown> | null;
 }
 
+/** COMPOSE-7: result of a concurrency-safe upsert keyed on the dedupe_key column. */
+export interface StandaloneOpportunityUpsertResult {
+  opportunity: ConversationOpportunitySummary;
+  /** true when an existing row was updated on conflict (deduplicated); false on fresh insert. */
+  deduped: boolean;
+}
+
 /**
  * IO port for standalone opportunity persistence. Deliberately exposes ONLY the
  * opportunity store — it has NO Queue methods, so the pure orchestrator below is
  * structurally incapable of creating a Queue item. The worker implements this
- * over Supabase; the deterministic check implements it in-memory.
+ * over Supabase; the deterministic checks implement it in-memory.
+ *
+ * COMPOSE-7: `upsertByDedupeKey` is the AUTHORITATIVE, concurrency-safe write path
+ * (backed by the unique index on `dedupe_key`). When a store provides it, the
+ * orchestrator uses it in preference to the legacy select-then-write methods,
+ * which remain only for non-DB (in-memory) stores where there is no concurrency.
  */
 export interface StandaloneOpportunityStore {
   /** Detected (non-queued) opportunities for this conversation + route_key. */
   findDetected(conversationInstanceId: string, routeKey: string): Promise<StoredOpportunityRef[]>;
   insert(payload: Record<string, unknown>): Promise<ConversationOpportunitySummary>;
   update(id: string, patch: Record<string, unknown>): Promise<ConversationOpportunitySummary>;
+  /** COMPOSE-7: concurrency-safe conflict-aware write keyed on dedupe_key (DB-authoritative). */
+  upsertByDedupeKey?(dedupeKey: string, payload: Record<string, unknown>): Promise<StandaloneOpportunityUpsertResult>;
 }
 
 /**
@@ -3689,6 +3707,16 @@ export async function persistStandaloneOpportunity(
   if (!decision.persist) {
     return { persisted: false, reason: decision.reason };
   }
+  // COMPOSE-7: prefer the DB-authoritative, concurrency-safe upsert when the store
+  // provides it (the Supabase store does). The unique index on dedupe_key — not this
+  // application code — owns duplicate prevention, so concurrent identical writes
+  // converge to a single row and a deduped result rather than an error.
+  if (store.upsertByDedupeKey) {
+    const { opportunity, deduped } = await store.upsertByDedupeKey(decision.dedupeKey, decision.payload);
+    return { persisted: true, deduped, opportunityId: opportunity.id, opportunity, dedupeKey: decision.dedupeKey };
+  }
+  // Fallback for stores without DB-backed upsert (in-memory / tests only, where there
+  // is no concurrency). NOT the authoritative production mechanism.
   const existing = await store.findDetected(decision.conversationInstanceId, decision.routeKey);
   const plan = planStandaloneOpportunityWrite(existing, decision.dedupeKey);
   const opportunity =
@@ -3761,10 +3789,15 @@ export interface LiveOpportunityPersistenceOutcome {
  * weak / unresolved-owner / conversation-less evidence yields a non-persist result
  * (the guards live in mapOutcomeToOpportunitySignal + resolveStandaloneOpportunityPersistence).
  */
-export async function runLiveOpportunityPersistence(
-  store: StandaloneOpportunityStore,
-  evidence: LiveOpportunityEvidence
-): Promise<LiveOpportunityPersistenceOutcome> {
+/**
+ * COMPOSE-6/7 pure derivation (NO persistence). Builds the capability outcome and
+ * maps it to an opportunity signal from runtime evidence. Used directly by SHADOW
+ * mode (derive + observe, never write) and internally by runLiveOpportunityPersistence.
+ */
+export function deriveLiveOpportunity(evidence: LiveOpportunityEvidence): {
+  outcome: CapabilityOutcome;
+  mapping: OutcomeToOpportunityResult;
+} {
   const outcome = buildCapabilityOutcome({
     capabilityKey: evidence.capabilityKey,
     nodeId: evidence.nodeId,
@@ -3780,6 +3813,14 @@ export async function runLiveOpportunityPersistence(
     identityResolved: evidence.identityResolved
   });
   const mapping = mapOutcomeToOpportunitySignal(outcome);
+  return { outcome, mapping };
+}
+
+export async function runLiveOpportunityPersistence(
+  store: StandaloneOpportunityStore,
+  evidence: LiveOpportunityEvidence
+): Promise<LiveOpportunityPersistenceOutcome> {
+  const { outcome, mapping } = deriveLiveOpportunity(evidence);
   const persist = await persistStandaloneOpportunity(store, mapping, {
     creatorId: evidence.creatorId,
     conversationInstanceId: evidence.conversationInstanceId,
@@ -3787,4 +3828,84 @@ export async function runLiveOpportunityPersistence(
     sourceNodeId: evidence.nodeId
   });
   return { outcome, mapping, persist };
+}
+
+/* ==========================================================================
+ * COMPOSE-7: Production Activation Hardening — pure activation controls
+ * See docs/architecture/compose-7-production-activation-hardening.md
+ *
+ * Fail-closed, deterministic parsing of the activation mode + creator allowlist.
+ * These are pure so the worker reads env and delegates, and the deterministic
+ * check proves the fail-closed semantics without a runtime.
+ * ========================================================================== */
+
+/** Activation mode for the live opportunity persistence path. Conservative default: "off". */
+export type LiveOpportunityMode = "off" | "shadow" | "enabled";
+
+/**
+ * Resolve the activation mode. Precedence:
+ *   1. COMPOSE6_LIVE_OPPORTUNITY_PERSISTENCE_MODE, when it is exactly off|shadow|enabled.
+ *   2. If MODE is unset/empty → backward-compat with the legacy boolean flag
+ *      (COMPOSE6_LIVE_OPPORTUNITY_PERSISTENCE_ENABLED): "true"/"1" → "enabled", else "off".
+ *   3. Any other (unknown/malformed) MODE value → "off" (fail closed).
+ */
+export function resolveLiveOpportunityMode(
+  modeRaw: string | null | undefined,
+  legacyEnabledRaw?: string | null
+): LiveOpportunityMode {
+  const mode = (modeRaw ?? "").trim().toLowerCase();
+  if (mode === "off" || mode === "shadow" || mode === "enabled") return mode;
+  if (mode === "") {
+    const legacy = (legacyEnabledRaw ?? "").trim().toLowerCase();
+    return legacy === "true" || legacy === "1" ? "enabled" : "off";
+  }
+  return "off";
+}
+
+/** Deterministic decision from the creator allowlist (fail-closed). */
+export interface CreatorAllowlistDecision {
+  /** Whether an allowlist env value was provided at all. */
+  configured: boolean;
+  /** Present but yielded no usable tokens (e.g. only separators) → fail closed. */
+  malformed: boolean;
+  /** Whether this creator may run the live path. */
+  allowed: boolean;
+  /** Deterministic reason code for observability. */
+  reason: "no_allowlist" | "allowlisted" | "not_allowlisted" | "malformed_allowlist";
+}
+
+/**
+ * Evaluate whether a creator is allowed. An unset/empty allowlist means "not
+ * configured" → all creators allowed (the MODE still gates). A present-but-empty
+ * allowlist (only separators) is malformed → fail closed (nobody allowed). Tokens
+ * are split on whitespace/commas; matching is exact against a stable creator id.
+ */
+export function evaluateCreatorAllowlist(
+  rawAllowlist: string | null | undefined,
+  creatorId: string
+): CreatorAllowlistDecision {
+  const raw = (rawAllowlist ?? "").trim();
+  if (raw === "") return { configured: false, malformed: false, allowed: true, reason: "no_allowlist" };
+  const tokens = raw.split(/[\s,]+/).map((t) => t.trim()).filter(Boolean);
+  if (tokens.length === 0) return { configured: true, malformed: true, allowed: false, reason: "malformed_allowlist" };
+  const allowed = tokens.includes(creatorId);
+  return { configured: true, malformed: false, allowed, reason: allowed ? "allowlisted" : "not_allowlisted" };
+}
+
+/** What the live seam should do for a given mode + allowlist decision. */
+export type LiveOpportunityAction = "skip_off" | "skip_not_allowed" | "shadow" | "persist";
+
+/**
+ * Single source of truth for the live seam's gating decision (used by the worker
+ * and proven by the deterministic check). Deterministic + fail-closed: "off" (and,
+ * via resolveLiveOpportunityMode, any unknown mode) skips with no side effect; a
+ * disallowed/malformed allowlist skips; "shadow" derives-only; "enabled" persists.
+ */
+export function decideLiveOpportunityAction(
+  mode: LiveOpportunityMode,
+  allowlist: CreatorAllowlistDecision
+): LiveOpportunityAction {
+  if (mode === "off") return "skip_off";
+  if (!allowlist.allowed) return "skip_not_allowed";
+  return mode === "shadow" ? "shadow" : "persist";
 }
