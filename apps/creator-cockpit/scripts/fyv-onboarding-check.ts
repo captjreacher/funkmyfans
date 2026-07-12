@@ -57,7 +57,7 @@ function isUuidLike(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
 }
 
-function createMemoryStore(seedCreators: MemoryCreator[]) {
+function createMemoryStore(seedCreators: MemoryCreator[], options: { raceMode?: boolean } = {}) {
   const creators = seedCreators.map((creator) => ({ ...creator, metadata: { ...creator.metadata } }));
   const events = new Map<string, { id: string; creator_id: string }>();
   let creatorCreations = 0;
@@ -69,32 +69,49 @@ function createMemoryStore(seedCreators: MemoryCreator[]) {
       const match = byId ?? creators.find((creator) => creator.username.toLowerCase() === reference.toLowerCase());
       return match ? { id: match.id, relationship_state: match.relationship_state } : null;
     },
-    persistIngestion({ creator, event, nextState }): FyvIngestionPersistResult {
+    persistIngestion({ creator, event }): FyvIngestionPersistResult {
       const record = creators.find((entry) => entry.id === creator.id)!;
 
-      // (1) Idempotency guard: already-persisted event => no re-transition.
-      const existing = events.get(event.providerEventId);
-      if (existing) {
-        return {
-          eventId: existing.id,
-          deduped: true,
-          relationshipState: record.relationship_state ?? nextState,
-          transitioned: false
-        };
+      // (1) Idempotency guard: an already-persisted event => no re-transition.
+      //     raceMode simulates the worst case: two concurrent requests that BOTH
+      //     passed this guard before either committed (guard skipped), so step 3's
+      //     uniqueness (modelling the DB unique index / 23505) must catch the dup.
+      if (!options.raceMode) {
+        const seen = events.get(event.providerEventId);
+        if (seen) {
+          const priorState = record.relationship_state ?? null;
+          return {
+            eventId: seen.id,
+            deduped: true,
+            relationshipState: priorState ?? nextRelationshipStateForPublishedPackage(priorState),
+            transitioned: false
+          };
+        }
       }
 
-      // (2) Attach pointer + advance state (one atomic mutation).
-      const transitioned = nextState !== (record.relationship_state ?? null);
+      // (2) Attach pointer + (only if it advances) state, computed from the LIVE
+      //     record — mirrors the Supabase store: never regress / over-advance, and
+      //     never touch relationship_state / changed_at when it does not advance.
+      const liveState = record.relationship_state ?? null;
+      const finalState = nextRelationshipStateForPublishedPackage(liveState);
+      const transitioned = finalState !== liveState;
       record.metadata = { ...record.metadata, fyv_package: buildFyvPackagePointer(event, { linkedAt: event.receivedAt }) };
-      record.relationship_state = nextState;
-      if (transitioned) record.relationship_state_changed_at = event.receivedAt;
+      if (transitioned) {
+        record.relationship_state = finalState;
+        record.relationship_state_changed_at = event.receivedAt;
+      }
 
-      // (3) Record the deduped canonical event.
+      // (3) Record the deduped canonical event (unique on providerEventId, like the
+      //     DB partial unique index). A duplicate is treated as deduped, no re-insert.
+      const seenAtInsert = events.get(event.providerEventId);
+      if (seenAtInsert) {
+        return { eventId: seenAtInsert.id, deduped: true, relationshipState: finalState, transitioned };
+      }
       eventSeq += 1;
       const eventId = `evt_${eventSeq}`;
       events.set(event.providerEventId, { id: eventId, creator_id: creator.id });
 
-      return { eventId, deduped: false, relationshipState: nextState, transitioned };
+      return { eventId, deduped: false, relationshipState: finalState, transitioned };
     }
   };
 
@@ -197,6 +214,20 @@ async function main() {
   const notObject = normalizeCreatorIntelligencePackagePublishedEvent("nope");
   check("non-object payload rejected 400", notObject.ok === false && notObject.statusCode === 400);
 
+  // ---- Malformed payloads (all fail safely, no throw) ------------------------
+  const nullPayload = normalizeCreatorIntelligencePackagePublishedEvent(null);
+  check("null payload rejected 400", nullPayload.ok === false && nullPayload.statusCode === 400);
+  const arrayPayload = normalizeCreatorIntelligencePackagePublishedEvent([]);
+  check("array payload rejected 400", arrayPayload.ok === false && arrayPayload.statusCode === 400);
+  const numberPayload = normalizeCreatorIntelligencePackagePublishedEvent(42);
+  check("number payload rejected 400", numberPayload.ok === false && numberPayload.statusCode === 400);
+  const emptyObject = normalizeCreatorIntelligencePackagePublishedEvent({});
+  check("empty object rejected 400 (missing event_type)", emptyObject.ok === false && emptyObject.statusCode === 400 && emptyObject.field === "event_type");
+  const objectRef = normalizeCreatorIntelligencePackagePublishedEvent({ ...validEvent, package_reference: { nested: true } });
+  check("non-string package_reference rejected 400", objectRef.ok === false && objectRef.statusCode === 400 && objectRef.field === "package_reference");
+  const missingState = normalizeCreatorIntelligencePackagePublishedEvent({ ...validEvent, package_state: undefined });
+  check("missing package_state rejected 422", missingState.ok === false && missingState.statusCode === 422);
+
   // ---- Orchestrator + store: happy path (MoonSiren exists) -------------------
   {
     const mem = createMemoryStore([seedMoonSiren(null)]);
@@ -218,6 +249,8 @@ async function main() {
     check("pointer source_product FYV", pointer?.source_product === "FYV");
     check("pointer package_state published", pointer?.package_state === "published");
     check("pointer source_event_id = providerEventId", pointer?.source_event_id === validEvent.package_reference);
+    check("pointer linked_at = receivedAt", pointer?.linked_at === "2026-07-12T00:00:00.000Z");
+    check("pointer has exactly the 6 contract keys", Boolean(pointer) && ["source_product", "package_reference", "assessment_reference", "package_state", "linked_at", "source_event_id"].every((k) => k in (pointer as Record<string, unknown>)));
     check("exactly one event persisted", mem.events.size === 1);
 
     // ---- Duplicate replay: idempotent, no double transition ------------------
@@ -231,6 +264,21 @@ async function main() {
     check("replay: still exactly one event", mem.events.size === 1);
     check("replay: creator still accepted", mem.getCreator(MOONSIREN_ID)!.relationship_state === "accepted");
     check("replay: changed_at unchanged (no re-transition)", mem.getCreator(MOONSIREN_ID)!.relationship_state_changed_at === "2026-07-12T00:00:00.000Z");
+  }
+
+  // ---- Concurrent duplicate delivery (worst case: idempotency guard bypassed)-
+  {
+    const mem = createMemoryStore([seedMoonSiren(null)], { raceMode: true });
+    const first = await ingestCreatorIntelligencePackagePublishedEvent(mem.store, validEvent, { receivedAt: "2026-07-12T00:00:00.000Z" });
+    const second = await ingestCreatorIntelligencePackagePublishedEvent(mem.store, validEvent, { receivedAt: "2026-07-12T00:00:05.000Z" });
+    check("concurrent: both ok", first.ok === true && second.ok === true);
+    check("concurrent: exactly one event persisted", mem.events.size === 1);
+    check("concurrent: creator ends accepted", mem.getCreator(MOONSIREN_ID)!.relationship_state === "accepted");
+    check("concurrent: one transition only (changed_at from winner)", mem.getCreator(MOONSIREN_ID)!.relationship_state_changed_at === "2026-07-12T00:00:00.000Z");
+    if (first.ok && second.ok) {
+      check("concurrent: exactly one non-deduped winner", (first.deduped ? 0 : 1) + (second.deduped ? 0 : 1) === 1);
+      check("concurrent: no double transition", (first.transitioned ? 1 : 0) + (second.transitioned ? 1 : 0) === 1);
+    }
   }
 
   // ---- Unknown creator: reject, never create ---------------------------------

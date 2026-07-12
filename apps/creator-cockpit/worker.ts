@@ -107,7 +107,9 @@ import { canonicalFromNsp4, isCanonicalInterpretationSignal } from "./src/lib/in
 import {
   ingestCreatorIntelligencePackagePublishedEvent,
   buildFyvPackagePointer,
+  nextRelationshipStateForPublishedPackage,
   FYV_EVENT_PROVIDER,
+  type CreatorRelationshipState,
   type CreatorIntelligenceEventStore,
   type CreatorRelationshipRecord
 } from "@funkmyfans/of-types";
@@ -11507,11 +11509,8 @@ function createSupabaseCreatorIntelligenceEventStore(supabase: SupabaseClient): 
       return (byUsername.data as CreatorRelationshipRecord | null) ?? null;
     },
 
-    async persistIngestion({ creator, event, nextState }) {
-      const priorState = creator.relationship_state ?? null;
-      const transitioned = nextState !== priorState;
-
-      // (1) Idempotency guard: already-persisted event => no re-transition.
+    async persistIngestion({ creator, event }) {
+      // (1) Idempotency guard: an already-persisted event => no re-transition.
       const existing = await supabase
         .from("of_events")
         .select("id")
@@ -11519,36 +11518,40 @@ function createSupabaseCreatorIntelligenceEventStore(supabase: SupabaseClient): 
         .eq("provider_event_id", event.providerEventId)
         .maybeSingle();
       if (existing.data?.id) {
+        const priorState = creator.relationship_state ?? null;
         return {
           eventId: existing.data.id as string,
           deduped: true,
-          relationshipState: priorState ?? nextState,
+          relationshipState: priorState ?? nextRelationshipStateForPublishedPackage(priorState),
           transitioned: false
         };
       }
 
-      // (2) Attach the operational pointer + advance state in ONE atomic UPDATE.
+      // (2) Attach the operational pointer and, ONLY if it actually advances, the
+      //     relationship state — in ONE atomic single-row UPDATE. The transition
+      //     target is computed from the LIVE row (not the stale resolve read), so
+      //     a concurrent operator transition can never be regressed/over-advanced;
+      //     when it does not advance we do NOT touch relationship_state or
+      //     relationship_state_changed_at at all.
       const current = await supabase
         .from("of_creators")
-        .select("metadata, relationship_state_changed_at")
+        .select("metadata, relationship_state")
         .eq("id", creator.id)
         .single();
       assertNoError(current.error);
-      const pointer = buildFyvPackagePointer(event, { linkedAt: event.receivedAt });
+      const liveState = (current.data?.relationship_state as CreatorRelationshipState | null) ?? null;
+      const finalState = nextRelationshipStateForPublishedPackage(liveState);
+      const transitioned = finalState !== liveState;
       const mergedMetadata = {
         ...((current.data?.metadata as Record<string, unknown> | null) ?? {}),
-        fyv_package: pointer
+        fyv_package: buildFyvPackagePointer(event, { linkedAt: event.receivedAt })
       };
-      const update = await supabase
-        .from("of_creators")
-        .update({
-          metadata: mergedMetadata,
-          relationship_state: nextState,
-          relationship_state_changed_at: transitioned
-            ? event.receivedAt
-            : ((current.data?.relationship_state_changed_at as string | null) ?? null)
-        })
-        .eq("id", creator.id);
+      const updatePayload: Record<string, unknown> = { metadata: mergedMetadata };
+      if (transitioned) {
+        updatePayload.relationship_state = finalState;
+        updatePayload.relationship_state_changed_at = event.receivedAt;
+      }
+      const update = await supabase.from("of_creators").update(updatePayload).eq("id", creator.id);
       assertNoError(update.error);
 
       // (3) Record the canonical deduped event (commit marker). Raw payload is
@@ -11588,12 +11591,12 @@ function createSupabaseCreatorIntelligenceEventStore(supabase: SupabaseClient): 
             .eq("provider_event_id", event.providerEventId)
             .single();
           assertNoError(raced.error);
-          return { eventId: raced.data!.id as string, deduped: true, relationshipState: nextState, transitioned };
+          return { eventId: raced.data!.id as string, deduped: true, relationshipState: finalState, transitioned };
         }
         assertNoError(inserted.error);
       }
 
-      return { eventId: inserted.data!.id as string, deduped: false, relationshipState: nextState, transitioned };
+      return { eventId: inserted.data!.id as string, deduped: false, relationshipState: finalState, transitioned };
     }
   };
 }

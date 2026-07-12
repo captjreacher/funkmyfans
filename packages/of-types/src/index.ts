@@ -4223,7 +4223,6 @@ export interface CreatorIntelligenceEventStore {
   persistIngestion(input: {
     creator: CreatorRelationshipRecord;
     event: NormalizedCreatorIntelligencePackagePublishedEvent;
-    nextState: CreatorRelationshipState;
   }): Promise<FyvIngestionPersistResult> | FyvIngestionPersistResult;
 }
 
@@ -4242,8 +4241,9 @@ export type CreatorIntelligenceIngestionResult =
  * Pure orchestrator for the FYV published-package boundary. Deterministic control
  * flow; ALL I/O is in the injected store. Order:
  *   validate -> resolve creator (reject-on-missing, NEVER create)
- *   -> compute next state (invited/null -> accepted only)
- *   -> persist atomically (attach pointer + advance state + deduped event).
+ *   -> persist atomically: the store computes the transition target from the
+ *      LIVE creator row (invited/null -> accepted only), attaches the pointer,
+ *      and writes the deduped event.
  * It NEVER activates automations (accepted -> active is not performed here).
  */
 export async function ingestCreatorIntelligencePackagePublishedEvent(
@@ -4268,8 +4268,9 @@ export async function ingestCreatorIntelligencePackagePublishedEvent(
     };
   }
 
-  const nextState = nextRelationshipStateForPublishedPackage(creator.relationship_state);
-  const persisted = await store.persistIngestion({ creator, event, nextState });
+  // The store computes the actual transition target from the LIVE creator row so
+  // a stale read here can never regress or over-advance state (concurrency-safe).
+  const persisted = await store.persistIngestion({ creator, event });
 
   return {
     ok: true,

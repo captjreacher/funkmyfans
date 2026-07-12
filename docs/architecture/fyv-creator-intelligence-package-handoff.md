@@ -103,10 +103,10 @@ Legal transitions (`canTransitionCreatorRelationship`): `invited->accepted|offbo
 No explicit multi-statement transaction is used (parity with the existing BetterFans/Instagram boundaries; PostgREST does not expose one here). Instead:
 
 1. If the event already exists (`of_events` unique `(provider, provider_event_id)` partial index) -> return **deduped**, no re-transition.
-2. Otherwise attach the pointer + advance the state in **one atomic single-row `UPDATE`** (idempotent: `invited/null -> accepted` only; re-applying is a no-op).
+2. Otherwise, in **one atomic single-row `UPDATE`**, attach the pointer and — only when it actually advances — the relationship state. The transition target is recomputed from the **live** `of_creators.relationship_state` (via `nextRelationshipStateForPublishedPackage`), not the stale resolve-time read, so a concurrent operator transition can never be regressed or over-advanced, and `relationship_state_changed_at` is never bumped without a real transition. `invited/null -> accepted` only.
 3. Then insert the canonical event as the dedupe/commit marker (a concurrent duplicate -> `23505` -> treated as deduped).
 
-Because state is applied **before** the event row exists and the advance is idempotent, a crash between (2) and (3) self-heals on replay without a double transition. A single-transaction Postgres function is a possible future hardening.
+Because state is applied **before** the event row exists and the advance is an idempotent absolute set computed from the live row, a crash between (2) and (3) self-heals on replay without a double transition, and concurrent duplicate delivery yields exactly one event and one transition. A single-transaction Postgres function remains a possible future hardening.
 
 ## Creator Cockpit
 
