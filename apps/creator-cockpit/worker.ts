@@ -11205,8 +11205,12 @@ function createSupabaseStandaloneOpportunityStore(supabase: SupabaseClient): Sta
         return { opportunity: updateRes.data as ConversationOpportunitySummary, deduped: true };
       }
       assertNoError(insertRes.error);
-      // Unreachable (assertNoError throws), but satisfies the type checker.
-      return { opportunity: insertRes.data as ConversationOpportunitySummary, deduped: false };
+      // Unreachable: assertNoError throws on any non-null, non-23505 error. In this
+      // branch supabase-js has narrowed insertRes to its error variant (data: null),
+      // so `insertRes.data as ConversationOpportunitySummary` was a TS2352 null->object
+      // cast. Throw instead of casting null — satisfies the return type with no bogus
+      // cast and no runtime change (this statement cannot actually be reached).
+      throw new Error("standalone opportunity upsert reached an unreachable post-assert state");
     }
   };
 }
