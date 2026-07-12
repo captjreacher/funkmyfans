@@ -1,0 +1,8 @@
+{
+  "event_type": "creator.intelligence_package.published",
+  "source_product": "FYV",
+  "creator_reference": "moonsiren",
+  "package_reference": "fyv/moonsiren/intelligence-package/2026-07-05",
+  "source_assessment_reference": "fyv/moonsiren/assessment/2026-07-05",
+  "package_state": "published"
+}

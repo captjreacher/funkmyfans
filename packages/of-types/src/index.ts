@@ -1,5 +1,12 @@
 export type CreatorStatus = "pending" | "connected" | "attention" | "paused" | "disconnected";
 export type CreatorOnboardingStatus = "draft" | "pending" | "connected" | "syncing" | "ready" | "needs_attention";
+/**
+ * FMF creator RELATIONSHIP lifecycle (FYV -> FMF handoff). Deliberately distinct
+ * from CreatorStatus (platform connection health) and CreatorOnboardingStatus
+ * (setup/sync): this is the relationship arc a creator moves through with FMF.
+ *   invited -> accepted -> active -> paused -> offboarded
+ */
+export type CreatorRelationshipState = "invited" | "accepted" | "active" | "paused" | "offboarded";
 // COMPOSE-3 adds "instagram" so an Instagram-originated creator/account can be
 // represented as a platform provider (mirrored by the of_creators
 // platform_provider CHECK constraint migration). Additive: existing providers
@@ -188,6 +195,14 @@ export interface OfCreator {
   connected_at: string;
   last_sync_at: string | null;
   active: boolean;
+  /**
+   * FMF creator RELATIONSHIP lifecycle (FYV handoff). Additive + nullable: legacy
+   * creators have no lifecycle until one is set. Advanced by the FYV published
+   * package event (invited -> accepted) and by explicit FMF operational decisions
+   * (e.g. accepted -> active). See canTransitionCreatorRelationship.
+   */
+  relationship_state?: CreatorRelationshipState | null;
+  relationship_state_changed_at?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -3908,4 +3923,360 @@ export function decideLiveOpportunityAction(
   if (mode === "off") return "skip_off";
   if (!allowlist.allowed) return "skip_not_allowed";
   return mode === "shadow" ? "shadow" : "persist";
+}
+
+/* ==========================================================================
+ * FYV -> FMF Creator Intelligence Package handoff
+ *
+ * FMF consumes a PUBLISHED FYV "creator.intelligence_package.published" event as
+ * an external source artifact and uses it to advance the creator RELATIONSHIP
+ * lifecycle. FYV owns assessment/interpretation/package generation; FMF owns the
+ * creator relationship. This is the pure, deterministic, dependency-free core
+ * (no I/O): lifecycle transitions + capabilities, event validation, the
+ * operational package pointer, and a store-port orchestrator.
+ *
+ * Invariants enforced here:
+ *  - Only a PUBLISHED package is accepted on this path (identified/draft/
+ *    superseded are rejected).
+ *  - A creator is NEVER created from an event (resolve-first; the route rejects
+ *    an unknown creator). No identity is fabricated.
+ *  - The event may only advance invited -> accepted. Activation
+ *    (accepted -> active) is an explicit FMF operational decision and is NEVER
+ *    performed by the event path.
+ *  - FMF stores a REFERENCE (of_creators.metadata.fyv_package), never a copy of
+ *    FYV intelligence content. Full received-package provenance stays in
+ *    creator_intelligence_snapshots.
+ * ========================================================================== */
+
+export const CREATOR_RELATIONSHIP_STATES = [
+  "invited",
+  "accepted",
+  "active",
+  "paused",
+  "offboarded"
+] as const;
+
+export function isCreatorRelationshipState(value: unknown): value is CreatorRelationshipState {
+  return typeof value === "string" && (CREATOR_RELATIONSHIP_STATES as readonly string[]).includes(value);
+}
+
+/**
+ * Legal creator relationship transitions. Activation (accepted -> active) is
+ * legal here (an explicit FMF operational decision) but is NEVER performed by the
+ * FYV event path — see nextRelationshipStateForPublishedPackage. offboarded is
+ * terminal. Same-state "transitions" are not transitions (return false).
+ */
+const CREATOR_RELATIONSHIP_TRANSITIONS: Record<CreatorRelationshipState, readonly CreatorRelationshipState[]> = {
+  invited: ["accepted", "offboarded"],
+  accepted: ["active", "offboarded"],
+  active: ["paused", "offboarded"],
+  paused: ["active", "offboarded"],
+  offboarded: []
+};
+
+export function canTransitionCreatorRelationship(
+  from: CreatorRelationshipState,
+  to: CreatorRelationshipState
+): boolean {
+  if (from === to) return false;
+  return CREATOR_RELATIONSHIP_TRANSITIONS[from]?.includes(to) ?? false;
+}
+
+/** Operational capabilities gated by the creator relationship state. */
+export interface CreatorRelationshipCapabilities {
+  /** Workspace / onboarding may begin. */
+  onboardingAllowed: boolean;
+  /** Automations + monetisation workflows may run. */
+  automationExecutionEnabled: boolean;
+  /** Execution is temporarily suspended (paused); history/relationship preserved. */
+  executionSuspended: boolean;
+  /** Execution is blocked (offboarded); relationship archived, records preserved. */
+  executionBlocked: boolean;
+}
+
+/**
+ * Deterministic capability gate. Enforces:
+ *   invited    -> no operational workflows
+ *   accepted   -> onboarding allowed
+ *   active     -> workflows enabled
+ *   paused     -> suspend execution
+ *   offboarded -> block execution
+ */
+export function relationshipCapabilities(state: CreatorRelationshipState): CreatorRelationshipCapabilities {
+  switch (state) {
+    case "invited":
+      return { onboardingAllowed: false, automationExecutionEnabled: false, executionSuspended: false, executionBlocked: false };
+    case "accepted":
+      return { onboardingAllowed: true, automationExecutionEnabled: false, executionSuspended: false, executionBlocked: false };
+    case "active":
+      return { onboardingAllowed: true, automationExecutionEnabled: true, executionSuspended: false, executionBlocked: false };
+    case "paused":
+      return { onboardingAllowed: true, automationExecutionEnabled: false, executionSuspended: true, executionBlocked: false };
+    case "offboarded":
+      return { onboardingAllowed: false, automationExecutionEnabled: false, executionSuspended: false, executionBlocked: true };
+    default: {
+      const _exhaustive: never = state;
+      return _exhaustive;
+    }
+  }
+}
+
+/**
+ * The ONLY relationship advance the FYV published event may perform. It moves a
+ * creator with no lifecycle yet (null) or an `invited` creator to `accepted`
+ * (relationship accepted -> onboarding may begin). It NEVER performs
+ * accepted -> active (activation is an explicit FMF decision) and never regresses
+ * an already-advanced state. Idempotent: repeated published events keep the
+ * creator at its current (>= accepted) state.
+ */
+export function nextRelationshipStateForPublishedPackage(
+  current: CreatorRelationshipState | null | undefined
+): CreatorRelationshipState {
+  if (current == null || current === "invited") return "accepted";
+  return current;
+}
+
+export const CREATOR_INTELLIGENCE_PACKAGE_PUBLISHED_EVENT_TYPE = "creator.intelligence_package.published";
+export const FYV_SOURCE_PRODUCT = "FYV";
+/** of_events.provider value for FYV-originated events (dedupe scope). */
+export const FYV_EVENT_PROVIDER = "fyv";
+
+/** The raw FYV published-package event contract, as received on the boundary. */
+export interface CreatorIntelligencePackagePublishedEvent {
+  event_type: typeof CREATOR_INTELLIGENCE_PACKAGE_PUBLISHED_EVENT_TYPE;
+  source_product: string;
+  creator_reference: string;
+  package_reference: string;
+  source_assessment_reference?: string | null;
+  package_state: string;
+  /** Optional producer-supplied event id; defaults to package_reference for dedupe. */
+  event_id?: string | null;
+}
+
+/** A validated + normalized FYV published-package event, ready to persist. */
+export interface NormalizedCreatorIntelligencePackagePublishedEvent {
+  provider: typeof FYV_EVENT_PROVIDER;
+  eventType: typeof CREATOR_INTELLIGENCE_PACKAGE_PUBLISHED_EVENT_TYPE;
+  sourceProduct: string;
+  creatorReference: string;
+  packageReference: string;
+  assessmentReference: string | null;
+  packageState: "published";
+  /** Dedupe key for of_events (provider, provider_event_id). */
+  providerEventId: string;
+  receivedAt: string;
+  /** Raw source payload preserved verbatim for audit. */
+  raw: Record<string, unknown>;
+}
+
+export type CreatorIntelligenceEventOutcome =
+  | { ok: true; event: NormalizedCreatorIntelligencePackagePublishedEvent }
+  | { ok: false; statusCode: number; error: string; field?: string };
+
+/**
+ * Deterministically validate + normalize a FYV published-package event. Pure:
+ * SHAPE + BOUNDARY-STATE validation only. Creator EXISTENCE is a data-layer
+ * concern (the route resolves + rejects). Required guards:
+ *  - event_type == creator.intelligence_package.published
+ *  - source_product == FYV
+ *  - creator_reference present
+ *  - package_reference present
+ *  - package_state == "published" (identified/draft/superseded rejected -> 422)
+ */
+export function normalizeCreatorIntelligencePackagePublishedEvent(
+  raw: unknown,
+  options: { receivedAt?: string } = {}
+): CreatorIntelligenceEventOutcome {
+  if (!isComposeRecord(raw)) {
+    return { ok: false, statusCode: 400, error: "FYV event payload must be a JSON object" };
+  }
+  const receivedAt = composeString(options.receivedAt) ?? new Date().toISOString();
+
+  const eventType = pickString(raw, ["event_type", "eventType", "type"]);
+  if (eventType !== CREATOR_INTELLIGENCE_PACKAGE_PUBLISHED_EVENT_TYPE) {
+    return {
+      ok: false,
+      statusCode: 400,
+      error: `Unsupported event_type; expected ${CREATOR_INTELLIGENCE_PACKAGE_PUBLISHED_EVENT_TYPE}`,
+      field: "event_type"
+    };
+  }
+
+  const sourceProduct = pickString(raw, ["source_product", "sourceProduct"]);
+  if (!sourceProduct || sourceProduct.toUpperCase() !== FYV_SOURCE_PRODUCT) {
+    return { ok: false, statusCode: 400, error: "source_product must be FYV", field: "source_product" };
+  }
+
+  const creatorReference = pickString(raw, ["creator_reference", "creatorReference", "creator_id", "creatorId"]);
+  if (!creatorReference) {
+    return { ok: false, statusCode: 400, error: "creator_reference is required", field: "creator_reference" };
+  }
+
+  const packageReference = pickString(raw, [
+    "package_reference",
+    "packageReference",
+    "source_package_reference",
+    "sourcePackageReference"
+  ]);
+  if (!packageReference) {
+    return { ok: false, statusCode: 400, error: "package_reference is required", field: "package_reference" };
+  }
+
+  const packageState = pickString(raw, ["package_state", "packageState"]);
+  if (packageState !== "published") {
+    // Only a PUBLISHED package creates an active onboarding path on this event
+    // path. identified / draft / superseded are rejected (no state change).
+    return {
+      ok: false,
+      statusCode: 422,
+      error: `package_state must be "published"; received ${packageState ?? "none"}`,
+      field: "package_state"
+    };
+  }
+
+  const assessmentReference = pickString(raw, [
+    "source_assessment_reference",
+    "sourceAssessmentReference",
+    "assessment_reference",
+    "assessmentReference"
+  ]);
+  const providerEventId =
+    pickString(raw, ["event_id", "eventId", "provider_event_id", "providerEventId"]) ?? packageReference;
+
+  return {
+    ok: true,
+    event: {
+      provider: FYV_EVENT_PROVIDER,
+      eventType: CREATOR_INTELLIGENCE_PACKAGE_PUBLISHED_EVENT_TYPE,
+      sourceProduct: FYV_SOURCE_PRODUCT,
+      creatorReference,
+      packageReference,
+      assessmentReference,
+      packageState: "published",
+      providerEventId,
+      receivedAt,
+      raw
+    }
+  };
+}
+
+/**
+ * The OPERATIONAL pointer FMF stores at of_creators.metadata.fyv_package. It is a
+ * REFERENCE, not a copy of FYV intelligence content: full received-package
+ * provenance/history lives in creator_intelligence_snapshots. `source_event_id`
+ * is the source event's dedupe identifier (the producer event id, else the
+ * package_reference); the persisted FMF event row is discoverable via of_events
+ * (provider = 'fyv', provider_event_id = source_event_id).
+ */
+export interface FyvPackagePointer {
+  source_product: string;
+  package_reference: string;
+  assessment_reference: string | null;
+  package_state: "published";
+  linked_at: string;
+  source_event_id: string | null;
+}
+
+export function buildFyvPackagePointer(
+  event: NormalizedCreatorIntelligencePackagePublishedEvent,
+  options: { sourceEventId?: string | null; linkedAt?: string } = {}
+): FyvPackagePointer {
+  return {
+    source_product: event.sourceProduct,
+    package_reference: event.packageReference,
+    assessment_reference: event.assessmentReference,
+    package_state: "published",
+    linked_at: composeString(options.linkedAt) ?? event.receivedAt,
+    source_event_id: options.sourceEventId ?? event.providerEventId
+  };
+}
+
+/** A minimal canonical view of an EXISTING creator used as a resolution candidate. */
+export interface CreatorRelationshipRecord {
+  id: string;
+  relationship_state: CreatorRelationshipState | null;
+}
+
+/** The persisted result of one atomic FYV ingestion write. */
+export interface FyvIngestionPersistResult {
+  eventId: string;
+  deduped: boolean;
+  relationshipState: CreatorRelationshipState;
+  transitioned: boolean;
+}
+
+/**
+ * Store port for FYV published-package ingestion. The orchestrator stays pure +
+ * deterministic; each implementation owns its own I/O. `persistIngestion` is the
+ * ATOMIC unit (attach the operational pointer + advance the relationship state +
+ * upsert the deduped event). The Supabase implementation performs a single-row
+ * creator UPDATE + an idempotent event write keyed on the existing
+ * (provider, provider_event_id) unique index; the in-memory implementation
+ * performs one synchronous mutation.
+ */
+export interface CreatorIntelligenceEventStore {
+  /** Resolve an EXISTING creator by reference. NEVER creates. Returns null when unknown. */
+  resolveCreatorByReference(
+    reference: string
+  ): Promise<CreatorRelationshipRecord | null> | CreatorRelationshipRecord | null;
+  /** Atomically attach the package pointer, advance the relationship state, and upsert the deduped event. */
+  persistIngestion(input: {
+    creator: CreatorRelationshipRecord;
+    event: NormalizedCreatorIntelligencePackagePublishedEvent;
+    nextState: CreatorRelationshipState;
+  }): Promise<FyvIngestionPersistResult> | FyvIngestionPersistResult;
+}
+
+export type CreatorIntelligenceIngestionResult =
+  | {
+      ok: true;
+      deduped: boolean;
+      creatorId: string;
+      eventId: string;
+      relationshipState: CreatorRelationshipState;
+      transitioned: boolean;
+    }
+  | { ok: false; statusCode: number; error: string; field?: string };
+
+/**
+ * Pure orchestrator for the FYV published-package boundary. Deterministic control
+ * flow; ALL I/O is in the injected store. Order:
+ *   validate -> resolve creator (reject-on-missing, NEVER create)
+ *   -> compute next state (invited/null -> accepted only)
+ *   -> persist atomically (attach pointer + advance state + deduped event).
+ * It NEVER activates automations (accepted -> active is not performed here).
+ */
+export async function ingestCreatorIntelligencePackagePublishedEvent(
+  store: CreatorIntelligenceEventStore,
+  rawPayload: unknown,
+  options: { receivedAt?: string } = {}
+): Promise<CreatorIntelligenceIngestionResult> {
+  const outcome = normalizeCreatorIntelligencePackagePublishedEvent(rawPayload, options);
+  if (!outcome.ok) {
+    return { ok: false, statusCode: outcome.statusCode, error: outcome.error, field: outcome.field };
+  }
+  const { event } = outcome;
+
+  const creator = await store.resolveCreatorByReference(event.creatorReference);
+  if (!creator) {
+    // Unknown creator: reject. No identity fabrication, no duplicate creator.
+    return {
+      ok: false,
+      statusCode: 404,
+      error: `No FMF creator found for reference ${event.creatorReference}`,
+      field: "creator_reference"
+    };
+  }
+
+  const nextState = nextRelationshipStateForPublishedPackage(creator.relationship_state);
+  const persisted = await store.persistIngestion({ creator, event, nextState });
+
+  return {
+    ok: true,
+    deduped: persisted.deduped,
+    creatorId: creator.id,
+    eventId: persisted.eventId,
+    relationshipState: persisted.relationshipState,
+    transitioned: persisted.transitioned
+  };
 }
