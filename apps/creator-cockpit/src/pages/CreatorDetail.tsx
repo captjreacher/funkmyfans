@@ -213,10 +213,78 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
   );
 }
 
+type FyvPackagePointerView = {
+  source_product?: string;
+  package_reference?: string;
+  assessment_reference?: string | null;
+  package_state?: string;
+  linked_at?: string;
+};
+
+function StatusPill({
+  label,
+  done,
+  doneLabel = "✓",
+  pendingLabel = "pending"
+}: {
+  label: string;
+  done: boolean;
+  doneLabel?: string;
+  pendingLabel?: string;
+}) {
+  return (
+    <div className="flex items-center justify-between rounded-md border border-blue-500/12 bg-[#0D1B2A]/55 px-3 py-2 text-sm">
+      <span className="text-blue-100/68">{label}</span>
+      <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${done ? "bg-emerald-500/14 text-emerald-200" : "bg-blue-400/12 text-blue-100"}`}>
+        {done ? doneLabel : pendingLabel}
+      </span>
+    </div>
+  );
+}
+
+// FYV -> FMF onboarding status. Derived entirely from the EXISTING creator record
+// (relationship_state + metadata.fyv_package pointer + onboarding_status). Read-only
+// visibility only: it does not rebuild cockpit architecture and adds no new API call.
+function FyvOnboardingStatus({ creator }: { creator: CreatorDetailData["creator"] }) {
+  const fyvPackage = (creator.metadata as Record<string, unknown> | null | undefined)?.["fyv_package"] as
+    | FyvPackagePointerView
+    | undefined;
+  const relationshipState = creator.relationship_state ?? null;
+  const packageLinked = Boolean(fyvPackage?.package_reference);
+  const assessmentComplete = Boolean(fyvPackage?.assessment_reference) || packageLinked;
+  // Services readiness reuses the existing onboarding_status: "ready" means the
+  // operational services are provisioned; anything else is still pending.
+  const servicesReady = creator.onboarding_status === "ready";
+
+  return (
+    <div className="premium-card rounded-lg p-4">
+      <SectionTitle icon={Sparkles} title="FYV onboarding" />
+      <div className="mt-4 grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+        <StatusPill label="Assessment complete" done={assessmentComplete} />
+        <StatusPill label="FYV package linked" done={packageLinked} />
+        <ContextRow label="Onboarding" value={relationshipState ?? "not started"} />
+        <StatusPill label="Services" done={servicesReady} doneLabel="ready" />
+      </div>
+      {fyvPackage?.package_reference ? (
+        <div className="mt-3 text-xs text-blue-100/56">
+          Linked package <span className="text-blue-100/80">{fyvPackage.package_reference}</span>
+          {fyvPackage.source_product ? ` · source ${fyvPackage.source_product}` : ""}
+        </div>
+      ) : (
+        <div className="mt-3 text-xs text-blue-100/56">
+          No FYV package linked yet. A published FYV package event advances onboarding to accepted.
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ProfileTab({ data }: { data: CreatorDetailData }) {
   const latest = data.snapshots[0];
   return (
-    <section className="grid gap-4 xl:grid-cols-[0.8fr_1.2fr]">
+    <div className="space-y-4">
+      <FyvOnboardingStatus creator={data.creator} />
+      <section className="grid gap-4 xl:grid-cols-[0.8fr_1.2fr]">
       <div className="premium-card rounded-lg p-4">
         <SectionTitle icon={UserRound} title="Profile" />
         <div className="mt-4 space-y-2">
@@ -235,7 +303,8 @@ function ProfileTab({ data }: { data: CreatorDetailData }) {
           <MiniStat label="Priority chats" value={String(latest?.priority_chat_count ?? data.chats.filter((chat) => chat.priority).length)} />
         </div>
       </div>
-    </section>
+      </section>
+    </div>
   );
 }
 

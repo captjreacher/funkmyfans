@@ -103,6 +103,16 @@ import type {
 import { mapConversationInstanceToConversation, mapConversationRuntimeStatusToLifecycleState, mapTaskToQueue, mapTaskToQueueItem, summarizeEventType, normalizeInstagramEvent, INSTAGRAM_PROVIDER, buildCapabilityOutcome, mapOutcomeToOpportunitySignal, persistStandaloneOpportunity, runLiveOpportunityPersistence, deriveLiveOpportunity, resolveLiveOpportunityMode, evaluateCreatorAllowlist, decideLiveOpportunityAction } from "@funkmyfans/of-types";
 // COMPOSE-6: producer→canonical interpretation mapping (COMPOSE-2, pure, type-only deps).
 import { canonicalFromNsp4, isCanonicalInterpretationSignal } from "./src/lib/interpretationSignals";
+// FYV -> FMF creator intelligence package handoff (pure core in of-types).
+import {
+  ingestCreatorIntelligencePackagePublishedEvent,
+  buildFyvPackagePointer,
+  nextRelationshipStateForPublishedPackage,
+  FYV_EVENT_PROVIDER,
+  type CreatorRelationshipState,
+  type CreatorIntelligenceEventStore,
+  type CreatorRelationshipRecord
+} from "@funkmyfans/of-types";
 import { createClient } from "@supabase/supabase-js";
 import moonsirenIntelligenceFixture from "./fixtures/moonsiren-creator-intelligence-package-v1.json";
 
@@ -133,6 +143,10 @@ interface Env {
   // COMPOSE-7: optional comma/whitespace-separated allowlist of STABLE creator ids.
   // Unset → all creators (mode still gates). Present-but-empty → fail closed (nobody).
   COMPOSE6_LIVE_OPPORTUNITY_CREATOR_ALLOWLIST?: string;
+  // FYV -> FMF creator intelligence package ingestion boundary
+  // (POST /api/events/fyv). Optional shared secret; when unset the endpoint is
+  // open (parity with the BetterFans / Instagram boundaries).
+  CREATOR_INTELLIGENCE_EVENTS_SHARED_SECRET?: string;
 }
 
 const jsonHeaders = {
@@ -1619,6 +1633,24 @@ function boundedPriority(value: unknown, label: string) {
     const rawPayload = await request.json().catch(() => null);
     const result = await ingestInstagramEvent(supabase, rawPayload);
     return Response.json(result, { status: result.ok ? 200 : (result.statusCode ?? 500), headers: jsonHeaders });
+  }
+
+  // FYV -> FMF creator intelligence package boundary. Consumes a PUBLISHED
+  // "creator.intelligence_package.published" event and advances the creator
+  // RELATIONSHIP lifecycle (invited -> accepted). Deterministic validation +
+  // control flow live in of-types (ingestCreatorIntelligencePackagePublishedEvent);
+  // this route is persist-only + deduped. It NEVER runs automations and NEVER
+  // activates (accepted -> active). Unknown creators are rejected (404) — no
+  // identity is ever fabricated.
+  if (request.method === "POST" && url.pathname === "/api/events/fyv") {
+    if (!isAuthorizedCreatorIntelligenceEventIngest(request, env)) {
+      return Response.json({ ok: false, error: "Unauthorized FYV event ingest request" }, { status: 401, headers: jsonHeaders });
+    }
+
+    const rawPayload = await request.json().catch(() => null);
+    const store = createSupabaseCreatorIntelligenceEventStore(supabase);
+    const result = await ingestCreatorIntelligencePackagePublishedEvent(store, rawPayload);
+    return Response.json(result, { status: result.ok ? 200 : result.statusCode, headers: jsonHeaders });
   }
 
   // COMPOSE-5: standalone opportunity persistence boundary. Given deterministic
@@ -11173,8 +11205,12 @@ function createSupabaseStandaloneOpportunityStore(supabase: SupabaseClient): Sta
         return { opportunity: updateRes.data as ConversationOpportunitySummary, deduped: true };
       }
       assertNoError(insertRes.error);
-      // Unreachable (assertNoError throws), but satisfies the type checker.
-      return { opportunity: insertRes.data as ConversationOpportunitySummary, deduped: false };
+      // Unreachable: assertNoError throws on any non-null, non-23505 error. In this
+      // branch supabase-js has narrowed insertRes to its error variant (data: null),
+      // so `insertRes.data as ConversationOpportunitySummary` was a TS2352 null->object
+      // cast. Throw instead of casting null — satisfies the return type with no bogus
+      // cast and no runtime change (this statement cannot actually be reached).
+      throw new Error("standalone opportunity upsert reached an unreachable post-assert state");
     }
   };
 }
@@ -11433,6 +11469,140 @@ function isAuthorizedEventIngest(request: Request, env: Env) {
 function isAuthorizedInstagramEventIngest(request: Request, env: Env) {
   if (!env.INSTAGRAM_EVENTS_SHARED_SECRET) return true;
   return request.headers.get("x-instagram-event-secret") === env.INSTAGRAM_EVENTS_SHARED_SECRET;
+}
+
+function isAuthorizedCreatorIntelligenceEventIngest(request: Request, env: Env) {
+  if (!env.CREATOR_INTELLIGENCE_EVENTS_SHARED_SECRET) return true;
+  return request.headers.get("x-fyv-event-secret") === env.CREATOR_INTELLIGENCE_EVENTS_SHARED_SECRET;
+}
+
+/**
+ * FYV -> FMF creator intelligence package ingestion store — the ONLY I/O in the
+ * FYV published-package boundary. Resolve-first (NEVER creates a creator); touches
+ * only of_creators (metadata.fyv_package pointer + relationship_state advance) and
+ * of_events (deduped canonical event). It calls no automation/queue path.
+ *
+ * Write safety + idempotency (no explicit multi-statement transaction, matching
+ * the existing ingestion boundaries):
+ *   1) if the event already exists ((provider, provider_event_id) unique index)
+ *      return deduped WITHOUT re-transitioning;
+ *   2) otherwise attach the pointer + advance state in ONE atomic single-row
+ *      UPDATE (idempotent: invited/null -> accepted only; re-applying is a no-op);
+ *   3) then insert the canonical event as the dedupe/commit marker (a concurrent
+ *      duplicate -> 23505 -> treated as deduped).
+ * State is applied before the event row exists and the advance is idempotent, so
+ * a crash between (2) and (3) self-heals on replay without a double transition.
+ */
+function createSupabaseCreatorIntelligenceEventStore(supabase: SupabaseClient): CreatorIntelligenceEventStore {
+  return {
+    async resolveCreatorByReference(reference: string) {
+      if (isUuid(reference)) {
+        const byId = await supabase
+          .from("of_creators")
+          .select("id, relationship_state")
+          .eq("id", reference)
+          .maybeSingle();
+        if (byId.data) return byId.data as CreatorRelationshipRecord;
+      }
+      // Case-insensitive username match. NEVER creates a creator.
+      const byUsername = await supabase
+        .from("of_creators")
+        .select("id, relationship_state")
+        .ilike("username", reference)
+        .maybeSingle();
+      return (byUsername.data as CreatorRelationshipRecord | null) ?? null;
+    },
+
+    async persistIngestion({ creator, event }) {
+      // (1) Idempotency guard: an already-persisted event => no re-transition.
+      const existing = await supabase
+        .from("of_events")
+        .select("id")
+        .eq("provider", FYV_EVENT_PROVIDER)
+        .eq("provider_event_id", event.providerEventId)
+        .maybeSingle();
+      if (existing.data?.id) {
+        const priorState = creator.relationship_state ?? null;
+        return {
+          eventId: existing.data.id as string,
+          deduped: true,
+          relationshipState: priorState ?? nextRelationshipStateForPublishedPackage(priorState),
+          transitioned: false
+        };
+      }
+
+      // (2) Attach the operational pointer and, ONLY if it actually advances, the
+      //     relationship state — in ONE atomic single-row UPDATE. The transition
+      //     target is computed from the LIVE row (not the stale resolve read), so
+      //     a concurrent operator transition can never be regressed/over-advanced;
+      //     when it does not advance we do NOT touch relationship_state or
+      //     relationship_state_changed_at at all.
+      const current = await supabase
+        .from("of_creators")
+        .select("metadata, relationship_state")
+        .eq("id", creator.id)
+        .single();
+      assertNoError(current.error);
+      const liveState = (current.data?.relationship_state as CreatorRelationshipState | null) ?? null;
+      const finalState = nextRelationshipStateForPublishedPackage(liveState);
+      const transitioned = finalState !== liveState;
+      const mergedMetadata = {
+        ...((current.data?.metadata as Record<string, unknown> | null) ?? {}),
+        fyv_package: buildFyvPackagePointer(event, { linkedAt: event.receivedAt })
+      };
+      const updatePayload: Record<string, unknown> = { metadata: mergedMetadata };
+      if (transitioned) {
+        updatePayload.relationship_state = finalState;
+        updatePayload.relationship_state_changed_at = event.receivedAt;
+      }
+      const update = await supabase.from("of_creators").update(updatePayload).eq("id", creator.id);
+      assertNoError(update.error);
+
+      // (3) Record the canonical deduped event (commit marker). Raw payload is
+      //     preserved verbatim for audit. processing_status 'processed': the
+      //     boundary's whole job (attach + advance) completes synchronously; no
+      //     automation/interpretation is deferred and none is run.
+      const inserted = await supabase
+        .from("of_events")
+        .insert({
+          creator_id: creator.id,
+          provider: FYV_EVENT_PROVIDER,
+          provider_event_id: event.providerEventId,
+          event_type: event.eventType,
+          payload: {
+            source_product: event.sourceProduct,
+            package_reference: event.packageReference,
+            source_assessment_reference: event.assessmentReference,
+            package_state: event.packageState,
+            raw: event.raw
+          },
+          received_at: event.receivedAt,
+          processed_at: event.receivedAt,
+          processing_status: "processed",
+          processing_error: null
+        })
+        .select("id")
+        .single();
+
+      if (inserted.error) {
+        // Concurrent duplicate: another request won the unique race. State was
+        // applied idempotently above, so treat this as deduped.
+        if (inserted.error.code === "23505") {
+          const raced = await supabase
+            .from("of_events")
+            .select("id")
+            .eq("provider", FYV_EVENT_PROVIDER)
+            .eq("provider_event_id", event.providerEventId)
+            .single();
+          assertNoError(raced.error);
+          return { eventId: raced.data!.id as string, deduped: true, relationshipState: finalState, transitioned };
+        }
+        assertNoError(inserted.error);
+      }
+
+      return { eventId: inserted.data!.id as string, deduped: false, relationshipState: finalState, transitioned };
+    }
+  };
 }
 
 function isAuthorizedOpportunityPersist(request: Request, env: Env) {
