@@ -40,6 +40,7 @@ import type {
   FmfCreatorFyvRelationship,
   ReadinessSummary,
   CreatorReadinessEvent,
+  CreatorActionExecution,
   OfRelationshipTimelineItem,
   OfSimulatedSubscriber,
   OfSubscriber,
@@ -278,6 +279,14 @@ export async function fetchCreatorReadinessHistory(
 ): Promise<{ ok: boolean; events?: CreatorReadinessEvent[]; error?: string }> {
   assertUuid(creatorId, "creator");
   return apiJson(`/creators/${creatorId}/readiness/history`);
+}
+
+// FMF-4: Operational Action Dispatcher — append-only execution ledger (read-only).
+export async function fetchCreatorActionHistory(
+  creatorId: string
+): Promise<{ ok: boolean; executions?: CreatorActionExecution[]; error?: string }> {
+  assertUuid(creatorId, "creator");
+  return apiJson(`/creators/${creatorId}/actions/history`);
 }
 
 export type QueueItemAction = "approve_ai" | "respond" | "assign" | "ignore" | "pause";

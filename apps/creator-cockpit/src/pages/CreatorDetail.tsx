@@ -1,10 +1,11 @@
 import { Bot, ClipboardList, Gauge, Link2, PlaySquare, RefreshCw, Send, Sparkles, UserRound, Users, Zap } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import type { CreatorPlaybookProposal, CreatorReadinessEvent, FmfCreatorFyvRelationship, ReadinessSummary, SyncType } from "@funkmyfans/of-types";
+import type { CreatorActionExecution, CreatorPlaybookProposal, CreatorReadinessEvent, FmfCreatorFyvRelationship, ReadinessSummary, SyncType } from "@funkmyfans/of-types";
 import {
   createBuilderDraftFromProposal,
   createPlaybookProposal,
+  fetchCreatorActionHistory,
   fetchCreatorDetail,
   fetchCreatorFyvRelationship,
   fetchCreatorIntelligence,
@@ -53,6 +54,8 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
   const [readiness, setReadiness] = useState<ReadinessSummary | null>(null);
   // FMF-3: Recent readiness activity (append-only history).
   const [readinessHistory, setReadinessHistory] = useState<CreatorReadinessEvent[]>([]);
+  // FMF-4: Operational action executions (append-only ledger).
+  const [actionHistory, setActionHistory] = useState<CreatorActionExecution[]>([]);
 
   useEffect(() => {
     void refresh();
@@ -63,7 +66,7 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
 
   async function refresh() {
     try {
-      const [detail, intelligenceResult, proposalsResult, queues, scripts, fyv, readinessResult, readinessHist] = await Promise.all([
+      const [detail, intelligenceResult, proposalsResult, queues, scripts, fyv, readinessResult, readinessHist, actionsHist] = await Promise.all([
         fetchCreatorDetail(creatorId),
         fetchCreatorIntelligence(creatorId).catch(() => null),
         fetchCreatorPlaybookProposals(creatorId).catch(() => ({ proposals: [] })),
@@ -71,7 +74,8 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
         fetchCreatorScripts(creatorId).catch(() => ({ scripts: [] })),
         fetchCreatorFyvRelationship(creatorId).catch(() => ({ ok: false, relationship: null })),
         fetchCreatorReadiness(creatorId).catch(() => ({ ok: false as const })),
-        fetchCreatorReadinessHistory(creatorId).catch(() => ({ ok: false as const, events: [] }))
+        fetchCreatorReadinessHistory(creatorId).catch(() => ({ ok: false as const, events: [] })),
+        fetchCreatorActionHistory(creatorId).catch(() => ({ ok: false as const, executions: [] }))
       ]);
       setData(detail);
       setIntelligence(intelligenceResult ?? null);
@@ -81,6 +85,7 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
       setFyvRelationship(fyv?.relationship ?? null);
       setReadiness(readinessResult?.readiness ?? null);
       setReadinessHistory(readinessHist?.events ?? []);
+      setActionHistory(actionsHist?.executions ?? []);
       setError(null);
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Unable to load creator workspace");
@@ -245,6 +250,7 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
           onInviteToFyv={handleInviteToFyv}
           readiness={readiness}
           readinessHistory={readinessHistory}
+          actionHistory={actionHistory}
         />
       ) : null}
       {tab === "Subscribers" ? <SubscribersTab data={data} /> : null}
@@ -267,17 +273,19 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
   );
 }
 
-// FMF-2/3: Creator Readiness dashboard card. Pure display of the ReadinessSummary
+// FMF-2/3/4: Creator Readiness dashboard card. Pure display of the ReadinessSummary
 // aggregated by GET /api/creators/:id/readiness, plus (FMF-3) a "Recent readiness
-// activity" list from GET /api/creators/:id/readiness/history. NOT a wizard,
-// NOT a profile duplicate — one card summarising "Is this creator operationally
-// ready?" with a live audit trail.
+// activity" list and (FMF-4) an "Operational actions" list from the append-only
+// action-execution ledger. NOT a wizard, NOT a profile duplicate — one card
+// summarising "Is this creator operationally ready?" with a live audit trail.
 function CreatorReadinessCard({
   readiness,
-  history
+  history,
+  actionHistory
 }: {
   readiness: ReadinessSummary | null;
   history: CreatorReadinessEvent[];
+  actionHistory: CreatorActionExecution[];
 }) {
   if (!readiness) {
     return (
@@ -368,8 +376,70 @@ function CreatorReadinessCard({
         />
       </div>
       <ReadinessActivityList history={history} />
+      <OperationalActionsList executions={actionHistory} />
     </section>
   );
+}
+
+// FMF-4: Operational Actions — inline execution ledger on the existing card.
+// Shows each dispatched action with status, timestamps and result summary.
+// No new page; stays within the readiness area per spec.
+function OperationalActionsList({ executions }: { executions: CreatorActionExecution[] }) {
+  if (!executions.length) {
+    return (
+      <div className="mt-3 rounded-md border border-blue-500/12 bg-[#0D1B2A]/55 p-3 text-xs text-blue-100/58">
+        No operational actions dispatched yet. Actions appear here as readiness milestones fire.
+      </div>
+    );
+  }
+  const recent = executions.slice(0, 8);
+  return (
+    <div className="mt-3 rounded-md border border-blue-500/12 bg-[#0D1B2A]/55 p-3">
+      <div className="text-xs font-semibold uppercase tracking-[0.16em] text-cyan-300">Operational actions</div>
+      <ul className="mt-2 space-y-1.5">
+        {recent.map((exec) => (
+          <li key={exec.id} className="flex items-baseline justify-between gap-3 text-sm">
+            <span className={`inline-flex items-center gap-2 truncate ${actionStatusTone(exec.status)}`}>
+              <span aria-hidden="true">{actionStatusGlyph(exec.status)}</span>
+              <span className="truncate">{actionExecutionLabel(exec)}</span>
+            </span>
+            <span className="shrink-0 tabular-nums text-xs text-blue-100/56">{formatDate(exec.completed_at ?? exec.queued_at)}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function actionStatusGlyph(status: CreatorActionExecution["status"]): string {
+  if (status === "completed") return "✓";
+  if (status === "failed") return "✗";
+  if (status === "processing") return "…";
+  return "•";
+}
+
+function actionStatusTone(status: CreatorActionExecution["status"]): string {
+  if (status === "completed") return "text-emerald-200";
+  if (status === "failed") return "text-rose-200";
+  if (status === "processing") return "text-cyan-200";
+  return "text-blue-100/76";
+}
+
+function actionExecutionLabel(exec: CreatorActionExecution): string {
+  const humanType =
+    exec.action_type === "queue_default_journey_activation"
+      ? "Queue default journey activation"
+      : exec.action_type === "enable_operational_automations"
+        ? "Enable operational automations"
+        : exec.action_type === "pause_creator_automations"
+          ? "Pause creator automations"
+          : exec.action_type === "refresh_readiness"
+            ? "Refresh readiness"
+            : exec.action_type;
+  if (exec.status === "failed" && exec.error) {
+    return `${humanType} — failed: ${exec.error}`;
+  }
+  return humanType;
 }
 
 // FMF-3: Recent readiness activity — inline audit trail on the existing card
@@ -621,7 +691,8 @@ function ProfileTab({
   fyvBusy,
   onInviteToFyv,
   readiness,
-  readinessHistory
+  readinessHistory,
+  actionHistory
 }: {
   data: CreatorDetailData;
   fyvRelationship: FmfCreatorFyvRelationship | null;
@@ -629,11 +700,12 @@ function ProfileTab({
   onInviteToFyv: () => Promise<void>;
   readiness: ReadinessSummary | null;
   readinessHistory: CreatorReadinessEvent[];
+  actionHistory: CreatorActionExecution[];
 }) {
   const latest = data.snapshots[0];
   return (
     <div className="space-y-4">
-      <CreatorReadinessCard readiness={readiness} history={readinessHistory} />
+      <CreatorReadinessCard readiness={readiness} history={readinessHistory} actionHistory={actionHistory} />
       <FyvOnboardingStatus creator={data.creator} />
       <FyvRelationshipCard
         relationship={fyvRelationship}

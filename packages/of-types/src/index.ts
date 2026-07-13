@@ -5089,7 +5089,13 @@ export function planReadinessOrchestration(input: ReadinessOrchestrationInput): 
     });
   }
 
-  // Assemble events.
+  // Assemble events. Actions attach to EXACTLY the event that triggers them so
+  // FMF-4 dispatcher can walk events and fire each action exactly once. Rules:
+  //   - queue_default_journey_activation -> creator_reached_operational
+  //   - enable_operational_automations   -> creator_reached_production
+  //   - pause_creator_automations         -> creator_regressed
+  // creator_readiness_changed and blocked/unblocked events carry NO actions
+  // (observability lives in the events themselves).
   const events: PlannedReadinessEvent[] = [];
   const baseTemplate = {
     previousScore: previous?.score ?? null,
@@ -5103,18 +5109,27 @@ export function planReadinessOrchestration(input: ReadinessOrchestrationInput): 
     warnings
   };
 
+  function actionsFor(eventType: ReadinessEventType): ReadinessOrchestrationAction[] {
+    return actions.filter((a) => {
+      if (a.type === "queue_default_journey_activation") return eventType === "creator_reached_operational";
+      if (a.type === "enable_operational_automations") return eventType === "creator_reached_production";
+      if (a.type === "pause_creator_automations") return eventType === "creator_regressed";
+      return false;
+    });
+  }
+
   if (transitioned) {
     events.push({
       ...baseTemplate,
       eventType: "creator_readiness_changed",
-      actions
+      actions: []
     });
   }
   for (const reachedEvent of reached) {
-    events.push({ ...baseTemplate, eventType: reachedEvent, actions });
+    events.push({ ...baseTemplate, eventType: reachedEvent, actions: actionsFor(reachedEvent) });
   }
   if (regressed) {
-    events.push({ ...baseTemplate, eventType: "creator_regressed", actions });
+    events.push({ ...baseTemplate, eventType: "creator_regressed", actions: actionsFor("creator_regressed") });
   }
   if (nowBlocked) {
     events.push({ ...baseTemplate, eventType: "creator_blocked", actions: [] });
@@ -5134,3 +5149,76 @@ export function planReadinessOrchestration(input: ReadinessOrchestrationInput): 
     events
   };
 }
+
+/* ==========================================================================
+ * FMF-4: Operational Action Dispatcher — PURE action planner.
+ *
+ * Consumes the declarative ReadinessOrchestrationAction[] attached to a
+ * persisted creator_readiness_events row (FMF-3) and yields concrete
+ * ActionCommand[]. Handlers (impure) live in the worker and invoke EXISTING
+ * FMF services — the dispatcher NEVER creates a new automation engine, new
+ * journey engine, or duplicate playbook logic.
+ * ========================================================================== */
+
+/** Lifecycle of a single action execution row (creator_action_executions). */
+export type CreatorActionExecutionStatus = "pending" | "processing" | "completed" | "failed";
+
+/** The concrete command the dispatcher will hand to a handler. Pure data. */
+export interface ActionCommand {
+  actionType: ReadinessOrchestrationActionType;
+  creatorId: string;
+  readinessEventId: string;
+  /** Trigger event that produced the parent readiness event (lineage). */
+  triggerEvent: string | null;
+  /** Milestone at the time of the readiness event. */
+  milestone: ReadinessMilestone;
+  /** Rendered reason from the orchestrator (for audit + task descriptions). */
+  reason: string;
+  metadata: Record<string, unknown>;
+}
+
+/**
+ * Pure planner: turns a persisted readiness event into concrete ActionCommands.
+ * Deterministic + replay-safe (the dispatcher's storage layer enforces
+ * uniqueness on (readiness_event_id, action_type), so re-running with the same
+ * event yields the same commands and the same effect).
+ */
+export function planActionsForReadinessEvent(event: CreatorReadinessEvent): ActionCommand[] {
+  if (!Array.isArray(event.actions)) return [];
+  return event.actions.map((action) => ({
+    actionType: action.type,
+    creatorId: event.creator_id,
+    readinessEventId: event.id,
+    triggerEvent: event.trigger_event,
+    milestone: event.new_milestone,
+    reason: action.reason,
+    metadata: action.targetMilestone ? { target_milestone: action.targetMilestone } : {}
+  }));
+}
+
+/** Persisted action-execution row shape (public.creator_action_executions). */
+export interface CreatorActionExecution {
+  id: string;
+  creator_id: string;
+  readiness_event_id: string;
+  action_type: ReadinessOrchestrationActionType;
+  status: CreatorActionExecutionStatus;
+  queued_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  error: string | null;
+  result: Record<string, unknown>;
+  trigger_event: string | null;
+  milestone: ReadinessMilestone | null;
+  reason: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * Outcome shape returned by an action handler. Deterministic union so the
+ * dispatcher can transition the row to completed / failed uniformly.
+ */
+export type ActionHandlerOutcome =
+  | { ok: true; result: Record<string, unknown> }
+  | { ok: false; error: string; result?: Record<string, unknown> };
