@@ -136,6 +136,13 @@ import {
   type ReadinessMilestone,
   type ReadinessOrchestrationPlan
 } from "@funkmyfans/of-types";
+// FMF-4: Operational Action Dispatcher (pure planner + handler selection).
+import {
+  planActionsForReadinessEvent,
+  type ActionCommand,
+  type ActionHandlerOutcome,
+  type CreatorActionExecution
+} from "@funkmyfans/of-types";
 import { createClient } from "@supabase/supabase-js";
 import moonsirenIntelligenceFixture from "./fixtures/moonsiren-creator-intelligence-package-v1.json";
 
@@ -519,6 +526,13 @@ async function handleApi(request: Request, env: Env, url: URL, ctx: ExecutionCon
   const creatorReadinessHistoryMatch = url.pathname.match(/^\/api\/creators\/([^/]+)\/readiness\/history$/);
   if (request.method === "GET" && creatorReadinessHistoryMatch) {
     const result = await getCreatorReadinessHistory(supabase, creatorReadinessHistoryMatch[1]);
+    return Response.json(result, { status: result.ok ? 200 : result.statusCode, headers: jsonHeaders });
+  }
+
+  // FMF-4: append-only action-execution ledger. Read-only per spec.
+  const creatorActionsHistoryMatch = url.pathname.match(/^\/api\/creators\/([^/]+)\/actions\/history$/);
+  if (request.method === "GET" && creatorActionsHistoryMatch) {
+    const result = await getCreatorActionHistory(supabase, creatorActionsHistoryMatch[1]);
     return Response.json(result, { status: result.ok ? 200 : result.statusCode, headers: jsonHeaders });
   }
 
@@ -12239,8 +12253,13 @@ async function reconcileCreatorReadiness(
     const plan = planReadinessOrchestration({ current, previous, triggerEvent });
 
     let persisted = 0;
+    const persistedEvents: CreatorReadinessEvent[] = [];
     for (const evt of plan.events) {
-      const inserted = await supabase.from("creator_readiness_events").insert(readinessEventRow(creatorId, evt)).select("id").maybeSingle();
+      const inserted = await supabase
+        .from("creator_readiness_events")
+        .insert(readinessEventRow(creatorId, evt))
+        .select(CREATOR_READINESS_EVENT_COLUMNS)
+        .maybeSingle();
       if (inserted.error) {
         // Idempotent: partial unique index on the reached-milestone family will
         // 23505 on replay. Everything else is a real error.
@@ -12248,9 +12267,23 @@ async function reconcileCreatorReadiness(
         if (isMissingSchemaCacheRelationError(inserted.error, "creator_readiness_events")) break;
         return { ok: false, error: inserted.error.message };
       }
-      if (inserted.data?.id) persisted += 1;
+      if (inserted.data) {
+        persisted += 1;
+        persistedEvents.push(inserted.data as CreatorReadinessEvent);
+      }
     }
-    return { ok: true, plan, persisted };
+
+    // FMF-4: dispatch declarative actions attached to the freshly-persisted
+    // events. Fire-and-forget shape — a dispatch failure never rolls back the
+    // readiness event itself. Handlers are idempotent (unique constraint on
+    // creator_action_executions(readiness_event_id, action_type)).
+    let dispatched = 0;
+    for (const evt of persistedEvents) {
+      const outcome = await dispatchReadinessEventActions(supabase, evt);
+      dispatched += outcome.dispatched;
+    }
+
+    return { ok: true, plan, persisted, dispatched };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : "Readiness reconcile failed" };
   }
@@ -12304,6 +12337,258 @@ function reconcileCreatorReadinessSafe(supabase: SupabaseClient, creatorId: stri
     .catch((error) => {
       console.warn(`[FMF-3] readiness reconcile threw for ${creatorId} (${triggerEvent}):`, error);
     });
+}
+
+/* ============================================================================
+ * FMF-4: Operational Action Dispatcher.
+ *
+ * Consumes the declarative actions FMF-3 attaches to persisted
+ * creator_readiness_events rows and invokes EXISTING FMF services (of_tasks
+ * for journey activation queue, of_automation_rules for enable/pause). Records
+ * each execution in creator_action_executions, keyed by
+ * (readiness_event_id, action_type) so replays are safe.
+ *
+ * Never creates a new automation engine, new journey engine, or duplicate
+ * playbook logic.
+ * ========================================================================== */
+
+const CREATOR_ACTION_EXECUTION_COLUMNS =
+  "id, creator_id, readiness_event_id, action_type, status, queued_at, started_at, completed_at, error, result, trigger_event, milestone, reason, created_at, updated_at";
+
+/**
+ * FMF-4: dispatch all actions attached to one readiness event. Returns the
+ * number of executions ACTUALLY dispatched (deduped duplicates + missing-table
+ * degradation don't count).
+ */
+async function dispatchReadinessEventActions(
+  supabase: SupabaseClient,
+  event: CreatorReadinessEvent
+): Promise<{ dispatched: number; errors: string[] }> {
+  const commands = planActionsForReadinessEvent(event);
+  const errors: string[] = [];
+  let dispatched = 0;
+  for (const command of commands) {
+    const outcome = await dispatchActionCommand(supabase, command);
+    if (outcome.dispatched) dispatched += 1;
+    if (outcome.error) errors.push(outcome.error);
+  }
+  return { dispatched, errors };
+}
+
+async function dispatchActionCommand(
+  supabase: SupabaseClient,
+  command: ActionCommand
+): Promise<{ dispatched: boolean; error?: string }> {
+  const now = new Date().toISOString();
+
+  // (1) Idempotent claim: insert the row in `processing`. On conflict (this
+  //     event+action already dispatched) we do nothing — return deduped=true.
+  const inserted = await supabase
+    .from("creator_action_executions")
+    .insert({
+      creator_id: command.creatorId,
+      readiness_event_id: command.readinessEventId,
+      action_type: command.actionType,
+      status: "processing",
+      queued_at: now,
+      started_at: now,
+      trigger_event: command.triggerEvent,
+      milestone: command.milestone,
+      reason: command.reason,
+      result: {}
+    })
+    .select(CREATOR_ACTION_EXECUTION_COLUMNS)
+    .maybeSingle();
+
+  if (inserted.error) {
+    if (inserted.error.code === "23505") return { dispatched: false };
+    if (isMissingSchemaCacheRelationError(inserted.error, "creator_action_executions")) return { dispatched: false };
+    console.warn(`[FMF-4] failed to claim execution for ${command.actionType}:`, inserted.error);
+    return { dispatched: false, error: inserted.error.message };
+  }
+  const execution = inserted.data as CreatorActionExecution;
+
+  // (2) Invoke handler.
+  let outcome: ActionHandlerOutcome;
+  try {
+    outcome = await invokeActionHandler(supabase, command);
+  } catch (error) {
+    outcome = { ok: false, error: error instanceof Error ? error.message : "Handler threw unexpectedly" };
+  }
+
+  // (3) Finalise. Update to completed | failed, record result + error.
+  const completedAt = new Date().toISOString();
+  const patch = outcome.ok
+    ? { status: "completed" as const, completed_at: completedAt, result: outcome.result, error: null }
+    : { status: "failed" as const, completed_at: completedAt, result: outcome.result ?? {}, error: outcome.error };
+  const finalised = await supabase
+    .from("creator_action_executions")
+    .update(patch)
+    .eq("id", execution.id);
+  if (finalised.error) {
+    console.warn(`[FMF-4] failed to finalise execution ${execution.id}:`, finalised.error);
+  }
+  return { dispatched: true };
+}
+
+/**
+ * FMF-4: dispatch a single ActionCommand to its handler. Handlers invoke
+ * EXISTING services — never create new engines. Missing service tables
+ * degrade to a no-op result (dev DB compatibility).
+ */
+async function invokeActionHandler(
+  supabase: SupabaseClient,
+  command: ActionCommand
+): Promise<ActionHandlerOutcome> {
+  switch (command.actionType) {
+    case "queue_default_journey_activation":
+      return handleJourneyActivation(supabase, command);
+    case "enable_operational_automations":
+      return handleAutomationEnable(supabase, command);
+    case "pause_creator_automations":
+      return handleAutomationPause(supabase, command);
+    case "refresh_readiness":
+      // Reserved for future self-triggering. Recorded as no-op today.
+      return { ok: true, result: { no_op: true, reason: "refresh_readiness not implemented yet" } };
+    default: {
+      const _exhaustive: never = command.actionType;
+      return { ok: false, error: `Unknown action type: ${_exhaustive}` };
+    }
+  }
+}
+
+/**
+ * JourneyActivationHandler — QUEUES a default-journey activation for operator
+ * review by creating a task in of_tasks. Does NOT flip a journey/script live —
+ * that stays a human decision. Idempotency across dispatches is enforced by
+ * the unique(readiness_event_id, action_type) constraint on the parent
+ * execution row; within a single dispatch we also check for an existing open
+ * queue task to avoid stacking dupes if the caller replays.
+ */
+async function handleJourneyActivation(
+  supabase: SupabaseClient,
+  command: ActionCommand
+): Promise<ActionHandlerOutcome> {
+  // If a task is already open for this creator + task_type, don't create another.
+  const existing = await supabase
+    .from("of_tasks")
+    .select("id")
+    .eq("creator_id", command.creatorId)
+    .eq("task_type", "journey_activation_request")
+    .in("status", ["open", "in_progress"])
+    .limit(1)
+    .maybeSingle();
+  if (existing.error && !isMissingSchemaCacheRelationError(existing.error, "of_tasks")) {
+    return { ok: false, error: existing.error.message };
+  }
+  if (existing.data?.id) {
+    return {
+      ok: true,
+      result: { queued_task_id: existing.data.id, note: "reused existing open journey_activation_request" }
+    };
+  }
+
+  const inserted = await supabase
+    .from("of_tasks")
+    .insert({
+      creator_id: command.creatorId,
+      task_type: "journey_activation_request",
+      priority: "medium",
+      status: "open",
+      title: "Queue default journey activation",
+      description: `Creator reached ${command.milestone}. Review and activate the default creator journey.`,
+      source: "rules_engine"
+    })
+    .select("id")
+    .maybeSingle();
+  if (inserted.error) {
+    if (isMissingSchemaCacheRelationError(inserted.error, "of_tasks")) {
+      return { ok: true, result: { no_op: true, reason: "of_tasks table absent" } };
+    }
+    return { ok: false, error: inserted.error.message };
+  }
+  return { ok: true, result: { queued_task_id: inserted.data?.id ?? null, task_type: "journey_activation_request" } };
+}
+
+/**
+ * AutomationEnableHandler — flips creator-scoped of_automation_rules currently
+ * in `draft` or `paused` state to `active`. Never creates new automation
+ * definitions. Records the affected rule count in the result.
+ */
+async function handleAutomationEnable(
+  supabase: SupabaseClient,
+  command: ActionCommand
+): Promise<ActionHandlerOutcome> {
+  const affected = await supabase
+    .from("of_automation_rules")
+    .update({ status: "active" })
+    .eq("creator_id", command.creatorId)
+    .in("status", ["draft", "paused"])
+    .select("id");
+  if (affected.error) {
+    if (isMissingSchemaCacheRelationError(affected.error, "of_automation_rules")) {
+      return { ok: true, result: { no_op: true, reason: "of_automation_rules table absent" } };
+    }
+    return { ok: false, error: affected.error.message };
+  }
+  const rows = (affected.data as Array<{ id: string }> | null) ?? [];
+  return { ok: true, result: { activated_rule_count: rows.length, activated_rule_ids: rows.map((r) => r.id) } };
+}
+
+/**
+ * AutomationPauseHandler — flips creator-scoped of_automation_rules currently
+ * `active` to `paused`. Never deletes automation state. Records the affected
+ * rule count.
+ */
+async function handleAutomationPause(
+  supabase: SupabaseClient,
+  command: ActionCommand
+): Promise<ActionHandlerOutcome> {
+  const affected = await supabase
+    .from("of_automation_rules")
+    .update({ status: "paused" })
+    .eq("creator_id", command.creatorId)
+    .eq("status", "active")
+    .select("id");
+  if (affected.error) {
+    if (isMissingSchemaCacheRelationError(affected.error, "of_automation_rules")) {
+      return { ok: true, result: { no_op: true, reason: "of_automation_rules table absent" } };
+    }
+    return { ok: false, error: affected.error.message };
+  }
+  const rows = (affected.data as Array<{ id: string }> | null) ?? [];
+  return { ok: true, result: { paused_rule_count: rows.length, paused_rule_ids: rows.map((r) => r.id) } };
+}
+
+/**
+ * FMF-4: read the append-only action-execution history for one creator,
+ * newest first. Read-only per spec.
+ */
+async function getCreatorActionHistory(
+  supabase: SupabaseClient,
+  creatorId: string
+): Promise<
+  | { ok: true; executions: CreatorActionExecution[] }
+  | { ok: false; statusCode: number; error: string }
+> {
+  if (!isUuid(creatorId)) return { ok: false, statusCode: 400, error: "Creator id must be a database UUID" };
+  const creator = await supabase.from("of_creators").select("id").eq("id", creatorId).maybeSingle();
+  if (creator.error) return { ok: false, statusCode: 500, error: creator.error.message };
+  if (!creator.data) return { ok: false, statusCode: 404, error: `No FMF creator ${creatorId}` };
+
+  const rows = await supabase
+    .from("creator_action_executions")
+    .select(CREATOR_ACTION_EXECUTION_COLUMNS)
+    .eq("creator_id", creatorId)
+    .order("created_at", { ascending: false })
+    .limit(50);
+  if (rows.error) {
+    if (isMissingSchemaCacheRelationError(rows.error, "creator_action_executions")) {
+      return { ok: true, executions: [] };
+    }
+    return { ok: false, statusCode: 500, error: rows.error.message };
+  }
+  return { ok: true, executions: (rows.data as CreatorActionExecution[]) ?? [] };
 }
 
 function isAuthorizedOpportunityPersist(request: Request, env: Env) {
