@@ -1,16 +1,18 @@
-import { Bot, ClipboardList, PlaySquare, RefreshCw, Send, Sparkles, UserRound, Users, Zap } from "lucide-react";
+import { Bot, ClipboardList, Link2, PlaySquare, RefreshCw, Send, Sparkles, UserRound, Users, Zap } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import type { CreatorPlaybookProposal, SyncType } from "@funkmyfans/of-types";
+import type { CreatorPlaybookProposal, FmfCreatorFyvRelationship, SyncType } from "@funkmyfans/of-types";
 import {
   createBuilderDraftFromProposal,
   createPlaybookProposal,
   fetchCreatorDetail,
+  fetchCreatorFyvRelationship,
   fetchCreatorIntelligence,
   fetchCreatorPlaybookProposals,
   fetchCreatorScripts,
   fetchQueueWorkspace,
   importCreatorIntelligenceFixture,
+  inviteCreatorToFyv,
   syncCreatorSection,
   updateTask,
   updatePlaybookProposal,
@@ -41,6 +43,10 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
   const [importingFixture, setImportingFixture] = useState(false);
   const [proposalBusy, setProposalBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // FMF-1: FYV relationship state (rendered as a separate card on the Profile tab
+  // alongside FYV-1's FyvOnboardingStatus card).
+  const [fyvRelationship, setFyvRelationship] = useState<FmfCreatorFyvRelationship | null>(null);
+  const [fyvBusy, setFyvBusy] = useState(false);
 
   useEffect(() => {
     void refresh();
@@ -51,21 +57,50 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
 
   async function refresh() {
     try {
-      const [detail, intelligenceResult, proposalsResult, queues, scripts] = await Promise.all([
+      const [detail, intelligenceResult, proposalsResult, queues, scripts, fyv] = await Promise.all([
         fetchCreatorDetail(creatorId),
         fetchCreatorIntelligence(creatorId).catch(() => null),
         fetchCreatorPlaybookProposals(creatorId).catch(() => ({ proposals: [] })),
         fetchQueueWorkspace({ creatorId }).catch(() => null),
-        fetchCreatorScripts(creatorId).catch(() => ({ scripts: [] }))
+        fetchCreatorScripts(creatorId).catch(() => ({ scripts: [] })),
+        fetchCreatorFyvRelationship(creatorId).catch(() => ({ ok: false, relationship: null }))
       ]);
       setData(detail);
       setIntelligence(intelligenceResult ?? null);
       setPlaybookProposals(proposalsResult.proposals);
       setQueueWorkspace(queues);
       setPlaybooks(scripts.scripts);
+      setFyvRelationship(fyv?.relationship ?? null);
       setError(null);
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Unable to load creator workspace");
+    }
+  }
+
+  // FMF-1: agency Invite action. FMF orchestrates; FYV owns the actual invite
+  // delivery. On first click, prompt for the FYV creator id (unless already stored);
+  // subsequent clicks are idempotent no-ops (server returns transitioned=false).
+  async function handleInviteToFyv() {
+    setFyvBusy(true);
+    setError(null);
+    try {
+      let fyvCreatorId = fyvRelationship?.fyv_creator_id ?? undefined;
+      if (!fyvCreatorId) {
+        const prompted = window.prompt("Enter the FYV creator id to link to this FMF creator:");
+        if (!prompted) return;
+        fyvCreatorId = prompted.trim();
+        if (!fyvCreatorId) return;
+      }
+      const result = await inviteCreatorToFyv(creatorId, { fyv_creator_id: fyvCreatorId });
+      if (result.ok && result.relationship) {
+        setFyvRelationship(result.relationship);
+      } else {
+        setError(result.error ?? "Unable to send FYV invite");
+      }
+    } catch (inviteError) {
+      setError(inviteError instanceof Error ? inviteError.message : "Unable to send FYV invite");
+    } finally {
+      setFyvBusy(false);
     }
   }
 
@@ -192,7 +227,14 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
         ))}
       </nav>
 
-      {tab === "Profile" ? <ProfileTab data={data} /> : null}
+      {tab === "Profile" ? (
+        <ProfileTab
+          data={data}
+          fyvRelationship={fyvRelationship}
+          fyvBusy={fyvBusy}
+          onInviteToFyv={handleInviteToFyv}
+        />
+      ) : null}
       {tab === "Subscribers" ? <SubscribersTab data={data} /> : null}
       {tab === "Queues" ? <QueuesTab data={data} queueWorkspace={queueWorkspace} onResolve={resolveTask} /> : null}
       {tab === "Intelligence" ? (
@@ -279,11 +321,89 @@ function FyvOnboardingStatus({ creator }: { creator: CreatorDetailData["creator"
   );
 }
 
-function ProfileTab({ data }: { data: CreatorDetailData }) {
+// FMF-1: read-only FYV relationship card. FMF is the source of truth for this
+// row; clicking Invite calls the FMF worker which in turn calls FYV. No creator-
+// facing UI or duplicate invite logic exists here. Complementary to FYV-1's
+// FyvOnboardingStatus (which shows intelligence package linkage) — this card
+// shows the FMF↔FYV account link + invite lifecycle.
+function FyvRelationshipCard({
+  relationship,
+  creatorDisplayName,
+  busy,
+  onInvite
+}: {
+  relationship: FmfCreatorFyvRelationship | null;
+  creatorDisplayName: string;
+  busy: boolean;
+  onInvite: () => Promise<void>;
+}) {
+  const connected = Boolean(relationship?.fyv_creator_id);
+  const state = relationship?.relationship_state ?? "not_linked";
+  const inviteDisabled = busy || state === "invited" || state === "accepted" || state === "active";
+  const inviteLabel =
+    state === "invited"
+      ? "Invited"
+      : state === "accepted"
+        ? "Accepted"
+        : state === "active"
+          ? "Active"
+          : busy
+            ? "Inviting…"
+            : "Invite to FYV";
+  return (
+    <section className="premium-card rounded-lg p-4">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <div className="min-w-0">
+          <SectionTitle icon={Link2} title="FYV relationship" />
+          <div className="mt-2 text-sm text-blue-100/58">
+            Creator: <span className="font-semibold text-white">{creatorDisplayName}</span>
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={() => void onInvite()}
+          disabled={inviteDisabled}
+          className="inline-flex items-center gap-2 rounded-lg border border-cyan-300/25 bg-cyan-400 px-3 py-2 text-sm font-semibold text-slate-950 disabled:cursor-not-allowed disabled:opacity-45"
+        >
+          <Send className={`h-4 w-4 ${busy ? "animate-spin" : ""}`} aria-hidden="true" />
+          {inviteLabel}
+        </button>
+      </div>
+      <div className="mt-4 grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+        <ContextRow label="FYV" value={connected ? "Connected" : "Not connected"} />
+        <ContextRow label="Relationship" value={state} />
+        <ContextRow label="FYV creator id" value={relationship?.fyv_creator_id ?? "not linked"} />
+        <ContextRow label="Invited" value={relationship?.invited_at ? formatDate(relationship.invited_at) : "—"} />
+      </div>
+      <div className="mt-2 grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+        <ContextRow label="Accepted" value={relationship?.accepted_at ? formatDate(relationship.accepted_at) : "—"} />
+        <ContextRow label="Activated" value={relationship?.activated_at ? formatDate(relationship.activated_at) : "—"} />
+      </div>
+    </section>
+  );
+}
+
+function ProfileTab({
+  data,
+  fyvRelationship,
+  fyvBusy,
+  onInviteToFyv
+}: {
+  data: CreatorDetailData;
+  fyvRelationship: FmfCreatorFyvRelationship | null;
+  fyvBusy: boolean;
+  onInviteToFyv: () => Promise<void>;
+}) {
   const latest = data.snapshots[0];
   return (
     <div className="space-y-4">
       <FyvOnboardingStatus creator={data.creator} />
+      <FyvRelationshipCard
+        relationship={fyvRelationship}
+        creatorDisplayName={data.creator.display_name || data.creator.username}
+        busy={fyvBusy}
+        onInvite={onInviteToFyv}
+      />
       <section className="grid gap-4 xl:grid-cols-[0.8fr_1.2fr]">
       <div className="premium-card rounded-lg p-4">
         <SectionTitle icon={UserRound} title="Profile" />

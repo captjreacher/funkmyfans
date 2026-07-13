@@ -113,6 +113,14 @@ import {
   type CreatorIntelligenceEventStore,
   type CreatorRelationshipRecord
 } from "@funkmyfans/of-types";
+// FMF-1: Creator Relationship Controller (FMF-owned FMF↔FYV account link).
+import {
+  consumeFmfFyvRelationshipEvent,
+  nextStateAfterFmfFyvEvent,
+  type FmfCreatorFyvRelationship,
+  type FmfFyvRelationshipStore,
+  type FmfFyvEventApplyResult
+} from "@funkmyfans/of-types";
 import { createClient } from "@supabase/supabase-js";
 import moonsirenIntelligenceFixture from "./fixtures/moonsiren-creator-intelligence-package-v1.json";
 
@@ -145,8 +153,17 @@ interface Env {
   COMPOSE6_LIVE_OPPORTUNITY_CREATOR_ALLOWLIST?: string;
   // FYV -> FMF creator intelligence package ingestion boundary
   // (POST /api/events/fyv). Optional shared secret; when unset the endpoint is
-  // open (parity with the BetterFans / Instagram boundaries).
+  // open (parity with the BetterFans / Instagram boundaries). Also honoured by
+  // the FMF-1 FYV relationship webhook (POST /api/events/fyv/relationship), so
+  // a single FYV inbound secret gates both.
   CREATOR_INTELLIGENCE_EVENTS_SHARED_SECRET?: string;
+  // FMF-1: FYV Creator Relationship Controller — OUTBOUND call to FYV's invite
+  // endpoint. When unset the invite route still records local state (relationship
+  // advances pending→invited) and returns fyv_invoked:false. Useful for staging.
+  FYV_API_BASE_URL?: string;
+  // FYV API credential used for the outbound invite call. Sent as
+  // Authorization: Bearer <key> when FYV_API_BASE_URL is set.
+  FYV_API_KEY?: string;
 }
 
 const jsonHeaders = {
@@ -441,6 +458,27 @@ async function handleApi(request: Request, env: Env, url: URL, ctx: ExecutionCon
   if (request.method === "GET" && creatorPlaybookProposalsMatch) {
     const proposals = await listCreatorPlaybookProposals(supabase, creatorPlaybookProposalsMatch[1]);
     return Response.json({ proposals }, { headers: jsonHeaders });
+  }
+
+  // FMF-1: read the FMF↔FYV relationship for one creator (agency UI on
+  // CreatorDetail's Profile tab). Returns { relationship: null } when the creator
+  // has not yet been linked to FYV — the Invite action creates the pending row.
+  const creatorFyvRelationshipGetMatch = url.pathname.match(/^\/api\/creators\/([^/]+)\/fyv\/relationship$/);
+  if (request.method === "GET" && creatorFyvRelationshipGetMatch) {
+    const result = await getFmfCreatorFyvRelationship(supabase, creatorFyvRelationshipGetMatch[1]);
+    return Response.json(result, { status: result.ok ? 200 : result.statusCode, headers: jsonHeaders });
+  }
+
+  // FMF-1: agency Invite action. FMF is the source of truth for the RELATIONSHIP;
+  // FYV owns the actual invite DELIVERY (email/token/creator-facing surface). This
+  // route ensures the local row exists in `pending`, calls FYV's POST
+  // /api/creators/{fyvCreatorId}/invite (when FYV_API_BASE_URL is configured), and
+  // stores the returned state. It never re-implements invite mechanics locally.
+  const creatorFyvInviteMatch = url.pathname.match(/^\/api\/creators\/([^/]+)\/fyv\/invite$/);
+  if (request.method === "POST" && creatorFyvInviteMatch) {
+    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const result = await inviteCreatorToFyv(supabase, env, creatorFyvInviteMatch[1], body);
+    return Response.json(result, { status: result.ok ? 200 : result.statusCode, headers: jsonHeaders });
   }
 
   const playbookProposalMatch = url.pathname.match(/^\/api\/playbook-proposals\/([^/]+)$/);
@@ -1650,6 +1688,22 @@ function boundedPriority(value: unknown, label: string) {
     const rawPayload = await request.json().catch(() => null);
     const store = createSupabaseCreatorIntelligenceEventStore(supabase);
     const result = await ingestCreatorIntelligencePackagePublishedEvent(store, rawPayload);
+    return Response.json(result, { status: result.ok ? 200 : result.statusCode, headers: jsonHeaders });
+  }
+
+  // FMF-1: FYV relationship webhook consumer (creator_invited / creator_accepted /
+  // creator_activated). FMF NEVER creates a relationship from an event — a 404 is
+  // returned when there is no local relationship to advance. Idempotent via
+  // of_events (provider='fyv', unique(provider, provider_event_id)). Persist-only:
+  // never runs automations, never touches Queue/opportunity execution. Reuses the
+  // existing FYV inbound shared-secret helper.
+  if (request.method === "POST" && url.pathname === "/api/events/fyv/relationship") {
+    if (!isAuthorizedCreatorIntelligenceEventIngest(request, env)) {
+      return Response.json({ ok: false, error: "Unauthorized FYV event ingest request" }, { status: 401, headers: jsonHeaders });
+    }
+    const rawPayload = await request.json().catch(() => null);
+    const store = createSupabaseFmfFyvRelationshipStore(supabase);
+    const result = await consumeFmfFyvRelationshipEvent(store, rawPayload);
     return Response.json(result, { status: result.ok ? 200 : result.statusCode, headers: jsonHeaders });
   }
 
@@ -11601,6 +11655,328 @@ function createSupabaseCreatorIntelligenceEventStore(supabase: SupabaseClient): 
       }
 
       return { eventId: inserted.data!.id as string, deduped: false, relationshipState: finalState, transitioned };
+    }
+  };
+}
+
+/* ============================================================================
+ * FMF-1: Creator Relationship Controller — FYV client + Supabase store + routes.
+ * FMF owns the FMF↔FYV relationship row; FYV owns the actual invite delivery.
+ * ========================================================================== */
+
+const FMF_FYV_RELATIONSHIP_COLUMNS =
+  "id, fmf_creator_id, fyv_creator_id, relationship_state, invited_at, accepted_at, activated_at, state_changed_at, metadata, created_at, updated_at";
+
+/**
+ * FMF-1: outbound call to FYV's invite endpoint. FMF is the RELATIONSHIP source of
+ * truth; FYV owns the actual invite delivery (email/token/creator-facing surface).
+ * When FYV_API_BASE_URL is unset the call is skipped and the caller records local
+ * state only (useful for staging + UI validation).
+ */
+async function callFyvInvite(env: Env, fyvCreatorId: string, fmfCreatorId: string): Promise<{
+  ok: boolean;
+  statusCode: number;
+  invoked: boolean;
+  body: unknown;
+  error?: string;
+}> {
+  if (!env.FYV_API_BASE_URL) {
+    return { ok: true, statusCode: 200, invoked: false, body: null };
+  }
+  const base = env.FYV_API_BASE_URL.replace(/\/+$/, "");
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (env.FYV_API_KEY) headers.authorization = `Bearer ${env.FYV_API_KEY}`;
+  try {
+    const response = await fetch(`${base}/api/creators/${encodeURIComponent(fyvCreatorId)}/invite`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ source_product: "FMF", fmf_creator_id: fmfCreatorId })
+    });
+    const text = await response.text();
+    const body = text ? safeJsonParseFyv(text) : null;
+    if (!response.ok) {
+      return {
+        ok: false,
+        statusCode: response.status,
+        invoked: true,
+        body,
+        error: typeof body === "object" && body && "error" in body && typeof (body as { error: unknown }).error === "string"
+          ? (body as { error: string }).error
+          : `FYV invite failed with HTTP ${response.status}`
+      };
+    }
+    return { ok: true, statusCode: response.status, invoked: true, body };
+  } catch (error) {
+    return {
+      ok: false,
+      statusCode: 502,
+      invoked: true,
+      body: null,
+      error: error instanceof Error ? error.message : "FYV invite call failed"
+    };
+  }
+}
+
+function safeJsonParseFyv(text: string): unknown {
+  try { return JSON.parse(text); } catch { return text; }
+}
+
+/**
+ * FMF-1: read one creator's FMF↔FYV relationship. Returns { ok:true, relationship:null }
+ * when the creator exists but has no relationship yet; { ok:false, statusCode:404 }
+ * when the creator itself is unknown.
+ */
+async function getFmfCreatorFyvRelationship(
+  supabase: SupabaseClient,
+  creatorId: string
+): Promise<
+  | { ok: true; relationship: FmfCreatorFyvRelationship | null }
+  | { ok: false; statusCode: number; error: string }
+> {
+  if (!isUuid(creatorId)) return { ok: false, statusCode: 400, error: "Creator id must be a database UUID" };
+  const creator = await supabase.from("of_creators").select("id").eq("id", creatorId).maybeSingle();
+  if (creator.error) return { ok: false, statusCode: 500, error: creator.error.message };
+  if (!creator.data) return { ok: false, statusCode: 404, error: `No FMF creator ${creatorId}` };
+
+  const row = await supabase
+    .from("fmf_creator_fyv_relationships")
+    .select(FMF_FYV_RELATIONSHIP_COLUMNS)
+    .eq("fmf_creator_id", creatorId)
+    .maybeSingle();
+  if (row.error) return { ok: false, statusCode: 500, error: row.error.message };
+  return { ok: true, relationship: (row.data as FmfCreatorFyvRelationship | null) ?? null };
+}
+
+/**
+ * FMF-1: agency Invite action. Ensures a local relationship row exists (creating
+ * it in `pending` on first click), calls FYV's invite endpoint (when configured),
+ * and advances the local state to `invited` on success. FMF does NOT re-implement
+ * invite delivery. Never activates automations. Idempotent: re-clicking after a
+ * successful invite is a no-op (returns the existing `invited` row + fyv_invoked:false).
+ */
+async function inviteCreatorToFyv(
+  supabase: SupabaseClient,
+  env: Env,
+  creatorId: string,
+  body: Record<string, unknown>
+): Promise<
+  | { ok: true; relationship: FmfCreatorFyvRelationship; fyv_invoked: boolean; fyv_response: unknown; transitioned: boolean }
+  | { ok: false; statusCode: number; error: string; field?: string }
+> {
+  if (!isUuid(creatorId)) return { ok: false, statusCode: 400, error: "Creator id must be a database UUID" };
+
+  const creator = await supabase.from("of_creators").select("id").eq("id", creatorId).maybeSingle();
+  if (creator.error) return { ok: false, statusCode: 500, error: creator.error.message };
+  if (!creator.data) return { ok: false, statusCode: 404, error: `No FMF creator ${creatorId}` };
+
+  const now = new Date().toISOString();
+  const existing = await supabase
+    .from("fmf_creator_fyv_relationships")
+    .select(FMF_FYV_RELATIONSHIP_COLUMNS)
+    .eq("fmf_creator_id", creatorId)
+    .maybeSingle();
+  if (existing.error) return { ok: false, statusCode: 500, error: existing.error.message };
+
+  const requestedFyvCreatorId = typeof body.fyv_creator_id === "string" && body.fyv_creator_id.trim()
+    ? body.fyv_creator_id.trim()
+    : null;
+
+  let relationship = existing.data as FmfCreatorFyvRelationship | null;
+
+  if (!relationship) {
+    if (!requestedFyvCreatorId) {
+      return { ok: false, statusCode: 400, error: "fyv_creator_id is required on first invite", field: "fyv_creator_id" };
+    }
+    const inserted = await supabase
+      .from("fmf_creator_fyv_relationships")
+      .insert({
+        fmf_creator_id: creatorId,
+        fyv_creator_id: requestedFyvCreatorId,
+        relationship_state: "pending",
+        state_changed_at: now,
+        metadata: {}
+      })
+      .select(FMF_FYV_RELATIONSHIP_COLUMNS)
+      .single();
+    if (inserted.error) return { ok: false, statusCode: 500, error: inserted.error.message };
+    relationship = inserted.data as FmfCreatorFyvRelationship;
+  } else if (requestedFyvCreatorId && !relationship.fyv_creator_id) {
+    const patched = await supabase
+      .from("fmf_creator_fyv_relationships")
+      .update({ fyv_creator_id: requestedFyvCreatorId })
+      .eq("id", relationship.id)
+      .select(FMF_FYV_RELATIONSHIP_COLUMNS)
+      .single();
+    if (patched.error) return { ok: false, statusCode: 500, error: patched.error.message };
+    relationship = patched.data as FmfCreatorFyvRelationship;
+  }
+
+  if (!relationship.fyv_creator_id) {
+    return { ok: false, statusCode: 400, error: "fyv_creator_id is required to invite", field: "fyv_creator_id" };
+  }
+
+  const fyv = await callFyvInvite(env, relationship.fyv_creator_id, relationship.fmf_creator_id);
+  if (!fyv.ok) {
+    return {
+      ok: false,
+      statusCode: fyv.statusCode >= 400 && fyv.statusCode < 600 ? fyv.statusCode : 502,
+      error: fyv.error ?? "FYV invite call failed"
+    };
+  }
+
+  // Honour FYV's returned state (when it ordinally advances), else default to invited.
+  const returned =
+    fyv.body && typeof fyv.body === "object" && "state" in (fyv.body as Record<string, unknown>)
+      ? (fyv.body as Record<string, unknown>).state
+      : null;
+  const canonicalReturned: "pending" | "invited" | "accepted" | "active" =
+    returned === "invited" || returned === "accepted" || returned === "active"
+      ? (returned as "invited" | "accepted" | "active")
+      : "invited";
+  const nextState = nextStateAfterFmfFyvEvent(relationship.relationship_state, "creator_invited");
+  const order = { pending: 0, invited: 1, accepted: 2, active: 3 } as const;
+  const finalState = order[canonicalReturned] > order[nextState] ? canonicalReturned : nextState;
+  const transitioned = finalState !== relationship.relationship_state;
+
+  if (transitioned) {
+    const patch: Record<string, unknown> = { relationship_state: finalState, state_changed_at: now };
+    if (!relationship.invited_at && (finalState === "invited" || finalState === "accepted" || finalState === "active")) patch.invited_at = now;
+    if (!relationship.accepted_at && (finalState === "accepted" || finalState === "active")) patch.accepted_at = now;
+    if (!relationship.activated_at && finalState === "active") patch.activated_at = now;
+    const updated = await supabase
+      .from("fmf_creator_fyv_relationships")
+      .update(patch)
+      .eq("id", relationship.id)
+      .select(FMF_FYV_RELATIONSHIP_COLUMNS)
+      .single();
+    if (updated.error) return { ok: false, statusCode: 500, error: updated.error.message };
+    relationship = updated.data as FmfCreatorFyvRelationship;
+  }
+
+  return { ok: true, relationship, fyv_invoked: fyv.invoked, fyv_response: fyv.body, transitioned };
+}
+
+/**
+ * FMF-1: Supabase store for the inbound FYV relationship event consumer. The ONLY
+ * I/O in that boundary. `applyEvent`:
+ *   1) idempotency guard — treat an already-persisted event id as deduped (no re-write);
+ *   2) recompute next state from the LIVE relationship row via nextStateAfterFmfFyvEvent
+ *      (never regress from a stale resolve read; catch-up when events arrive out of order);
+ *   3) single-row UPDATE that writes state + the event-appropriate timestamp
+ *      (invited_at / accepted_at / activated_at, only when unset) atomically;
+ *   4) commit-marker insert into of_events (provider='fyv') keyed on the existing
+ *      unique (provider, provider_event_id) partial index — concurrent duplicate
+ *      → 23505 → deduped. Shares the "fyv" provider namespace with FYV-1
+ *      intelligence-package events; provider_event_id shapes differ so they
+ *      never collide (packageReference vs eventType:fyvCreatorId).
+ * Never touches queues, opportunities, automations, or intelligence tables.
+ */
+function createSupabaseFmfFyvRelationshipStore(supabase: SupabaseClient): FmfFyvRelationshipStore {
+  return {
+    async loadByFmfCreatorId(fmfCreatorId: string) {
+      const row = await supabase
+        .from("fmf_creator_fyv_relationships")
+        .select(FMF_FYV_RELATIONSHIP_COLUMNS)
+        .eq("fmf_creator_id", fmfCreatorId)
+        .maybeSingle();
+      if (row.error) throw new Error(row.error.message);
+      return (row.data as FmfCreatorFyvRelationship | null) ?? null;
+    },
+
+    async loadByFyvCreatorId(fyvCreatorId: string) {
+      const row = await supabase
+        .from("fmf_creator_fyv_relationships")
+        .select(FMF_FYV_RELATIONSHIP_COLUMNS)
+        .eq("fyv_creator_id", fyvCreatorId)
+        .maybeSingle();
+      if (row.error) throw new Error(row.error.message);
+      return (row.data as FmfCreatorFyvRelationship | null) ?? null;
+    },
+
+    async applyEvent({ relationship, event }): Promise<FmfFyvEventApplyResult> {
+      // (1) Idempotency guard.
+      const existing = await supabase
+        .from("of_events")
+        .select("id")
+        .eq("provider", FYV_EVENT_PROVIDER)
+        .eq("provider_event_id", event.providerEventId)
+        .maybeSingle();
+      if (existing.error) throw new Error(existing.error.message);
+      if (existing.data?.id) {
+        return { relationship, transitioned: false, deduped: true };
+      }
+
+      // (2) Recompute from LIVE row.
+      const live = await supabase
+        .from("fmf_creator_fyv_relationships")
+        .select(FMF_FYV_RELATIONSHIP_COLUMNS)
+        .eq("id", relationship.id)
+        .single();
+      if (live.error) throw new Error(live.error.message);
+      const currentRow = live.data as FmfCreatorFyvRelationship;
+      const finalState = nextStateAfterFmfFyvEvent(currentRow.relationship_state, event.eventType);
+      const transitioned = finalState !== currentRow.relationship_state;
+
+      // (3) Update — always merge the event's per-state timestamp when unset, even
+      //     if the state itself doesn't advance (idempotent "first accepted at" etc.).
+      const patch: Record<string, unknown> = {
+        metadata: {
+          ...(currentRow.metadata ?? {}),
+          last_event: {
+            event_type: event.eventType,
+            provider_event_id: event.providerEventId,
+            received_at: event.receivedAt,
+            occurred_at: event.occurredAt
+          }
+        }
+      };
+      if (transitioned) {
+        patch.relationship_state = finalState;
+        patch.state_changed_at = event.receivedAt;
+      }
+      const targetTs = event.occurredAt ?? event.receivedAt;
+      if (event.eventType === "creator_invited" && !currentRow.invited_at) patch.invited_at = targetTs;
+      if (event.eventType === "creator_accepted" && !currentRow.accepted_at) patch.accepted_at = targetTs;
+      if (event.eventType === "creator_activated" && !currentRow.activated_at) patch.activated_at = targetTs;
+
+      const updated = await supabase
+        .from("fmf_creator_fyv_relationships")
+        .update(patch)
+        .eq("id", relationship.id)
+        .select(FMF_FYV_RELATIONSHIP_COLUMNS)
+        .single();
+      if (updated.error) throw new Error(updated.error.message);
+      const finalRow = updated.data as FmfCreatorFyvRelationship;
+
+      // (4) Insert the canonical event as the commit marker.
+      const inserted = await supabase
+        .from("of_events")
+        .insert({
+          creator_id: relationship.fmf_creator_id,
+          provider: FYV_EVENT_PROVIDER,
+          provider_event_id: event.providerEventId,
+          event_type: event.eventType,
+          payload: {
+            fyv_creator_id: event.fyvCreatorId,
+            fmf_creator_id: event.fmfCreatorId,
+            occurred_at: event.occurredAt,
+            raw: event.raw
+          },
+          received_at: event.receivedAt,
+          processed_at: event.receivedAt,
+          processing_status: "processed",
+          processing_error: null
+        })
+        .select("id")
+        .maybeSingle();
+      if (inserted.error) {
+        if (inserted.error.code === "23505") {
+          return { relationship: finalRow, transitioned, deduped: true };
+        }
+        throw new Error(inserted.error.message);
+      }
+
+      return { relationship: finalRow, transitioned, deduped: false };
     }
   };
 }

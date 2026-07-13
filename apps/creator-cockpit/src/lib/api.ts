@@ -37,6 +37,7 @@ import type {
   CreatorIntelligenceWorkspaceData,
   CreatorPlaybookProposal,
   CreatorPlaybookProposalState,
+  FmfCreatorFyvRelationship,
   OfRelationshipTimelineItem,
   OfSimulatedSubscriber,
   OfSubscriber,
@@ -232,6 +233,33 @@ export async function updatePlaybookProposal(proposalId: string, state: Extract<
 export async function createBuilderDraftFromProposal(proposalId: string): Promise<{ script: OfMessageScript }> {
   assertUuid(proposalId, "playbook proposal");
   return apiJson<{ script: OfMessageScript }>(`/playbook-proposals/${proposalId}/builder-draft`, jsonInit("POST", {}));
+}
+
+// FMF-1: FYV relationship read + agency Invite action. FMF owns the relationship
+// row; the outbound call to FYV happens server-side (never re-implements FYV's
+// invite delivery). Both routes are creator-scoped.
+export async function fetchCreatorFyvRelationship(
+  creatorId: string
+): Promise<{ ok: boolean; relationship: FmfCreatorFyvRelationship | null; error?: string }> {
+  assertUuid(creatorId, "creator");
+  return apiJson(`/creators/${creatorId}/fyv/relationship`);
+}
+
+export interface InviteCreatorToFyvResult {
+  ok: boolean;
+  relationship?: FmfCreatorFyvRelationship;
+  fyv_invoked?: boolean;
+  transitioned?: boolean;
+  fyv_response?: unknown;
+  error?: string;
+}
+
+export async function inviteCreatorToFyv(
+  creatorId: string,
+  payload: { fyv_creator_id?: string } = {}
+): Promise<InviteCreatorToFyvResult> {
+  assertUuid(creatorId, "creator");
+  return apiJson(`/creators/${creatorId}/fyv/invite`, jsonInit("POST", payload));
 }
 
 export type QueueItemAction = "approve_ai" | "respond" | "assign" | "ignore" | "pause";
