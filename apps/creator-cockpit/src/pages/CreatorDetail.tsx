@@ -73,7 +73,10 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
         fetchQueueWorkspace({ creatorId }).catch(() => null),
         fetchCreatorScripts(creatorId).catch(() => ({ scripts: [] })),
         fetchCreatorFyvRelationship(creatorId).catch(() => ({ ok: false, relationship: null })),
-        fetchCreatorReadiness(creatorId).catch(() => ({ ok: false as const })),
+        fetchCreatorReadiness(creatorId).catch(() => ({
+  ok: false as const,
+  readiness: undefined,
+})),
         fetchCreatorReadinessHistory(creatorId).catch(() => ({ ok: false as const, events: [] })),
         fetchCreatorActionHistory(creatorId).catch(() => ({ ok: false as const, executions: [] }))
       ]);
