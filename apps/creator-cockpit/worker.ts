@@ -121,6 +121,12 @@ import {
   type FmfFyvRelationshipStore,
   type FmfFyvEventApplyResult
 } from "@funkmyfans/of-types";
+// FMF-2: Creator Readiness Dashboard (pure aggregation of existing state).
+import {
+  calculateReadinessSummary,
+  type ReadinessInput,
+  type ReadinessSummary
+} from "@funkmyfans/of-types";
 import { createClient } from "@supabase/supabase-js";
 import moonsirenIntelligenceFixture from "./fixtures/moonsiren-creator-intelligence-package-v1.json";
 
@@ -478,6 +484,17 @@ async function handleApi(request: Request, env: Env, url: URL, ctx: ExecutionCon
   if (request.method === "POST" && creatorFyvInviteMatch) {
     const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
     const result = await inviteCreatorToFyv(supabase, env, creatorFyvInviteMatch[1], body);
+    return Response.json(result, { status: result.ok ? 200 : result.statusCode, headers: jsonHeaders });
+  }
+
+  // FMF-2: Creator Readiness Dashboard — aggregates existing state (of_creators,
+  // of_sync_runs, creator_intelligence_snapshots, opportunity projections,
+  // fmf_creator_fyv_relationships, of_message_scripts, of_revenue_journeys,
+  // of_automation_rules) into a single ReadinessSummary. READ-ONLY: never writes,
+  // never duplicates FYV data, never re-implements invite/import logic.
+  const creatorReadinessMatch = url.pathname.match(/^\/api\/creators\/([^/]+)\/readiness$/);
+  if (request.method === "GET" && creatorReadinessMatch) {
+    const result = await getCreatorReadiness(supabase, creatorReadinessMatch[1]);
     return Response.json(result, { status: result.ok ? 200 : result.statusCode, headers: jsonHeaders });
   }
 
@@ -11979,6 +11996,120 @@ function createSupabaseFmfFyvRelationshipStore(supabase: SupabaseClient): FmfFyv
       return { relationship: finalRow, transitioned, deduped: false };
     }
   };
+}
+
+/**
+ * FMF-2: Creator Readiness aggregator. READ-ONLY. Fans out to the existing
+ * repositories in parallel, then delegates to the pure calculateReadinessSummary
+ * — no aggregation logic lives in this route. Never writes.
+ */
+async function getCreatorReadiness(
+  supabase: SupabaseClient,
+  creatorId: string
+): Promise<
+  | { ok: true; readiness: ReadinessSummary }
+  | { ok: false; statusCode: number; error: string }
+> {
+  if (!isUuid(creatorId)) return { ok: false, statusCode: 400, error: "Creator id must be a database UUID" };
+
+  const [
+    creatorRes,
+    successfulSyncRes,
+    latestSnapshotRes,
+    opportunitiesRes,
+    fyvRelationshipRes,
+    scriptsRes,
+    activeScriptsRes,
+    journeysRes,
+    automationsRes
+  ] = await Promise.all([
+    supabase
+      .from("of_creators")
+      .select("id, betterfans_account_id, last_sync_at, active, onboarding_status")
+      .eq("id", creatorId)
+      .maybeSingle(),
+    supabase
+      .from("of_sync_runs")
+      .select("started_at, finished_at")
+      .eq("creator_id", creatorId)
+      .eq("status", "success")
+      .order("finished_at", { ascending: false, nullsFirst: false })
+      .limit(1)
+      .maybeSingle(),
+    supabase
+      .from("creator_intelligence_snapshots")
+      .select("id, source_package_reference, imported_at, superseded_at")
+      .eq("creator_id", creatorId)
+      .order("imported_at", { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+    supabase
+      .from("creator_intelligence_opportunity_projections")
+      .select("confidence, priority")
+      .eq("creator_id", creatorId),
+    supabase
+      .from("fmf_creator_fyv_relationships")
+      .select("fyv_creator_id, relationship_state, invited_at, accepted_at, activated_at")
+      .eq("fmf_creator_id", creatorId)
+      .maybeSingle(),
+    supabase.from("of_message_scripts").select("id", { count: "exact", head: true }).eq("creator_id", creatorId),
+    supabase
+      .from("of_message_scripts")
+      .select("id", { count: "exact", head: true })
+      .eq("creator_id", creatorId)
+      .eq("status", "active"),
+    supabase
+      .from("of_revenue_journeys")
+      .select("id", { count: "exact", head: true })
+      .eq("creator_id", creatorId)
+      .eq("status", "active"),
+    supabase
+      .from("of_automation_rules")
+      .select("id", { count: "exact", head: true })
+      .eq("creator_id", creatorId)
+      .eq("status", "active")
+  ]);
+
+  if (creatorRes.error) return { ok: false, statusCode: 500, error: creatorRes.error.message };
+  if (!creatorRes.data) return { ok: false, statusCode: 404, error: `No FMF creator ${creatorId}` };
+
+  const creator = creatorRes.data as {
+    id: string;
+    betterfans_account_id: string | null;
+    last_sync_at: string | null;
+    active: boolean;
+    onboarding_status: string;
+  };
+  const latestSuccessfulSyncAt =
+    (successfulSyncRes.data as { finished_at: string | null; started_at: string } | null)?.finished_at ??
+    (successfulSyncRes.data as { started_at: string } | null)?.started_at ??
+    null;
+  const latestSnapshot = (latestSnapshotRes.data as ReadinessInput["latestSnapshot"]) ?? null;
+  const opportunities =
+    ((opportunitiesRes.data as Array<{ confidence: number; priority: number }> | null) ?? []).map((o) => ({
+      confidence: o.confidence,
+      priority: o.priority
+    }));
+  const fyvRelationship = (fyvRelationshipRes.data as ReadinessInput["fyvRelationship"]) ?? null;
+
+  // Missing-relation degradation: if a count query fails because the table is
+  // absent (rare on dev DBs), treat the count as 0 rather than 500-ing.
+  const safeCount = (res: { count: number | null; error: unknown }) =>
+    typeof res.count === "number" && res.count >= 0 ? res.count : 0;
+
+  const input: ReadinessInput = {
+    creator,
+    latestSuccessfulSyncAt,
+    latestSnapshot,
+    opportunities,
+    fyvRelationship,
+    scriptCount: safeCount(scriptsRes as { count: number | null; error: unknown }),
+    activeScriptCount: safeCount(activeScriptsRes as { count: number | null; error: unknown }),
+    activeJourneyCount: safeCount(journeysRes as { count: number | null; error: unknown }),
+    activeAutomationCount: safeCount(automationsRes as { count: number | null; error: unknown })
+  };
+
+  return { ok: true, readiness: calculateReadinessSummary(input) };
 }
 
 function isAuthorizedOpportunityPersist(request: Request, env: Env) {

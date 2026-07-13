@@ -38,6 +38,7 @@ import type {
   CreatorPlaybookProposal,
   CreatorPlaybookProposalState,
   FmfCreatorFyvRelationship,
+  ReadinessSummary,
   OfRelationshipTimelineItem,
   OfSimulatedSubscriber,
   OfSubscriber,
@@ -260,6 +261,14 @@ export async function inviteCreatorToFyv(
 ): Promise<InviteCreatorToFyvResult> {
   assertUuid(creatorId, "creator");
   return apiJson(`/creators/${creatorId}/fyv/invite`, jsonInit("POST", payload));
+}
+
+// FMF-2: Creator Readiness Dashboard — read-only aggregation.
+export async function fetchCreatorReadiness(
+  creatorId: string
+): Promise<{ ok: boolean; readiness?: ReadinessSummary; error?: string }> {
+  assertUuid(creatorId, "creator");
+  return apiJson(`/creators/${creatorId}/readiness`);
 }
 
 export type QueueItemAction = "approve_ai" | "respond" | "assign" | "ignore" | "pause";

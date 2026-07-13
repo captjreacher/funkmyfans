@@ -4535,3 +4535,295 @@ export async function consumeFmfFyvRelationshipEvent(
     deduped: applied.deduped
   };
 }
+
+/* ==========================================================================
+ * FMF-2: Creator Readiness Dashboard — PURE, deterministic aggregation.
+ *
+ * Answers ONE question: "Is this creator operationally ready?"
+ * Aggregates EXISTING system state — never writes, never duplicates FYV data,
+ * never re-implements invite/import logic. Callers gather inputs from existing
+ * repositories (of_creators, of_sync_runs, creator_intelligence_snapshots,
+ * creator_intelligence_opportunity_projections, fmf_creator_fyv_relationships
+ * [FMF-1], of_message_scripts, of_revenue_journeys, of_automation_rules) and
+ * hand the pure shape below to calculateReadinessSummary. No I/O here.
+ * ========================================================================== */
+
+export type ReadinessBadge = "Not Ready" | "In Progress" | "Operational" | "Production Ready";
+
+export type BetterFansReadinessStatus = "Not Connected" | "Connected" | "Sync Required";
+export type IntelligenceReadinessStatus = "Not Started" | "Imported" | "Out of Date";
+export type FyvAccessReadinessStatus = "Pending" | "Invited" | "Accepted" | "Active";
+export type OpportunitiesReadinessStatus = "Not Generated" | "Generated";
+export type JourneysReadinessStatus = "None" | "Configured" | "Running";
+
+/** Every section is worth the same weight; per-state score is fractional within it. */
+export const READINESS_SECTION_WEIGHT = 20;
+
+export interface ReadinessBetterFansSection {
+  status: BetterFansReadinessStatus;
+  score: number;
+  betterfans_account_id: string | null;
+  last_sync_at: string | null;
+  profile_synced: boolean;
+}
+
+export interface ReadinessIntelligenceSection {
+  status: IntelligenceReadinessStatus;
+  score: number;
+  latest_snapshot_id: string | null;
+  source_package_reference: string | null;
+  imported_at: string | null;
+  superseded_at: string | null;
+}
+
+export interface ReadinessFyvAccessSection {
+  status: FyvAccessReadinessStatus;
+  score: number;
+  fyv_creator_id: string | null;
+  relationship_state: FmfCreatorFyvRelationshipState;
+  invited_at: string | null;
+  accepted_at: string | null;
+  activated_at: string | null;
+  can_resend_invite: boolean;
+}
+
+export interface ReadinessOpportunitiesSection {
+  status: OpportunitiesReadinessStatus;
+  score: number;
+  count: number;
+  highest_confidence: number | null;
+  highest_priority: number | null;
+}
+
+export interface ReadinessJourneysSection {
+  status: JourneysReadinessStatus;
+  score: number;
+  playbook_count: number;
+  journey_count: number;
+  active_automation_count: number;
+}
+
+export interface ReadinessSummary {
+  readinessScore: number;
+  readinessStatus: ReadinessBadge;
+  /** Short hint describing the next operational action, or null when fully ready. */
+  nextAction: string | null;
+  betterfans: ReadinessBetterFansSection;
+  intelligence: ReadinessIntelligenceSection;
+  fyvAccess: ReadinessFyvAccessSection;
+  opportunities: ReadinessOpportunitiesSection;
+  journeys: ReadinessJourneysSection;
+}
+
+/** All inputs are aggregated from existing repositories; the calculator is pure. */
+export interface ReadinessInput {
+  creator: {
+    id: string;
+    betterfans_account_id: string | null;
+    last_sync_at: string | null;
+    active: boolean;
+    onboarding_status: string;
+  };
+  /**
+   * A successful sync marker for the creator (any completed of_sync_runs row).
+   * Null when there has never been a successful sync.
+   */
+  latestSuccessfulSyncAt: string | null;
+  /** Latest imported intelligence snapshot (or null when none imported). */
+  latestSnapshot: {
+    id: string;
+    source_package_reference: string;
+    imported_at: string;
+    superseded_at: string | null;
+  } | null;
+  /** All opportunity projections for the creator (may be empty). */
+  opportunities: Array<{ confidence: number; priority: number }>;
+  /** FMF↔FYV relationship row (or null when no invite has ever been ensured). */
+  fyvRelationship: {
+    fyv_creator_id: string | null;
+    relationship_state: FmfCreatorFyvRelationshipState;
+    invited_at: string | null;
+    accepted_at: string | null;
+    activated_at: string | null;
+  } | null;
+  /** Playbook / script counts (of_message_scripts). */
+  scriptCount: number;
+  activeScriptCount: number;
+  /** Revenue journey count (of_revenue_journeys) with active state. */
+  activeJourneyCount: number;
+  /** Automation rule count with status='active' (of_automation_rules). */
+  activeAutomationCount: number;
+}
+
+function scoreForBadge(score: number): ReadinessBadge {
+  if (score >= 100) return "Production Ready";
+  if (score >= 80) return "Operational";
+  if (score >= 40) return "In Progress";
+  return "Not Ready";
+}
+
+function calculateBetterFansSection(input: ReadinessInput): ReadinessBetterFansSection {
+  const accountId = input.creator.betterfans_account_id;
+  const synced = Boolean(input.creator.last_sync_at) || Boolean(input.latestSuccessfulSyncAt);
+  if (!accountId) {
+    return { status: "Not Connected", score: 0, betterfans_account_id: null, last_sync_at: null, profile_synced: false };
+  }
+  if (!synced) {
+    return {
+      status: "Sync Required",
+      score: Math.round(READINESS_SECTION_WEIGHT * 0.5),
+      betterfans_account_id: accountId,
+      last_sync_at: null,
+      profile_synced: false
+    };
+  }
+  return {
+    status: "Connected",
+    score: READINESS_SECTION_WEIGHT,
+    betterfans_account_id: accountId,
+    last_sync_at: input.creator.last_sync_at ?? input.latestSuccessfulSyncAt,
+    profile_synced: true
+  };
+}
+
+function calculateIntelligenceSection(input: ReadinessInput): ReadinessIntelligenceSection {
+  const snap = input.latestSnapshot;
+  if (!snap) {
+    return {
+      status: "Not Started",
+      score: 0,
+      latest_snapshot_id: null,
+      source_package_reference: null,
+      imported_at: null,
+      superseded_at: null
+    };
+  }
+  if (snap.superseded_at) {
+    return {
+      status: "Out of Date",
+      score: Math.round(READINESS_SECTION_WEIGHT * 0.5),
+      latest_snapshot_id: snap.id,
+      source_package_reference: snap.source_package_reference,
+      imported_at: snap.imported_at,
+      superseded_at: snap.superseded_at
+    };
+  }
+  return {
+    status: "Imported",
+    score: READINESS_SECTION_WEIGHT,
+    latest_snapshot_id: snap.id,
+    source_package_reference: snap.source_package_reference,
+    imported_at: snap.imported_at,
+    superseded_at: null
+  };
+}
+
+function calculateFyvAccessSection(input: ReadinessInput): ReadinessFyvAccessSection {
+  const rel = input.fyvRelationship;
+  const state: FmfCreatorFyvRelationshipState = rel?.relationship_state ?? "pending";
+  // Fractional per-state credit — the spec's MoonSiren 68% example implies
+  // Invited earns 8/20; Accepted earns 14/20; Active earns 20/20; Pending 0.
+  const factor = state === "active" ? 1 : state === "accepted" ? 0.7 : state === "invited" ? 0.4 : 0;
+  return {
+    status: state === "active" ? "Active" : state === "accepted" ? "Accepted" : state === "invited" ? "Invited" : "Pending",
+    score: Math.round(READINESS_SECTION_WEIGHT * factor),
+    fyv_creator_id: rel?.fyv_creator_id ?? null,
+    relationship_state: state,
+    invited_at: rel?.invited_at ?? null,
+    accepted_at: rel?.accepted_at ?? null,
+    activated_at: rel?.activated_at ?? null,
+    /** Resend Invite is offered only while the relationship is `invited`. */
+    can_resend_invite: state === "invited"
+  };
+}
+
+function calculateOpportunitiesSection(input: ReadinessInput): ReadinessOpportunitiesSection {
+  const count = input.opportunities.length;
+  if (count === 0) {
+    return { status: "Not Generated", score: 0, count: 0, highest_confidence: null, highest_priority: null };
+  }
+  // Priority convention (creator_intelligence_opportunity_projections): 0 <= priority <= 100;
+  // lower number = higher priority (per the seeded MoonSiren fixture 1,2,3).
+  const confidences = input.opportunities.map((o) => o.confidence);
+  const priorities = input.opportunities.map((o) => o.priority);
+  return {
+    status: "Generated",
+    score: READINESS_SECTION_WEIGHT,
+    count,
+    highest_confidence: Math.max(...confidences),
+    highest_priority: Math.min(...priorities)
+  };
+}
+
+function calculateJourneysSection(input: ReadinessInput): ReadinessJourneysSection {
+  const running =
+    input.activeScriptCount > 0 || input.activeJourneyCount > 0 || input.activeAutomationCount > 0;
+  const configured = !running && input.scriptCount > 0;
+  const journeys_status: JourneysReadinessStatus = running ? "Running" : configured ? "Configured" : "None";
+  const score =
+    journeys_status === "Running"
+      ? READINESS_SECTION_WEIGHT
+      : journeys_status === "Configured"
+        ? Math.round(READINESS_SECTION_WEIGHT * 0.6)
+        : 0;
+  return {
+    status: journeys_status,
+    score,
+    playbook_count: input.scriptCount,
+    journey_count: input.activeJourneyCount,
+    active_automation_count: input.activeAutomationCount
+  };
+}
+
+/**
+ * Pure, deterministic readiness aggregation. Given all inputs, returns a
+ * ReadinessSummary. Fully unit-testable — no I/O, no time-of-day dependency.
+ */
+export function calculateReadinessSummary(input: ReadinessInput): ReadinessSummary {
+  const betterfans = calculateBetterFansSection(input);
+  const intelligence = calculateIntelligenceSection(input);
+  const fyvAccess = calculateFyvAccessSection(input);
+  const opportunities = calculateOpportunitiesSection(input);
+  const journeys = calculateJourneysSection(input);
+  const raw = betterfans.score + intelligence.score + fyvAccess.score + opportunities.score + journeys.score;
+  const readinessScore = Math.max(0, Math.min(100, Math.round(raw)));
+  const readinessStatus = scoreForBadge(readinessScore);
+
+  // The next actionable step. Order mirrors the operational path.
+  let nextAction: string | null = null;
+  if (betterfans.status !== "Connected") {
+    nextAction =
+      betterfans.status === "Not Connected"
+        ? "Connect the creator's BetterFans account"
+        : "Run a BetterFans sync to complete the connection";
+  } else if (intelligence.status !== "Imported") {
+    nextAction =
+      intelligence.status === "Not Started"
+        ? "Import the FYV intelligence package"
+        : "Re-import intelligence — the latest snapshot is out of date";
+  } else if (fyvAccess.status !== "Active") {
+    nextAction =
+      fyvAccess.status === "Pending"
+        ? "Invite the creator to FYV"
+        : fyvAccess.status === "Invited"
+          ? "Awaiting creator acceptance in FYV (Resend Invite is available)"
+          : "Awaiting FYV to activate the creator";
+  } else if (opportunities.status !== "Generated") {
+    nextAction = "Re-import intelligence to generate opportunities";
+  } else if (journeys.status === "None") {
+    nextAction = "Create a playbook or journey for this creator";
+  } else if (journeys.status === "Configured") {
+    nextAction = "Activate a playbook to move journeys into Running";
+  }
+
+  return {
+    readinessScore,
+    readinessStatus,
+    nextAction,
+    betterfans,
+    intelligence,
+    fyvAccess,
+    opportunities,
+    journeys
+  };
+}
