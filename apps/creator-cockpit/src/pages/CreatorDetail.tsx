@@ -1,7 +1,7 @@
 import { Bot, ClipboardList, Gauge, Link2, PlaySquare, RefreshCw, Send, Sparkles, UserRound, Users, Zap } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import type { CreatorPlaybookProposal, FmfCreatorFyvRelationship, ReadinessSummary, SyncType } from "@funkmyfans/of-types";
+import type { CreatorPlaybookProposal, CreatorReadinessEvent, FmfCreatorFyvRelationship, ReadinessSummary, SyncType } from "@funkmyfans/of-types";
 import {
   createBuilderDraftFromProposal,
   createPlaybookProposal,
@@ -10,6 +10,7 @@ import {
   fetchCreatorIntelligence,
   fetchCreatorPlaybookProposals,
   fetchCreatorReadiness,
+  fetchCreatorReadinessHistory,
   fetchCreatorScripts,
   fetchQueueWorkspace,
   importCreatorIntelligenceFixture,
@@ -50,6 +51,8 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
   const [fyvBusy, setFyvBusy] = useState(false);
   // FMF-2: Creator Readiness dashboard (read-only aggregation).
   const [readiness, setReadiness] = useState<ReadinessSummary | null>(null);
+  // FMF-3: Recent readiness activity (append-only history).
+  const [readinessHistory, setReadinessHistory] = useState<CreatorReadinessEvent[]>([]);
 
   useEffect(() => {
     void refresh();
@@ -60,14 +63,15 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
 
   async function refresh() {
     try {
-      const [detail, intelligenceResult, proposalsResult, queues, scripts, fyv, readinessResult] = await Promise.all([
+      const [detail, intelligenceResult, proposalsResult, queues, scripts, fyv, readinessResult, readinessHist] = await Promise.all([
         fetchCreatorDetail(creatorId),
         fetchCreatorIntelligence(creatorId).catch(() => null),
         fetchCreatorPlaybookProposals(creatorId).catch(() => ({ proposals: [] })),
         fetchQueueWorkspace({ creatorId }).catch(() => null),
         fetchCreatorScripts(creatorId).catch(() => ({ scripts: [] })),
         fetchCreatorFyvRelationship(creatorId).catch(() => ({ ok: false, relationship: null })),
-        fetchCreatorReadiness(creatorId).catch(() => ({ ok: false as const }))
+        fetchCreatorReadiness(creatorId).catch(() => ({ ok: false as const })),
+        fetchCreatorReadinessHistory(creatorId).catch(() => ({ ok: false as const, events: [] }))
       ]);
       setData(detail);
       setIntelligence(intelligenceResult ?? null);
@@ -76,6 +80,7 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
       setPlaybooks(scripts.scripts);
       setFyvRelationship(fyv?.relationship ?? null);
       setReadiness(readinessResult?.readiness ?? null);
+      setReadinessHistory(readinessHist?.events ?? []);
       setError(null);
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Unable to load creator workspace");
@@ -239,6 +244,7 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
           fyvBusy={fyvBusy}
           onInviteToFyv={handleInviteToFyv}
           readiness={readiness}
+          readinessHistory={readinessHistory}
         />
       ) : null}
       {tab === "Subscribers" ? <SubscribersTab data={data} /> : null}
@@ -261,10 +267,18 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
   );
 }
 
-// FMF-2: Creator Readiness dashboard card. Pure display of the ReadinessSummary
-// aggregated by GET /api/creators/:id/readiness. NOT a wizard, NOT a profile
-// duplicate — one card summarising "Is this creator operationally ready?".
-function CreatorReadinessCard({ readiness }: { readiness: ReadinessSummary | null }) {
+// FMF-2/3: Creator Readiness dashboard card. Pure display of the ReadinessSummary
+// aggregated by GET /api/creators/:id/readiness, plus (FMF-3) a "Recent readiness
+// activity" list from GET /api/creators/:id/readiness/history. NOT a wizard,
+// NOT a profile duplicate — one card summarising "Is this creator operationally
+// ready?" with a live audit trail.
+function CreatorReadinessCard({
+  readiness,
+  history
+}: {
+  readiness: ReadinessSummary | null;
+  history: CreatorReadinessEvent[];
+}) {
   if (!readiness) {
     return (
       <section className="premium-card rounded-lg p-4">
@@ -353,8 +367,79 @@ function CreatorReadinessCard({ readiness }: { readiness: ReadinessSummary | nul
           ]}
         />
       </div>
+      <ReadinessActivityList history={history} />
     </section>
   );
+}
+
+// FMF-3: Recent readiness activity — inline audit trail on the existing card
+// (no timeline elsewhere, per spec). Newest first; capped at 8 for legibility.
+function ReadinessActivityList({ history }: { history: CreatorReadinessEvent[] }) {
+  if (!history.length) {
+    return (
+      <div className="mt-4 rounded-md border border-blue-500/12 bg-[#0D1B2A]/55 p-3 text-xs text-blue-100/58">
+        No readiness activity recorded yet. Events appear here as the creator's readiness changes.
+      </div>
+    );
+  }
+  const recent = history.slice(0, 8);
+  return (
+    <div className="mt-4 rounded-md border border-blue-500/12 bg-[#0D1B2A]/55 p-3">
+      <div className="text-xs font-semibold uppercase tracking-[0.16em] text-cyan-300">Recent readiness activity</div>
+      <ul className="mt-2 space-y-1.5">
+        {recent.map((evt) => (
+          <li key={evt.id} className="flex items-baseline justify-between gap-3 text-sm">
+            <span className={`inline-flex items-center gap-2 truncate ${readinessActivityTone(evt.event_type)}`}>
+              <span aria-hidden="true">{readinessActivityGlyph(evt.event_type)}</span>
+              <span className="truncate">{readinessActivityLabel(evt)}</span>
+            </span>
+            <span className="shrink-0 tabular-nums text-xs text-blue-100/56">{formatDate(evt.created_at)}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function readinessActivityGlyph(type: CreatorReadinessEvent["event_type"]): string {
+  if (type === "creator_regressed") return "↓";
+  if (type === "creator_blocked") return "!";
+  if (type === "creator_unblocked") return "✓";
+  if (type === "creator_readiness_changed") return "•";
+  return "✓"; // milestone-reached
+}
+
+function readinessActivityTone(type: CreatorReadinessEvent["event_type"]): string {
+  if (type === "creator_regressed" || type === "creator_blocked") return "text-amber-200";
+  if (type === "creator_reached_production") return "text-emerald-200";
+  if (type === "creator_reached_operational") return "text-cyan-200";
+  return "text-white";
+}
+
+function readinessActivityLabel(evt: CreatorReadinessEvent): string {
+  switch (evt.event_type) {
+    case "creator_reached_infrastructure":
+      return "Infrastructure ready — BetterFans connected";
+    case "creator_reached_intelligence":
+      return "FYV intelligence ready";
+    case "creator_reached_creator_ready":
+      return "Creator relationship ready";
+    case "creator_reached_operational":
+      return "Operational readiness reached";
+    case "creator_reached_production":
+      return "Production ready";
+    case "creator_regressed":
+      return `Regressed from ${evt.previous_milestone ?? "?"} → ${evt.new_milestone}`;
+    case "creator_blocked":
+      return evt.blocking_issues[0]
+        ? `Blocked: ${evt.blocking_issues[0]}`
+        : "Creator blocked";
+    case "creator_unblocked":
+      return "Creator unblocked";
+    case "creator_readiness_changed":
+    default:
+      return `Readiness ${evt.previous_score ?? "—"}% → ${evt.new_score}%`;
+  }
 }
 
 function ReadinessSectionRow({
@@ -535,18 +620,20 @@ function ProfileTab({
   fyvRelationship,
   fyvBusy,
   onInviteToFyv,
-  readiness
+  readiness,
+  readinessHistory
 }: {
   data: CreatorDetailData;
   fyvRelationship: FmfCreatorFyvRelationship | null;
   fyvBusy: boolean;
   onInviteToFyv: () => Promise<void>;
   readiness: ReadinessSummary | null;
+  readinessHistory: CreatorReadinessEvent[];
 }) {
   const latest = data.snapshots[0];
   return (
     <div className="space-y-4">
-      <CreatorReadinessCard readiness={readiness} />
+      <CreatorReadinessCard readiness={readiness} history={readinessHistory} />
       <FyvOnboardingStatus creator={data.creator} />
       <FyvRelationshipCard
         relationship={fyvRelationship}

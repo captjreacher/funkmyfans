@@ -39,6 +39,7 @@ import type {
   CreatorPlaybookProposalState,
   FmfCreatorFyvRelationship,
   ReadinessSummary,
+  CreatorReadinessEvent,
   OfRelationshipTimelineItem,
   OfSimulatedSubscriber,
   OfSubscriber,
@@ -269,6 +270,14 @@ export async function fetchCreatorReadiness(
 ): Promise<{ ok: boolean; readiness?: ReadinessSummary; error?: string }> {
   assertUuid(creatorId, "creator");
   return apiJson(`/creators/${creatorId}/readiness`);
+}
+
+// FMF-3: Creator Readiness Orchestrator — append-only history (read-only).
+export async function fetchCreatorReadinessHistory(
+  creatorId: string
+): Promise<{ ok: boolean; events?: CreatorReadinessEvent[]; error?: string }> {
+  assertUuid(creatorId, "creator");
+  return apiJson(`/creators/${creatorId}/readiness/history`);
 }
 
 export type QueueItemAction = "approve_ai" | "respond" | "assign" | "ignore" | "pause";
