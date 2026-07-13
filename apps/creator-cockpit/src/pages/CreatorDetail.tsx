@@ -1,7 +1,7 @@
-import { Bot, ClipboardList, Link2, PlaySquare, RefreshCw, Send, Sparkles, UserRound, Users, Zap } from "lucide-react";
+import { Bot, ClipboardList, Gauge, Link2, PlaySquare, RefreshCw, Send, Sparkles, UserRound, Users, Zap } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import type { CreatorPlaybookProposal, FmfCreatorFyvRelationship, SyncType } from "@funkmyfans/of-types";
+import type { CreatorPlaybookProposal, FmfCreatorFyvRelationship, ReadinessSummary, SyncType } from "@funkmyfans/of-types";
 import {
   createBuilderDraftFromProposal,
   createPlaybookProposal,
@@ -9,6 +9,7 @@ import {
   fetchCreatorFyvRelationship,
   fetchCreatorIntelligence,
   fetchCreatorPlaybookProposals,
+  fetchCreatorReadiness,
   fetchCreatorScripts,
   fetchQueueWorkspace,
   importCreatorIntelligenceFixture,
@@ -47,6 +48,8 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
   // alongside FYV-1's FyvOnboardingStatus card).
   const [fyvRelationship, setFyvRelationship] = useState<FmfCreatorFyvRelationship | null>(null);
   const [fyvBusy, setFyvBusy] = useState(false);
+  // FMF-2: Creator Readiness dashboard (read-only aggregation).
+  const [readiness, setReadiness] = useState<ReadinessSummary | null>(null);
 
   useEffect(() => {
     void refresh();
@@ -57,13 +60,14 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
 
   async function refresh() {
     try {
-      const [detail, intelligenceResult, proposalsResult, queues, scripts, fyv] = await Promise.all([
+      const [detail, intelligenceResult, proposalsResult, queues, scripts, fyv, readinessResult] = await Promise.all([
         fetchCreatorDetail(creatorId),
         fetchCreatorIntelligence(creatorId).catch(() => null),
         fetchCreatorPlaybookProposals(creatorId).catch(() => ({ proposals: [] })),
         fetchQueueWorkspace({ creatorId }).catch(() => null),
         fetchCreatorScripts(creatorId).catch(() => ({ scripts: [] })),
-        fetchCreatorFyvRelationship(creatorId).catch(() => ({ ok: false, relationship: null }))
+        fetchCreatorFyvRelationship(creatorId).catch(() => ({ ok: false, relationship: null })),
+        fetchCreatorReadiness(creatorId).catch(() => ({ ok: false as const }))
       ]);
       setData(detail);
       setIntelligence(intelligenceResult ?? null);
@@ -71,6 +75,7 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
       setQueueWorkspace(queues);
       setPlaybooks(scripts.scripts);
       setFyvRelationship(fyv?.relationship ?? null);
+      setReadiness(readinessResult?.readiness ?? null);
       setError(null);
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Unable to load creator workspace");
@@ -233,6 +238,7 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
           fyvRelationship={fyvRelationship}
           fyvBusy={fyvBusy}
           onInviteToFyv={handleInviteToFyv}
+          readiness={readiness}
         />
       ) : null}
       {tab === "Subscribers" ? <SubscribersTab data={data} /> : null}
@@ -253,6 +259,147 @@ export function CreatorDetail({ creatorId }: { creatorId: string }) {
       {tab === "Activity" ? <ActivityTab data={data} /> : null}
     </main>
   );
+}
+
+// FMF-2: Creator Readiness dashboard card. Pure display of the ReadinessSummary
+// aggregated by GET /api/creators/:id/readiness. NOT a wizard, NOT a profile
+// duplicate — one card summarising "Is this creator operationally ready?".
+function CreatorReadinessCard({ readiness }: { readiness: ReadinessSummary | null }) {
+  if (!readiness) {
+    return (
+      <section className="premium-card rounded-lg p-4">
+        <SectionTitle icon={Gauge} title="Creator readiness" />
+        <div className="mt-3 text-sm text-blue-100/58">Readiness snapshot unavailable.</div>
+      </section>
+    );
+  }
+  const { readinessScore, readinessStatus, nextAction, betterfans, intelligence, fyvAccess, opportunities, journeys } = readiness;
+  return (
+    <section className="premium-card rounded-lg p-4">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <div className="min-w-0">
+          <SectionTitle icon={Gauge} title="Creator readiness" />
+          <div className="mt-2 text-sm text-blue-100/58">Is this creator operationally ready?</div>
+        </div>
+        <div className="flex items-center gap-3">
+          <div className="text-3xl font-semibold tabular-nums text-white">{readinessScore}%</div>
+          <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${readinessBadgeTone(readinessStatus)}`}>{readinessStatus}</span>
+        </div>
+      </div>
+      {nextAction ? (
+        <div className="mt-3 rounded-md border border-cyan-300/25 bg-cyan-500/10 px-3 py-2 text-sm text-cyan-100">
+          Next: {nextAction}
+        </div>
+      ) : (
+        <div className="mt-3 rounded-md border border-emerald-400/25 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-100">
+          All operational checks pass — production ready.
+        </div>
+      )}
+      <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+        <ReadinessSectionRow
+          title="BetterFans"
+          status={betterfans.status}
+          score={betterfans.score}
+          tone={betterfans.status === "Connected" ? "good" : betterfans.status === "Sync Required" ? "warn" : "muted"}
+          rows={[
+            ["Account", betterfans.betterfans_account_id ?? "not linked"],
+            ["Last sync", betterfans.last_sync_at ? formatDate(betterfans.last_sync_at) : "never"],
+            ["Profile synced", betterfans.profile_synced ? "yes" : "no"]
+          ]}
+        />
+        <ReadinessSectionRow
+          title="FYV Intelligence"
+          status={intelligence.status}
+          score={intelligence.score}
+          tone={intelligence.status === "Imported" ? "good" : intelligence.status === "Out of Date" ? "warn" : "muted"}
+          rows={[
+            ["Package", intelligence.source_package_reference ?? "not imported"],
+            ["Snapshot id", intelligence.latest_snapshot_id ?? "—"],
+            ["Imported", intelligence.imported_at ? formatDate(intelligence.imported_at) : "—"]
+          ]}
+        />
+        <ReadinessSectionRow
+          title="FYV Access"
+          status={fyvAccess.status}
+          score={fyvAccess.score}
+          tone={fyvAccess.status === "Active" ? "good" : fyvAccess.status === "Accepted" || fyvAccess.status === "Invited" ? "warn" : "muted"}
+          rows={[
+            ["FYV creator id", fyvAccess.fyv_creator_id ?? "not linked"],
+            ["Relationship", fyvAccess.relationship_state],
+            ["Invited", fyvAccess.invited_at ? formatDate(fyvAccess.invited_at) : "—"],
+            ["Accepted", fyvAccess.accepted_at ? formatDate(fyvAccess.accepted_at) : "—"]
+          ]}
+        />
+        <ReadinessSectionRow
+          title="Opportunities"
+          status={opportunities.status}
+          score={opportunities.score}
+          tone={opportunities.status === "Generated" ? "good" : "muted"}
+          rows={[
+            ["Count", String(opportunities.count)],
+            ["Highest confidence", opportunities.highest_confidence != null ? `${opportunities.highest_confidence}` : "—"],
+            ["Highest priority", opportunities.highest_priority != null ? `${opportunities.highest_priority}` : "—"]
+          ]}
+        />
+        <ReadinessSectionRow
+          title="Journeys"
+          status={journeys.status}
+          score={journeys.score}
+          tone={journeys.status === "Running" ? "good" : journeys.status === "Configured" ? "warn" : "muted"}
+          rows={[
+            ["Playbooks", String(journeys.playbook_count)],
+            ["Journeys", String(journeys.journey_count)],
+            ["Active automations", String(journeys.active_automation_count)]
+          ]}
+        />
+      </div>
+    </section>
+  );
+}
+
+function ReadinessSectionRow({
+  title,
+  status,
+  score,
+  tone,
+  rows
+}: {
+  title: string;
+  status: string;
+  score: number;
+  tone: "good" | "warn" | "muted";
+  rows: Array<[string, string]>;
+}) {
+  const chip =
+    tone === "good"
+      ? "bg-emerald-500/14 text-emerald-200"
+      : tone === "warn"
+        ? "bg-amber-500/14 text-amber-100"
+        : "bg-blue-400/12 text-blue-100";
+  return (
+    <div className="rounded-md border border-blue-500/12 bg-[#0D1B2A]/55 p-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-sm font-semibold text-white">{title}</div>
+        <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${chip}`}>{status}</span>
+      </div>
+      <div className="mt-1 text-xs text-blue-100/58">Score: {score} / 20</div>
+      <div className="mt-2 space-y-1">
+        {rows.map(([label, value]) => (
+          <div key={label} className="flex items-center justify-between gap-2 text-xs">
+            <span className="text-blue-100/58">{label}</span>
+            <span className="truncate font-semibold text-white">{value}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function readinessBadgeTone(badge: ReadinessSummary["readinessStatus"]) {
+  if (badge === "Production Ready") return "bg-emerald-500/16 text-emerald-200";
+  if (badge === "Operational") return "bg-cyan-500/16 text-cyan-200";
+  if (badge === "In Progress") return "bg-amber-500/16 text-amber-100";
+  return "bg-rose-500/16 text-rose-200";
 }
 
 type FyvPackagePointerView = {
@@ -387,16 +534,19 @@ function ProfileTab({
   data,
   fyvRelationship,
   fyvBusy,
-  onInviteToFyv
+  onInviteToFyv,
+  readiness
 }: {
   data: CreatorDetailData;
   fyvRelationship: FmfCreatorFyvRelationship | null;
   fyvBusy: boolean;
   onInviteToFyv: () => Promise<void>;
+  readiness: ReadinessSummary | null;
 }) {
   const latest = data.snapshots[0];
   return (
     <div className="space-y-4">
+      <CreatorReadinessCard readiness={readiness} />
       <FyvOnboardingStatus creator={data.creator} />
       <FyvRelationshipCard
         relationship={fyvRelationship}
