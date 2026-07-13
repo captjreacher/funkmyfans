@@ -4827,3 +4827,310 @@ export function calculateReadinessSummary(input: ReadinessInput): ReadinessSumma
     journeys
   };
 }
+
+/* ==========================================================================
+ * FMF-3: Creator Readiness Orchestrator — PURE, deterministic transition
+ * detection and orchestration planning.
+ *
+ * Given the CURRENT readiness (from FMF-2's calculateReadinessSummary) and the
+ * PREVIOUS persisted readiness event (if any), the orchestrator detects
+ * meaningful state transitions and yields:
+ *   - a milestone assignment
+ *   - a set of readiness EVENTS to record (idempotent by design)
+ *   - a set of orchestration ACTIONS to dispatch through EXISTING services
+ *   - the current blocking issues and warnings
+ *
+ * The orchestrator NEVER executes business logic itself — it describes
+ * intent. Downstream dispatch (journey activation, automation enable/pause)
+ * happens through existing event/task infrastructure consuming these events.
+ * ========================================================================== */
+
+/**
+ * Operational milestones a creator crosses on the readiness path. Ordered by
+ * ordinal below; higher ordinal = more ready. Regression = ordinal decrease.
+ */
+export type ReadinessMilestone =
+  | "discovery"
+  | "infrastructure_ready"
+  | "intelligence_ready"
+  | "creator_ready"
+  | "operational"
+  | "production_ready";
+
+export const READINESS_MILESTONES: ReadinessMilestone[] = [
+  "discovery",
+  "infrastructure_ready",
+  "intelligence_ready",
+  "creator_ready",
+  "operational",
+  "production_ready"
+];
+
+const READINESS_MILESTONE_ORDINAL: Record<ReadinessMilestone, number> = {
+  discovery: 0,
+  infrastructure_ready: 1,
+  intelligence_ready: 2,
+  creator_ready: 3,
+  operational: 4,
+  production_ready: 5
+};
+
+/**
+ * Score → milestone thresholds. Aligned with FMF-2 scoring so the spec's
+ * MoonSiren trajectory 20 → 40 → 68 → 84 → 100 crosses milestones cleanly:
+ *   20  → infrastructure_ready
+ *   40  → intelligence_ready
+ *   68  → creator_ready
+ *   84  → operational
+ *   100 → production_ready
+ */
+export function milestoneForReadiness(score: number): ReadinessMilestone {
+  if (score >= 100) return "production_ready";
+  if (score >= 80) return "operational";
+  if (score >= 60) return "creator_ready";
+  if (score >= 40) return "intelligence_ready";
+  if (score >= 20) return "infrastructure_ready";
+  return "discovery";
+}
+
+export function readinessMilestoneOrdinal(m: ReadinessMilestone): number {
+  return READINESS_MILESTONE_ORDINAL[m];
+}
+
+/**
+ * The milestone event fired when a creator first CROSSES UP into a milestone.
+ * `creator_reached_discovery` is intentionally absent — discovery is the seed
+ * state, never a "crossing."
+ */
+export type ReadinessMilestoneReachedEventType =
+  | "creator_reached_infrastructure"
+  | "creator_reached_intelligence"
+  | "creator_reached_creator_ready"
+  | "creator_reached_operational"
+  | "creator_reached_production";
+
+export type ReadinessEventType =
+  | "creator_readiness_changed"
+  | ReadinessMilestoneReachedEventType
+  | "creator_regressed"
+  | "creator_blocked"
+  | "creator_unblocked";
+
+const MILESTONE_TO_REACHED_EVENT: Record<Exclude<ReadinessMilestone, "discovery">, ReadinessMilestoneReachedEventType> = {
+  infrastructure_ready: "creator_reached_infrastructure",
+  intelligence_ready: "creator_reached_intelligence",
+  creator_ready: "creator_reached_creator_ready",
+  operational: "creator_reached_operational",
+  production_ready: "creator_reached_production"
+};
+
+export function reachedEventForMilestone(m: ReadinessMilestone): ReadinessMilestoneReachedEventType | null {
+  return m === "discovery" ? null : MILESTONE_TO_REACHED_EVENT[m];
+}
+
+/**
+ * A declarative orchestration action. The orchestrator NEVER executes these —
+ * it records them on the readiness event so downstream services (existing
+ * automation engine, task queue, etc.) can consume them.
+ */
+export type ReadinessOrchestrationActionType =
+  | "queue_default_journey_activation"
+  | "enable_operational_automations"
+  | "pause_creator_automations"
+  | "refresh_readiness";
+
+export interface ReadinessOrchestrationAction {
+  type: ReadinessOrchestrationActionType;
+  reason: string;
+  targetMilestone?: ReadinessMilestone;
+}
+
+/** One event the orchestrator asks the persistence layer to record. */
+export interface PlannedReadinessEvent {
+  eventType: ReadinessEventType;
+  previousScore: number | null;
+  newScore: number;
+  previousStatus: ReadinessBadge | null;
+  newStatus: ReadinessBadge;
+  previousMilestone: ReadinessMilestone | null;
+  newMilestone: ReadinessMilestone;
+  triggerEvent: string | null;
+  blockingIssues: string[];
+  warnings: string[];
+  actions: ReadinessOrchestrationAction[];
+}
+
+/** Persisted event row shape (public.creator_readiness_events). */
+export interface CreatorReadinessEvent {
+  id: string;
+  creator_id: string;
+  event_type: ReadinessEventType;
+  previous_score: number | null;
+  new_score: number;
+  previous_status: ReadinessBadge | null;
+  new_status: ReadinessBadge;
+  previous_milestone: ReadinessMilestone | null;
+  new_milestone: ReadinessMilestone;
+  trigger_event: string | null;
+  blocking_issues: string[];
+  warnings: string[];
+  actions: ReadinessOrchestrationAction[];
+  metadata: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface ReadinessOrchestrationInput {
+  current: ReadinessSummary;
+  /** Most recent persisted event (or null when this is the creator's first reconcile). */
+  previous: {
+    score: number;
+    status: ReadinessBadge;
+    milestone: ReadinessMilestone;
+    blockingIssues: string[];
+  } | null;
+  /** What caused this reconciliation (for lineage), e.g. 'creator_accepted' or 'betterfans_sync_completed'. */
+  triggerEvent?: string | null;
+}
+
+export interface ReadinessOrchestrationPlan {
+  newMilestone: ReadinessMilestone;
+  previousMilestone: ReadinessMilestone | null;
+  transitioned: boolean;
+  regressed: boolean;
+  reached: ReadinessMilestoneReachedEventType[];
+  blockingIssues: string[];
+  warnings: string[];
+  actions: ReadinessOrchestrationAction[];
+  events: PlannedReadinessEvent[];
+}
+
+/**
+ * Blocking issues (hard). Any of these keeps a creator's readiness path
+ * fundamentally broken. Order matters: first item is the top-line block.
+ */
+export function readinessBlockingIssues(summary: ReadinessSummary): string[] {
+  const issues: string[] = [];
+  if (summary.betterfans.status === "Not Connected") issues.push("BetterFans account not connected");
+  if (summary.intelligence.status === "Not Started") issues.push("FYV intelligence not imported");
+  if (summary.fyvAccess.status === "Pending") issues.push("Creator not linked to FYV");
+  return issues;
+}
+
+/**
+ * Warnings (soft). Not blocking, but the operator should be aware.
+ */
+export function readinessWarnings(summary: ReadinessSummary): string[] {
+  const warns: string[] = [];
+  if (summary.betterfans.status === "Sync Required") warns.push("BetterFans sync required");
+  if (summary.intelligence.status === "Out of Date") warns.push("FYV intelligence is out of date");
+  if (summary.fyvAccess.status === "Invited") warns.push("Awaiting FYV creator acceptance");
+  if (summary.fyvAccess.status === "Accepted") warns.push("Awaiting FYV activation");
+  if (summary.journeys.status === "None") warns.push("No journeys configured");
+  else if (summary.journeys.status === "Configured") warns.push("Playbook configured but not running");
+  return warns;
+}
+
+/** Deterministic orchestration planner. Pure, no I/O, replay-safe. */
+export function planReadinessOrchestration(input: ReadinessOrchestrationInput): ReadinessOrchestrationPlan {
+  const current = input.current;
+  const previous = input.previous;
+  const trigger = input.triggerEvent ?? null;
+
+  const newMilestone = milestoneForReadiness(current.readinessScore);
+  const previousMilestone: ReadinessMilestone | null = previous?.milestone ?? null;
+  const previousOrdinal = previousMilestone == null ? -1 : readinessMilestoneOrdinal(previousMilestone);
+  const newOrdinal = readinessMilestoneOrdinal(newMilestone);
+  const transitioned = previousMilestone !== newMilestone;
+  const regressed = previousOrdinal >= 0 && newOrdinal < previousOrdinal;
+
+  // Reached-milestone events: fire ONE event per milestone strictly greater
+  // than the previous. Idempotent: replayed with the same previous, yields the
+  // same set. Persistence enforces one-shot uniqueness at the DB layer too.
+  const reached: ReadinessMilestoneReachedEventType[] = [];
+  if (newOrdinal > previousOrdinal) {
+    for (let ord = Math.max(previousOrdinal, 0) + 1; ord <= newOrdinal; ord += 1) {
+      const stepMilestone = READINESS_MILESTONES[ord];
+      const evt = reachedEventForMilestone(stepMilestone);
+      if (evt) reached.push(evt);
+    }
+  }
+
+  const blockingIssues = readinessBlockingIssues(current);
+  const warnings = readinessWarnings(current);
+  // Blocked/unblocked events fire ONLY on a genuine transition — the FIRST
+  // reconcile (previous == null) is a seed, not a transition, so it never fires
+  // creator_blocked even if the creator starts with blocks.
+  const hasPrevious = previous != null;
+  const wasBlocked = hasPrevious && previous!.blockingIssues.length > 0;
+  const isBlocked = blockingIssues.length > 0;
+  const nowBlocked = hasPrevious && isBlocked && !wasBlocked;
+  const nowUnblocked = hasPrevious && wasBlocked && !isBlocked;
+
+  // Actions map to the change kind. Declarative only — no dispatch here.
+  const actions: ReadinessOrchestrationAction[] = [];
+  if (reached.includes("creator_reached_operational")) {
+    actions.push({
+      type: "queue_default_journey_activation",
+      reason: "Creator reached Operational milestone; queue default journey for activation review.",
+      targetMilestone: "operational"
+    });
+  }
+  if (reached.includes("creator_reached_production")) {
+    actions.push({
+      type: "enable_operational_automations",
+      reason: "Creator reached Production Ready milestone; downstream automations may run.",
+      targetMilestone: "production_ready"
+    });
+  }
+  if (regressed && previousMilestone && readinessMilestoneOrdinal(previousMilestone) >= readinessMilestoneOrdinal("operational")) {
+    actions.push({
+      type: "pause_creator_automations",
+      reason: `Creator regressed from ${previousMilestone} to ${newMilestone}; pause active automations pending review.`
+    });
+  }
+
+  // Assemble events.
+  const events: PlannedReadinessEvent[] = [];
+  const baseTemplate = {
+    previousScore: previous?.score ?? null,
+    newScore: current.readinessScore,
+    previousStatus: previous?.status ?? null,
+    newStatus: current.readinessStatus,
+    previousMilestone,
+    newMilestone,
+    triggerEvent: trigger,
+    blockingIssues,
+    warnings
+  };
+
+  if (transitioned) {
+    events.push({
+      ...baseTemplate,
+      eventType: "creator_readiness_changed",
+      actions
+    });
+  }
+  for (const reachedEvent of reached) {
+    events.push({ ...baseTemplate, eventType: reachedEvent, actions });
+  }
+  if (regressed) {
+    events.push({ ...baseTemplate, eventType: "creator_regressed", actions });
+  }
+  if (nowBlocked) {
+    events.push({ ...baseTemplate, eventType: "creator_blocked", actions: [] });
+  } else if (nowUnblocked) {
+    events.push({ ...baseTemplate, eventType: "creator_unblocked", actions: [] });
+  }
+
+  return {
+    newMilestone,
+    previousMilestone,
+    transitioned,
+    regressed,
+    reached,
+    blockingIssues,
+    warnings,
+    actions,
+    events
+  };
+}

@@ -127,6 +127,15 @@ import {
   type ReadinessInput,
   type ReadinessSummary
 } from "@funkmyfans/of-types";
+// FMF-3: Creator Readiness Orchestrator (pure transition detection + planner).
+import {
+  planReadinessOrchestration,
+  milestoneForReadiness,
+  type CreatorReadinessEvent,
+  type PlannedReadinessEvent,
+  type ReadinessMilestone,
+  type ReadinessOrchestrationPlan
+} from "@funkmyfans/of-types";
 import { createClient } from "@supabase/supabase-js";
 import moonsirenIntelligenceFixture from "./fixtures/moonsiren-creator-intelligence-package-v1.json";
 
@@ -441,6 +450,8 @@ async function handleApi(request: Request, env: Env, url: URL, ctx: ExecutionCon
   const creatorIntelligenceImportFixtureMatch = url.pathname.match(/^\/api\/creators\/([^/]+)\/intelligence\/import-fixture$/);
   if (request.method === "POST" && creatorIntelligenceImportFixtureMatch) {
     const workspace = await importCreatorIntelligencePackage(supabase, creatorIntelligenceImportFixtureMatch[1], moonSirenIntelligenceFixture);
+    // FMF-3: intelligence import is a readiness trigger. Fire-and-forget.
+    reconcileCreatorReadinessSafe(supabase, creatorIntelligenceImportFixtureMatch[1], "intelligence_imported");
     return Response.json(workspace, { headers: jsonHeaders });
   }
 
@@ -448,6 +459,8 @@ async function handleApi(request: Request, env: Env, url: URL, ctx: ExecutionCon
   if (request.method === "POST" && creatorIntelligenceImportMatch) {
     const body = (await request.json().catch(() => ({}))) as unknown;
     const workspace = await importCreatorIntelligencePackage(supabase, creatorIntelligenceImportMatch[1], body);
+    // FMF-3: intelligence import is a readiness trigger. Fire-and-forget.
+    reconcileCreatorReadinessSafe(supabase, creatorIntelligenceImportMatch[1], "intelligence_imported");
     return Response.json(workspace, { headers: jsonHeaders });
   }
 
@@ -484,6 +497,8 @@ async function handleApi(request: Request, env: Env, url: URL, ctx: ExecutionCon
   if (request.method === "POST" && creatorFyvInviteMatch) {
     const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
     const result = await inviteCreatorToFyv(supabase, env, creatorFyvInviteMatch[1], body);
+    // FMF-3: FYV Invite is a readiness trigger. Fire-and-forget.
+    if (result.ok) reconcileCreatorReadinessSafe(supabase, creatorFyvInviteMatch[1], "fyv_invite_dispatched");
     return Response.json(result, { status: result.ok ? 200 : result.statusCode, headers: jsonHeaders });
   }
 
@@ -495,6 +510,15 @@ async function handleApi(request: Request, env: Env, url: URL, ctx: ExecutionCon
   const creatorReadinessMatch = url.pathname.match(/^\/api\/creators\/([^/]+)\/readiness$/);
   if (request.method === "GET" && creatorReadinessMatch) {
     const result = await getCreatorReadiness(supabase, creatorReadinessMatch[1]);
+    return Response.json(result, { status: result.ok ? 200 : result.statusCode, headers: jsonHeaders });
+  }
+
+  // FMF-3: append-only readiness event history. Read-only per spec — no write
+  // endpoints on the orchestrator surface. Writes happen via the internal
+  // reconcileCreatorReadiness helper wired into state-change trigger points.
+  const creatorReadinessHistoryMatch = url.pathname.match(/^\/api\/creators\/([^/]+)\/readiness\/history$/);
+  if (request.method === "GET" && creatorReadinessHistoryMatch) {
+    const result = await getCreatorReadinessHistory(supabase, creatorReadinessHistoryMatch[1]);
     return Response.json(result, { status: result.ok ? 200 : result.statusCode, headers: jsonHeaders });
   }
 
@@ -1721,6 +1745,14 @@ function boundedPriority(value: unknown, label: string) {
     const rawPayload = await request.json().catch(() => null);
     const store = createSupabaseFmfFyvRelationshipStore(supabase);
     const result = await consumeFmfFyvRelationshipEvent(store, rawPayload);
+    // FMF-3: FYV lifecycle events are readiness triggers. Fire-and-forget.
+    if (result.ok && result.relationship?.fmf_creator_id) {
+      // Use the concrete event_type from the payload for lineage. Safe because
+      // consumeFmfFyvRelationshipEvent already validated the event_type field.
+      const raw = (rawPayload && typeof rawPayload === "object" ? (rawPayload as Record<string, unknown>) : {}) as { event_type?: unknown };
+      const trigger = typeof raw.event_type === "string" ? raw.event_type : "fyv_relationship_event";
+      reconcileCreatorReadinessSafe(supabase, result.relationship.fmf_creator_id, trigger);
+    }
     return Response.json(result, { status: result.ok ? 200 : result.statusCode, headers: jsonHeaders });
   }
 
@@ -1752,6 +1784,11 @@ function boundedPriority(value: unknown, label: string) {
     const creatorId = syncMatch[1];
     const syncType = syncMatch[2] as SyncType;
     const summary = await runAuditedSync(supabase, env, creatorId, syncType);
+    // FMF-3: BetterFans sync completion is a readiness trigger. Fire-and-forget
+    // only on success (a failed sync leaves the previous readiness intact).
+    if (summary.status === "success") {
+      reconcileCreatorReadinessSafe(supabase, creatorId, "betterfans_sync_completed");
+    }
     return Response.json(summary, { status: summary.status === "failed" ? 500 : 200, headers: jsonHeaders });
   }
 
@@ -12110,6 +12147,163 @@ async function getCreatorReadiness(
   };
 
   return { ok: true, readiness: calculateReadinessSummary(input) };
+}
+
+/* ============================================================================
+ * FMF-3: Creator Readiness Orchestrator — impure runner + history reader.
+ * Records to public.creator_readiness_events (append-only). Dispatch of the
+ * planned actions is DECLARATIVE only (stored on the event row); execution
+ * happens through downstream automation consuming these events — never here.
+ * ========================================================================== */
+
+const CREATOR_READINESS_EVENT_COLUMNS =
+  "id, creator_id, event_type, previous_score, new_score, previous_status, new_status, previous_milestone, new_milestone, trigger_event, blocking_issues, warnings, actions, metadata, created_at";
+
+/**
+ * FMF-3: read the append-only readiness event history for one creator, newest first.
+ */
+async function getCreatorReadinessHistory(
+  supabase: SupabaseClient,
+  creatorId: string
+): Promise<
+  | { ok: true; events: CreatorReadinessEvent[] }
+  | { ok: false; statusCode: number; error: string }
+> {
+  if (!isUuid(creatorId)) return { ok: false, statusCode: 400, error: "Creator id must be a database UUID" };
+  const creator = await supabase.from("of_creators").select("id").eq("id", creatorId).maybeSingle();
+  if (creator.error) return { ok: false, statusCode: 500, error: creator.error.message };
+  if (!creator.data) return { ok: false, statusCode: 404, error: `No FMF creator ${creatorId}` };
+
+  const rows = await supabase
+    .from("creator_readiness_events")
+    .select(CREATOR_READINESS_EVENT_COLUMNS)
+    .eq("creator_id", creatorId)
+    .order("created_at", { ascending: false })
+    .limit(50);
+  if (rows.error) {
+    // Missing-relation degradation: if the table isn't deployed yet, return empty
+    // rather than 500-ing (the pure calc + FMF-1/2 keep working).
+    if (isMissingSchemaCacheRelationError(rows.error, "creator_readiness_events")) {
+      return { ok: true, events: [] };
+    }
+    return { ok: false, statusCode: 500, error: rows.error.message };
+  }
+  return { ok: true, events: (rows.data as CreatorReadinessEvent[]) ?? [] };
+}
+
+/**
+ * FMF-3: reconcile a creator's readiness. Called from state-change trigger
+ * points (FMF-1 event consumer + invite; intelligence import; sync completion).
+ * Fire-and-forget from callers via try/catch so parent operations don't fail
+ * when the orchestrator hits a transient error.
+ *
+ * Flow:
+ *   1) compute current readiness via the FMF-2 pure calculator
+ *   2) load most recent persisted event row (or null on first reconcile)
+ *   3) plan orchestration purely (planReadinessOrchestration)
+ *   4) persist planned events; milestone-reached rows are protected by the
+ *      partial unique index — 23505 -> deduped
+ */
+async function reconcileCreatorReadiness(
+  supabase: SupabaseClient,
+  creatorId: string,
+  triggerEvent: string | null
+): Promise<{ ok: true; plan: ReadinessOrchestrationPlan; persisted: number } | { ok: false; error: string }> {
+  try {
+    const readinessRes = await getCreatorReadiness(supabase, creatorId);
+    if (!readinessRes.ok) return { ok: false, error: readinessRes.error };
+    const current = readinessRes.readiness;
+
+    const previousRow = await supabase
+      .from("creator_readiness_events")
+      .select("new_score, new_status, new_milestone, blocking_issues")
+      .eq("creator_id", creatorId)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    // Missing-relation degradation: if the table isn't deployed yet, skip.
+    if (previousRow.error && isMissingSchemaCacheRelationError(previousRow.error, "creator_readiness_events")) {
+      return { ok: true, plan: emptyReadinessPlan(current), persisted: 0 };
+    }
+    if (previousRow.error) return { ok: false, error: previousRow.error.message };
+
+    const previous = previousRow.data
+      ? {
+          score: previousRow.data.new_score as number,
+          status: previousRow.data.new_status as ReadinessSummary["readinessStatus"],
+          milestone: previousRow.data.new_milestone as ReadinessMilestone,
+          blockingIssues: ((previousRow.data.blocking_issues as string[] | null) ?? []) as string[]
+        }
+      : null;
+
+    const plan = planReadinessOrchestration({ current, previous, triggerEvent });
+
+    let persisted = 0;
+    for (const evt of plan.events) {
+      const inserted = await supabase.from("creator_readiness_events").insert(readinessEventRow(creatorId, evt)).select("id").maybeSingle();
+      if (inserted.error) {
+        // Idempotent: partial unique index on the reached-milestone family will
+        // 23505 on replay. Everything else is a real error.
+        if (inserted.error.code === "23505") continue;
+        if (isMissingSchemaCacheRelationError(inserted.error, "creator_readiness_events")) break;
+        return { ok: false, error: inserted.error.message };
+      }
+      if (inserted.data?.id) persisted += 1;
+    }
+    return { ok: true, plan, persisted };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : "Readiness reconcile failed" };
+  }
+}
+
+function readinessEventRow(creatorId: string, evt: PlannedReadinessEvent) {
+  return {
+    creator_id: creatorId,
+    event_type: evt.eventType,
+    previous_score: evt.previousScore,
+    new_score: evt.newScore,
+    previous_status: evt.previousStatus,
+    new_status: evt.newStatus,
+    previous_milestone: evt.previousMilestone,
+    new_milestone: evt.newMilestone,
+    trigger_event: evt.triggerEvent,
+    blocking_issues: evt.blockingIssues,
+    warnings: evt.warnings,
+    actions: evt.actions,
+    metadata: {}
+  };
+}
+
+function emptyReadinessPlan(current: ReadinessSummary): ReadinessOrchestrationPlan {
+  return {
+    newMilestone: milestoneForReadiness(current.readinessScore),
+    previousMilestone: null,
+    transitioned: false,
+    regressed: false,
+    reached: [],
+    blockingIssues: [],
+    warnings: [],
+    actions: [],
+    events: []
+  };
+}
+
+/**
+ * Fire-and-forget reconcile that never throws. Callers can `void`-await it after
+ * a state change to record readiness transitions without failing their own op.
+ */
+function reconcileCreatorReadinessSafe(supabase: SupabaseClient, creatorId: string, triggerEvent: string): void {
+  // Use `.then` + `.catch` (not await) so the caller isn't blocked when it
+  // doesn't want to be. Errors are logged, never surfaced.
+  reconcileCreatorReadiness(supabase, creatorId, triggerEvent)
+    .then((result) => {
+      if (!result.ok) {
+        console.warn(`[FMF-3] readiness reconcile failed for ${creatorId} (${triggerEvent}):`, result.error);
+      }
+    })
+    .catch((error) => {
+      console.warn(`[FMF-3] readiness reconcile threw for ${creatorId} (${triggerEvent}):`, error);
+    });
 }
 
 function isAuthorizedOpportunityPersist(request: Request, env: Env) {
