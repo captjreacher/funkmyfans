@@ -4281,3 +4281,257 @@ export async function ingestCreatorIntelligencePackagePublishedEvent(
     transitioned: persisted.transitioned
   };
 }
+
+/* ==========================================================================
+ * FMF-1: Creator Relationship Controller (FMF as source of truth)
+ *
+ * FMF (Creator Cockpit) is the source of truth for AGENCY creator management,
+ * creator invitation WORKFLOWS, and creator OPERATIONAL relationship state.
+ * FYV owns assessments, reports, and intelligence generation — plus the
+ * actual invite delivery (email, tokens, creator-facing surface).
+ *
+ * FMF does NOT duplicate FYV's invite mechanics. It orchestrates: when the
+ * agency clicks Invite in the FMF Cockpit, FMF calls FYV's existing invite
+ * endpoint and stores the returned relationship state locally. FYV emits
+ * creator_invited / creator_accepted / creator_activated events that FMF
+ * consumes to keep its local state in sync.
+ *
+ * This lifecycle (pending -> invited -> accepted -> active) is DISTINCT from
+ * FYV-1's CreatorRelationshipState on `of_creators` (which models the FMF
+ * creator's broader lifecycle invited->accepted->active->paused->offboarded).
+ * This one models specifically the FMF↔FYV account LINK.
+ *
+ * Reuses FYV_EVENT_PROVIDER (namespace "fyv" in of_events) for dedupe.
+ * ========================================================================== */
+
+/** FMF↔FYV creator relationship lifecycle. One-way: pending -> invited -> accepted -> active. */
+export type FmfCreatorFyvRelationshipState = "pending" | "invited" | "accepted" | "active";
+
+export const FMF_CREATOR_FYV_RELATIONSHIP_STATES = ["pending", "invited", "accepted", "active"] as const;
+
+export function isFmfCreatorFyvRelationshipState(value: unknown): value is FmfCreatorFyvRelationshipState {
+  return typeof value === "string" && (FMF_CREATOR_FYV_RELATIONSHIP_STATES as readonly string[]).includes(value);
+}
+
+/**
+ * Strict single-step legal transitions. Used for validation; the event orchestrator
+ * uses ordinal advance (nextStateAfterFmfFyvEvent) which additionally allows catch-up
+ * when webhooks arrive out of order.
+ */
+const FMF_CREATOR_FYV_TRANSITIONS: Record<FmfCreatorFyvRelationshipState, readonly FmfCreatorFyvRelationshipState[]> = {
+  pending: ["invited"],
+  invited: ["accepted"],
+  accepted: ["active"],
+  active: []
+};
+
+export function canTransitionFmfFyvRelationship(
+  from: FmfCreatorFyvRelationshipState,
+  to: FmfCreatorFyvRelationshipState
+): boolean {
+  if (from === to) return false;
+  return FMF_CREATOR_FYV_TRANSITIONS[from]?.includes(to) ?? false;
+}
+
+/** Row shape of public.fmf_creator_fyv_relationships (one row per FMF creator). */
+export interface FmfCreatorFyvRelationship {
+  id: string;
+  fmf_creator_id: string;
+  fyv_creator_id: string | null;
+  relationship_state: FmfCreatorFyvRelationshipState;
+  invited_at: string | null;
+  accepted_at: string | null;
+  activated_at: string | null;
+  state_changed_at: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Inbound FYV relationship events consumed by FMF (webhook / event bus). */
+export type FmfFyvRelationshipEventType = "creator_invited" | "creator_accepted" | "creator_activated";
+
+export const FMF_FYV_RELATIONSHIP_EVENT_TYPES = [
+  "creator_invited",
+  "creator_accepted",
+  "creator_activated"
+] as const;
+
+/** The relationship state this event drives TO (in isolation). */
+export function relationshipStateForEvent(event: FmfFyvRelationshipEventType): FmfCreatorFyvRelationshipState {
+  if (event === "creator_invited") return "invited";
+  if (event === "creator_accepted") return "accepted";
+  return "active"; // creator_activated
+}
+
+/**
+ * Ordinal advance: pending(0) < invited(1) < accepted(2) < active(3). This is
+ * what the orchestrator uses: it CATCHES UP when webhooks arrive out of order
+ * (e.g. pending + creator_activated -> active) and NEVER regresses
+ * (active + any -> active).
+ */
+export function nextStateAfterFmfFyvEvent(
+  current: FmfCreatorFyvRelationshipState,
+  event: FmfFyvRelationshipEventType
+): FmfCreatorFyvRelationshipState {
+  const order: Record<FmfCreatorFyvRelationshipState, number> = { pending: 0, invited: 1, accepted: 2, active: 3 };
+  const target = relationshipStateForEvent(event);
+  return order[target] > order[current] ? target : current;
+}
+
+/** A validated + normalized inbound FYV relationship event, ready to persist. */
+export interface NormalizedFmfFyvRelationshipEvent {
+  eventType: FmfFyvRelationshipEventType;
+  /** FYV's canonical creator id — required for resolution when fmf_creator_id is absent. */
+  fyvCreatorId: string;
+  /** Optional FMF creator id echoed back by FYV. */
+  fmfCreatorId: string | null;
+  /** Producer-supplied event id (dedupe key); defaults to `${eventType}:${fyvCreatorId}` when absent. */
+  providerEventId: string;
+  /** ISO 8601 timestamp when the event was received. */
+  receivedAt: string;
+  /** ISO 8601 timestamp when the event occurred (from FYV), when available. */
+  occurredAt: string | null;
+  /** Raw source payload preserved verbatim for audit. */
+  raw: Record<string, unknown>;
+}
+
+export type FmfFyvRelationshipEventOutcome =
+  | { ok: true; event: NormalizedFmfFyvRelationshipEvent }
+  | { ok: false; statusCode: number; error: string; field?: string };
+
+/**
+ * Deterministically validate + normalize an inbound FYV relationship event. Pure:
+ * SHAPE validation only. Creator/relationship existence is a data-layer concern
+ * (the route resolves + rejects). Required guards:
+ *  - event_type ∈ { creator_invited | creator_accepted | creator_activated }
+ *  - fyv_creator_id present (non-empty string)
+ */
+export function normalizeFmfFyvRelationshipEvent(
+  raw: unknown,
+  options: { receivedAt?: string } = {}
+): FmfFyvRelationshipEventOutcome {
+  if (!isComposeRecord(raw)) {
+    return { ok: false, statusCode: 400, error: "FYV relationship event payload must be a JSON object" };
+  }
+  const receivedAt = composeString(options.receivedAt) ?? new Date().toISOString();
+
+  const eventType = pickString(raw, ["event_type", "eventType", "type"]);
+  if (
+    eventType !== "creator_invited" &&
+    eventType !== "creator_accepted" &&
+    eventType !== "creator_activated"
+  ) {
+    return {
+      ok: false,
+      statusCode: 400,
+      error: "Unsupported event_type; expected one of creator_invited | creator_accepted | creator_activated",
+      field: "event_type"
+    };
+  }
+
+  const fyvCreatorId = pickString(raw, ["fyv_creator_id", "fyvCreatorId", "creator_id", "creatorId"]);
+  if (!fyvCreatorId) {
+    return { ok: false, statusCode: 400, error: "fyv_creator_id is required", field: "fyv_creator_id" };
+  }
+
+  const fmfCreatorId = pickString(raw, ["fmf_creator_id", "fmfCreatorId"]);
+  const occurredAt = pickString(raw, ["occurred_at", "occurredAt", "timestamp", "at"]);
+  const providerEventId =
+    pickString(raw, ["event_id", "eventId", "provider_event_id", "providerEventId"]) ??
+    `${eventType}:${fyvCreatorId}`;
+
+  return {
+    ok: true,
+    event: {
+      eventType,
+      fyvCreatorId,
+      fmfCreatorId,
+      providerEventId,
+      receivedAt,
+      occurredAt,
+      raw
+    }
+  };
+}
+
+export interface FmfFyvEventApplyResult {
+  /** Final relationship row (after the write, or unchanged if deduped). */
+  relationship: FmfCreatorFyvRelationship;
+  /** Did the state actually change on this event? */
+  transitioned: boolean;
+  /** Was this event already processed (idempotent replay)? */
+  deduped: boolean;
+}
+
+/** Store port for FMF↔FYV relationship reads + writes. */
+export interface FmfFyvRelationshipStore {
+  /** Load the relationship for a given FMF creator id. Returns null when none. */
+  loadByFmfCreatorId(
+    fmfCreatorId: string
+  ): Promise<FmfCreatorFyvRelationship | null> | FmfCreatorFyvRelationship | null;
+  /** Load the relationship for a given FYV creator id. Returns null when none. */
+  loadByFyvCreatorId(
+    fyvCreatorId: string
+  ): Promise<FmfCreatorFyvRelationship | null> | FmfCreatorFyvRelationship | null;
+  /**
+   * Idempotent commit of one event. Implementations MUST:
+   *  1) recompute the target state from the LIVE row via nextStateAfterFmfFyvEvent
+   *     (never regress, never over-advance from a stale resolve read);
+   *  2) only write when the state actually advances OR the per-state timestamp
+   *     is unset (invited_at / accepted_at / activated_at);
+   *  3) treat a previously-processed providerEventId as deduped (no re-write).
+   */
+  applyEvent(input: {
+    relationship: FmfCreatorFyvRelationship;
+    event: NormalizedFmfFyvRelationshipEvent;
+  }): Promise<FmfFyvEventApplyResult> | FmfFyvEventApplyResult;
+}
+
+export type FmfFyvRelationshipConsumeResult =
+  | {
+      ok: true;
+      relationship: FmfCreatorFyvRelationship;
+      transitioned: boolean;
+      deduped: boolean;
+    }
+  | { ok: false; statusCode: number; error: string; field?: string };
+
+/**
+ * Pure orchestrator for one inbound FYV relationship event. Deterministic control
+ * flow; ALL I/O is in the injected store. Order:
+ *   validate -> resolve relationship (prefer fmf_creator_id, else fyv_creator_id)
+ *   -> reject with 404 when no relationship exists (FMF NEVER creates one from an event)
+ *   -> store.applyEvent (idempotent; computes target state from LIVE row).
+ */
+export async function consumeFmfFyvRelationshipEvent(
+  store: FmfFyvRelationshipStore,
+  rawPayload: unknown,
+  options: { receivedAt?: string } = {}
+): Promise<FmfFyvRelationshipConsumeResult> {
+  const outcome = normalizeFmfFyvRelationshipEvent(rawPayload, options);
+  if (!outcome.ok) {
+    return { ok: false, statusCode: outcome.statusCode, error: outcome.error, field: outcome.field };
+  }
+  const { event } = outcome;
+
+  const relationship =
+    (event.fmfCreatorId ? await store.loadByFmfCreatorId(event.fmfCreatorId) : null) ??
+    (await store.loadByFyvCreatorId(event.fyvCreatorId));
+  if (!relationship) {
+    return {
+      ok: false,
+      statusCode: 404,
+      error: `No FMF-FYV relationship found for fyv_creator_id ${event.fyvCreatorId}`,
+      field: "fyv_creator_id"
+    };
+  }
+
+  const applied = await store.applyEvent({ relationship, event });
+  return {
+    ok: true,
+    relationship: applied.relationship,
+    transitioned: applied.transitioned,
+    deduped: applied.deduped
+  };
+}
