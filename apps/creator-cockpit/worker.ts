@@ -3306,28 +3306,65 @@ async function buildDailyOperationsSnapshot(supabase: SupabaseClient) {
   };
 }
 
-async function ensureAgencySettingsRow(supabase: SupabaseClient) {
-  const existing = await supabase.from("of_agency_settings").select("*").order("created_at", { ascending: true }).limit(1).maybeSingle();
-  if (existing.error && isMissingSchemaCacheRelationError(existing.error, "of_agency_settings")) {
+async function ensureAgencySettingsRow(
+  supabase: SupabaseClient
+): Promise<Record<string, unknown>> {
+  const existing = await supabase
+    .from("of_agency_settings")
+    .select("*")
+    .eq("singleton_key", true)
+    .maybeSingle();
+
+  if (
+    existing.error &&
+    isMissingSchemaCacheRelationError(
+      existing.error,
+      "of_agency_settings"
+    )
+  ) {
     return fallbackAgencySettings();
   }
+
   assertNoError(existing.error);
-  if (existing.data) return existing.data as Record<string, unknown>;
+
+  if (existing.data) {
+    return existing.data as Record<string, unknown>;
+  }
+
   const inserted = await supabase
     .from("of_agency_settings")
-    .insert({
-      default_approval_mode: "draft_for_approval",
-      default_ai_mode: "draft_only",
-      default_timezone: "Pacific/Auckland",
-      quiet_hours: { enabled: true, startHour: 22, endHour: 8 },
-      default_cooldown_minutes: 60,
-      daily_outbound_cap_per_creator: 150,
-      daily_outbound_cap_per_fan: 20
-    })
-    .select("*")
-    .single();
+    .upsert(
+      {
+        singleton_key: true,
+        default_approval_mode: "draft_for_approval",
+        default_ai_mode: "draft_only",
+        default_timezone: "Pacific/Auckland",
+        quiet_hours: {
+          enabled: true,
+          startHour: 22,
+          endHour: 8
+        },
+        default_cooldown_minutes: 60,
+        daily_outbound_cap_per_creator: 150,
+        daily_outbound_cap_per_fan: 20
+      },
+      {
+        onConflict: "singleton_key",
+        ignoreDuplicates: true
+      }
+    );
+
   assertNoError(inserted.error);
-  return inserted.data as Record<string, unknown>;
+
+  const resolved = await supabase
+    .from("of_agency_settings")
+    .select("*")
+    .eq("singleton_key", true)
+    .single();
+
+  assertNoError(resolved.error);
+
+  return resolved.data as Record<string, unknown>;
 }
 
 async function ensureCreatorSettingsRow(supabase: SupabaseClient, creatorId: string) {
@@ -12222,10 +12259,28 @@ async function reconcileCreatorReadiness(
   supabase: SupabaseClient,
   creatorId: string,
   triggerEvent: string | null
-): Promise<{ ok: true; plan: ReadinessOrchestrationPlan; persisted: number } | { ok: false; error: string }> {
+): Promise<
+  | {
+      ok: true;
+      plan: ReadinessOrchestrationPlan;
+      persisted: number;
+      dispatched: number;
+    }
+  | {
+      ok: false;
+      error: string;
+    }
+> {
   try {
     const readinessRes = await getCreatorReadiness(supabase, creatorId);
-    if (!readinessRes.ok) return { ok: false, error: readinessRes.error };
+
+    if (!readinessRes.ok) {
+      return {
+        ok: false,
+        error: readinessRes.error
+      };
+    }
+
     const current = readinessRes.readiness;
 
     const previousRow = await supabase
@@ -12235,57 +12290,115 @@ async function reconcileCreatorReadiness(
       .order("created_at", { ascending: false })
       .limit(1)
       .maybeSingle();
+
     // Missing-relation degradation: if the table isn't deployed yet, skip.
-    if (previousRow.error && isMissingSchemaCacheRelationError(previousRow.error, "creator_readiness_events")) {
-      return { ok: true, plan: emptyReadinessPlan(current), persisted: 0 };
+    if (
+      previousRow.error &&
+      isMissingSchemaCacheRelationError(
+        previousRow.error,
+        "creator_readiness_events"
+      )
+    ) {
+      return {
+        ok: true,
+        plan: emptyReadinessPlan(current),
+        persisted: 0,
+        dispatched: 0
+      };
     }
-    if (previousRow.error) return { ok: false, error: previousRow.error.message };
+
+    if (previousRow.error) {
+      return {
+        ok: false,
+        error: previousRow.error.message
+      };
+    }
 
     const previous = previousRow.data
       ? {
           score: previousRow.data.new_score as number,
-          status: previousRow.data.new_status as ReadinessSummary["readinessStatus"],
-          milestone: previousRow.data.new_milestone as ReadinessMilestone,
-          blockingIssues: ((previousRow.data.blocking_issues as string[] | null) ?? []) as string[]
+          status:
+            previousRow.data
+              .new_status as ReadinessSummary["readinessStatus"],
+          milestone:
+            previousRow.data.new_milestone as ReadinessMilestone,
+          blockingIssues:
+            ((previousRow.data.blocking_issues as string[] | null) ??
+              []) as string[]
         }
       : null;
 
-    const plan = planReadinessOrchestration({ current, previous, triggerEvent });
+    const plan = planReadinessOrchestration({
+      current,
+      previous,
+      triggerEvent
+    });
 
     let persisted = 0;
     const persistedEvents: CreatorReadinessEvent[] = [];
+
     for (const evt of plan.events) {
       const inserted = await supabase
         .from("creator_readiness_events")
         .insert(readinessEventRow(creatorId, evt))
         .select(CREATOR_READINESS_EVENT_COLUMNS)
         .maybeSingle();
+
       if (inserted.error) {
         // Idempotent: partial unique index on the reached-milestone family will
         // 23505 on replay. Everything else is a real error.
-        if (inserted.error.code === "23505") continue;
-        if (isMissingSchemaCacheRelationError(inserted.error, "creator_readiness_events")) break;
-        return { ok: false, error: inserted.error.message };
+        if (inserted.error.code === "23505") {
+          continue;
+        }
+
+        if (
+          isMissingSchemaCacheRelationError(
+            inserted.error,
+            "creator_readiness_events"
+          )
+        ) {
+          break;
+        }
+
+        return {
+          ok: false,
+          error: inserted.error.message
+        };
       }
+
       if (inserted.data) {
         persisted += 1;
-        persistedEvents.push(inserted.data as CreatorReadinessEvent);
+        persistedEvents.push(
+          inserted.data as CreatorReadinessEvent
+        );
       }
     }
 
-    // FMF-4: dispatch declarative actions attached to the freshly-persisted
-    // events. Fire-and-forget shape — a dispatch failure never rolls back the
-    // readiness event itself. Handlers are idempotent (unique constraint on
-    // creator_action_executions(readiness_event_id, action_type)).
     let dispatched = 0;
+
     for (const evt of persistedEvents) {
-      const outcome = await dispatchReadinessEventActions(supabase, evt);
+      const outcome = await dispatchReadinessEventActions(
+        supabase,
+        evt
+      );
+
       dispatched += outcome.dispatched;
     }
 
-    return { ok: true, plan, persisted, dispatched };
+    return {
+      ok: true,
+      plan,
+      persisted,
+      dispatched
+    };
   } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : "Readiness reconcile failed" };
+    return {
+      ok: false,
+      error:
+        error instanceof Error
+          ? error.message
+          : "Readiness reconcile failed"
+    };
   }
 }
 
