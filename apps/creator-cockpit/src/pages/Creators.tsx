@@ -1,7 +1,6 @@
 import { ArrowDownAZ, Plus, RefreshCw, Search, UserRoundCheck } from "lucide-react";
 import { useMemo, useState } from "react";
-import type { SyncType } from "@funkmyfans/of-types";
-import { syncCreatorSection, type DashboardData } from "../lib/api";
+import { continueCreatorSyncAll, startCreatorSyncAll, type DashboardData, type SyncAllResponse } from "../lib/api";
 
 export function Creators({
   data,
@@ -17,6 +16,7 @@ export function Creators({
   const [sort, setSort] = useState("last_sync_at");
   const [syncingId, setSyncingId] = useState<string | null>(null);
   const [syncError, setSyncError] = useState<string | null>(null);
+  const [syncProgress, setSyncProgress] = useState<SyncAllResponse | null>(null);
 
   const creators = useMemo(() => {
     return [...data.creators]
@@ -28,16 +28,24 @@ export function Creators({
       });
   }, [data.creators, query, sort, status]);
 
-  async function handleSync(creatorId: string, type: SyncType = "all") {
+  async function handleSync(creatorId: string) {
     setSyncingId(creatorId);
     setSyncError(null);
     try {
-      const result = await syncCreatorSection(creatorId, type);
-      if (result.status === "failed") setSyncError(result.error ?? result.syncRun.error_message ?? "Sync failed");
+      let result = await startCreatorSyncAll(creatorId);
+      setSyncProgress(result);
+      while (result.status === "in_progress") {
+        result = await continueCreatorSyncAll(creatorId);
+        setSyncProgress(result);
+      }
+      if (result.status === "failed") {
+        setSyncError(result.error?.message ?? "Sync failed");
+      }
     } catch (error) {
       setSyncError(error instanceof Error ? error.message : "Sync failed");
     } finally {
       setSyncingId(null);
+      setSyncProgress(null);
     }
   }
 
@@ -79,6 +87,11 @@ export function Creators({
       </div>
 
       {syncError ? <div className="rounded-lg border border-rose-400/25 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">{syncError}</div> : null}
+      {syncProgress ? (
+        <div className="rounded-lg border border-cyan-400/25 bg-cyan-500/10 px-4 py-3 text-sm text-cyan-50">
+          Sync {syncProgress.syncRunId.slice(0, 8)} {syncProgress.stage} {syncProgress.status} {syncProgress.processed} records
+        </div>
+      ) : null}
 
       <div className="premium-card overflow-hidden rounded-lg">
         <div className="grid grid-cols-[1.4fr_0.8fr_0.8fr_0.9fr] gap-3 border-b border-blue-500/18 px-4 py-3 text-xs font-semibold uppercase tracking-[0.14em] text-blue-100/52">
@@ -102,7 +115,7 @@ export function Creators({
               <div className="flex justify-end gap-2">
                 <button type="button" onClick={() => void handleSync(creator.id)} disabled={syncingId !== null} className="inline-flex items-center gap-1.5 rounded-lg border border-blue-400/20 bg-[#102338]/72 px-3 py-2 text-xs font-semibold text-blue-50 disabled:opacity-45">
                   <RefreshCw className={`h-3.5 w-3.5 ${syncingId === creator.id ? "animate-spin" : ""}`} aria-hidden="true" />
-                  Sync
+                  Sync All
                 </button>
               </div>
             </div>

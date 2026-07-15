@@ -202,6 +202,25 @@ type SyncSectionResponse = {
   error?: string;
 };
 
+export type SyncAllStage = "profile" | "stats" | "subscribers" | "chats" | "completed";
+export type SyncAllStatus = "in_progress" | "completed" | "failed";
+export type SyncAllErrorCode =
+  | "sync_request_budget_exceeded"
+  | "provider_fetch_failed"
+  | "database_batch_failed"
+  | "pagination_cursor_repeated"
+  | "sync_already_running";
+
+export type SyncAllResponse = {
+  syncRunId: string;
+  status: SyncAllStatus;
+  stage: SyncAllStage;
+  processed: number;
+  nextCursor: number | null;
+  hasMore: boolean;
+  error?: { code: SyncAllErrorCode; message: string; details?: Record<string, unknown> };
+};
+
 const API_BASE = "/api";
 
 export async function fetchDashboard(): Promise<DashboardData> {
@@ -728,6 +747,14 @@ export async function syncCreator(accountId: string): Promise<{ creatorId: strin
 
 export async function syncCreatorSection(creatorId: string, syncType: SyncType): Promise<SyncSectionResponse> {
   return apiJson<SyncSectionResponse>(`/creators/${creatorId}/sync/${syncType}`, { method: "POST" });
+}
+
+export async function startCreatorSyncAll(creatorId: string): Promise<SyncAllResponse> {
+  return apiJson<SyncAllResponse>(`/creators/${creatorId}/sync/all`, { method: "POST" });
+}
+
+export async function continueCreatorSyncAll(creatorId: string): Promise<SyncAllResponse> {
+  return apiJson<SyncAllResponse>(`/creators/${creatorId}/sync/all/continue`, { method: "POST" });
 }
 
 async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {

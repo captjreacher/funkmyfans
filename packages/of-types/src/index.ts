@@ -538,6 +538,8 @@ export interface OfChat {
 
 export type SyncType = "profile" | "stats" | "subscribers" | "chats" | "all";
 export type SyncRunStatus = "running" | "success" | "failed";
+export type SyncAllStage = "profile" | "stats" | "subscribers" | "chats" | "completed";
+export type SyncAllStatus = "in_progress" | "completed" | "failed";
 
 export interface OfSyncRun {
   id: string;
@@ -548,6 +550,15 @@ export interface OfSyncRun {
   completed_at: string | null;
   records_processed: number;
   error_message: string | null;
+  provider?: string | null;
+  current_stage?: SyncAllStage | null;
+  cursor?: number | null;
+  processed_count?: number | null;
+  has_more?: boolean | null;
+  retry_count?: number | null;
+  last_error?: string | null;
+  last_error_at?: string | null;
+  updated_at?: string | null;
 }
 
 export interface OfEvent {
