@@ -12233,7 +12233,7 @@ async function reconcileCreatorReadiness(
   supabase: SupabaseClient,
   creatorId: string,
   triggerEvent: string | null
-): Promise<{ ok: true; plan: ReadinessOrchestrationPlan; persisted: number } | { ok: false; error: string }> {
+): Promise<{ ok: true; plan: ReadinessOrchestrationPlan; persisted: number; dispatched: number } | { ok: false; error: string }> {
   try {
     const readinessRes = await getCreatorReadiness(supabase, creatorId);
     if (!readinessRes.ok) return { ok: false, error: readinessRes.error };
@@ -12248,7 +12248,7 @@ async function reconcileCreatorReadiness(
       .maybeSingle();
     // Missing-relation degradation: if the table isn't deployed yet, skip.
     if (previousRow.error && isMissingSchemaCacheRelationError(previousRow.error, "creator_readiness_events")) {
-      return { ok: true, plan: emptyReadinessPlan(current), persisted: 0 };
+      return { ok: true, plan: emptyReadinessPlan(current), persisted: 0, dispatched: 0 };
     }
     if (previousRow.error) return { ok: false, error: previousRow.error.message };
 
