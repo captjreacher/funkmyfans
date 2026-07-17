@@ -7348,7 +7348,7 @@ async function queueConversationMessageStep(
   const aiConfidence = Number(input.variables.ai_confidence ?? 100);
   const effectiveActionMode: MessageScriptActionMode =
     metadata.messageGenerationMode === "ai_generated" && aiConfidence < 75 ? "draft_for_approval" : actionMode;
-  const template = interpolateTemplate(input.step.message_body ?? "", toVariableMap(input.variables));
+  const template = normalizeOutboundChatText(interpolateTemplate(input.step.message_body ?? "", toVariableMap(input.variables)));
   const renderedVariables = pickTemplateVariables(input.step.message_body ?? "", input.variables);
   const policy = await evaluateOutboundPolicy(supabase, {
     creatorId: input.conversation.creator_id,
@@ -8184,6 +8184,16 @@ function resolveLinkedStep(stepId: string | null | undefined, fallback: OfMessag
 
 function interpolateTemplate(template: string, variables: Map<string, string>) {
   return template.replace(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g, (_, key: string) => variables.get(key) ?? "");
+}
+
+function normalizeOutboundChatText(text: string) {
+  return text
+    .replace(/\r\n?/g, "\n")
+    .replace(/\\r\\n|\\n|\\r/g, "\n")
+    .replace(/[\u2028\u2029]/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 function pickTemplateVariables(template: string, variables: Record<string, unknown>) {
@@ -10393,6 +10403,7 @@ async function updateOutboundMessage(supabase: SupabaseClient, env: Env, message
 }
 
 async function sendOutboundMessage(supabase: SupabaseClient, env: Env, messageId: string, finalText: string) {
+  finalText = normalizeOutboundChatText(finalText);
   const sending = await supabase
     .from("of_outbound_messages")
     .update({
@@ -12222,7 +12233,7 @@ async function reconcileCreatorReadiness(
   supabase: SupabaseClient,
   creatorId: string,
   triggerEvent: string | null
-): Promise<{ ok: true; plan: ReadinessOrchestrationPlan; persisted: number } | { ok: false; error: string }> {
+): Promise<{ ok: true; plan: ReadinessOrchestrationPlan; persisted: number; dispatched: number } | { ok: false; error: string }> {
   try {
     const readinessRes = await getCreatorReadiness(supabase, creatorId);
     if (!readinessRes.ok) return { ok: false, error: readinessRes.error };
@@ -12237,7 +12248,7 @@ async function reconcileCreatorReadiness(
       .maybeSingle();
     // Missing-relation degradation: if the table isn't deployed yet, skip.
     if (previousRow.error && isMissingSchemaCacheRelationError(previousRow.error, "creator_readiness_events")) {
-      return { ok: true, plan: emptyReadinessPlan(current), persisted: 0 };
+      return { ok: true, plan: emptyReadinessPlan(current), persisted: 0, dispatched: 0 };
     }
     if (previousRow.error) return { ok: false, error: previousRow.error.message };
 
