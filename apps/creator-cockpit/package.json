@@ -8,7 +8,8 @@
     "dev:worker": "wrangler dev --port 8787",
     "build": "vite build",
     "preview": "vite preview --host 127.0.0.1",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "smoke:sync-all:moonsiren": "tsx scripts/moonsiren-sync-driver.ts"
   },
   "dependencies": {
     "@funkmyfans/betterfans-client": "*",
