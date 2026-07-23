@@ -539,7 +539,7 @@ export interface OfChat {
 export type SyncType = "profile" | "stats" | "subscribers" | "chats" | "all";
 export type SyncRunStatus = "running" | "success" | "failed";
 export type SyncAllStage = "profile" | "stats" | "subscribers" | "chats" | "completed";
-export type SyncAllStatus = "in_progress" | "completed" | "failed";
+export type SyncAllStatus = "running" | "success" | "failed";
 
 export interface OfSyncRun {
   id: string;

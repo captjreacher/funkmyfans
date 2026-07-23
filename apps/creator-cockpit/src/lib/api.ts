@@ -203,7 +203,7 @@ type SyncSectionResponse = {
 };
 
 export type SyncAllStage = "profile" | "stats" | "subscribers" | "chats" | "completed";
-export type SyncAllStatus = "in_progress" | "completed" | "failed";
+export type SyncAllStatus = "running" | "success" | "failed";
 export type SyncAllErrorCode =
   | "sync_request_budget_exceeded"
   | "provider_fetch_failed"
@@ -214,10 +214,13 @@ export type SyncAllErrorCode =
 export type SyncAllResponse = {
   syncRunId: string;
   status: SyncAllStatus;
-  stage: SyncAllStage;
-  processed: number;
+  current_stage?: SyncAllStage;
+  stage?: SyncAllStage;
+  processed_count?: number;
+  processed?: number;
   nextCursor: number | null;
   hasMore: boolean;
+  has_more?: boolean;
   error?: { code: SyncAllErrorCode; message: string; details?: Record<string, unknown> };
 };
 

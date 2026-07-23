@@ -332,13 +332,19 @@ class ApiError extends Error {
 }
 
 type SyncAllStage = "profile" | "stats" | "subscribers" | "chats" | "completed";
-type SyncAllStatus = "in_progress" | "completed" | "failed";
+type SyncAllStatus = "running" | "success" | "failed";
 type SyncAllErrorCode =
   | "sync_request_budget_exceeded"
   | "provider_fetch_failed"
   | "database_batch_failed"
   | "pagination_cursor_repeated"
   | "sync_already_running";
+
+// ── Sync-all resilience & budget constants ──────────────────────────────────
+const BATCH_RECORDS_LIMIT = 50;
+const SUBREQUEST_BUDGET_HARD_LIMIT = 30;
+const RESERVED_PERSIST_SLOTS = 3;
+const STALE_SYNC_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes
 
 interface SyncAllRunState {
   id: string;
@@ -369,7 +375,13 @@ interface SyncBudgetEstimate {
 class SyncRequestBudget {
   private providerRequests = 0;
   private databaseRequests = 0;
-  constructor(private readonly hardLimit = 30) {}
+  constructor(private readonly hardLimit = SUBREQUEST_BUDGET_HARD_LIMIT) {}
+  reservedPersistSlots(): number {
+    return RESERVED_PERSIST_SLOTS;
+  }
+  remaining(): number {
+    return this.hardLimit - this.providerRequests - this.databaseRequests;
+  }
   reserveProvider(count = 1) {
     this.providerRequests += count;
     this.check();
@@ -386,7 +398,7 @@ class SyncRequestBudget {
     };
   }
   private check() {
-    if (this.providerRequests + this.databaseRequests > this.hardLimit) {
+    if (this.providerRequests + this.databaseRequests + RESERVED_PERSIST_SLOTS > this.hardLimit) {
       const budget = this.estimate();
       throw new ApiError(429, "Sync request budget exceeded", "sync_request_budget_exceeded", {
         providerRequests: budget.providerRequests,
@@ -394,6 +406,12 @@ class SyncRequestBudget {
         total: budget.total
       });
     }
+  }
+  canReserveProvider(): boolean {
+    return this.remaining() > RESERVED_PERSIST_SLOTS;
+  }
+  canReserveDatabase(): boolean {
+    return this.remaining() > RESERVED_PERSIST_SLOTS;
   }
 }
 
@@ -1870,7 +1888,7 @@ function boundedPriority(value: unknown, label: string) {
         : await runAuditedSync(supabase, env, creatorId, syncType);
     // FMF-3: BetterFans sync completion is a readiness trigger. Fire-and-forget
     // only on success (a failed sync leaves the previous readiness intact).
-    if ((summary as { status?: string }).status === "success" || (summary as { status?: string }).status === "completed") {
+    if (summary.status === "success") {
       reconcileCreatorReadinessSafe(supabase, creatorId, "betterfans_sync_completed");
     }
     return Response.json(summary, { status: summary.status === "failed" ? 500 : 200, headers: jsonHeaders });
@@ -1880,7 +1898,7 @@ function boundedPriority(value: unknown, label: string) {
   if (request.method === "POST" && syncContinueMatch) {
     const creatorId = syncContinueMatch[1];
     const summary = await startOrContinueCreatorSyncAll(supabase, env, creatorId, "sync_all_continue");
-    if (summary.status === "completed") {
+    if (summary.status === "success") {
       reconcileCreatorReadinessSafe(supabase, creatorId, "betterfans_sync_completed");
     }
     return Response.json(summary, { status: summary.status === "failed" ? 500 : 200, headers: jsonHeaders });
@@ -10963,19 +10981,55 @@ async function runAuditedSync(supabase: SupabaseClient, env: Env, creatorId: str
 }
 
 async function startOrContinueCreatorSyncAll(supabase: SupabaseClient, env: Env, creatorId: string, source: string) {
-  const budget = new SyncRequestBudget(30);
+  const budget = new SyncRequestBudget();
   const now = new Date().toISOString();
-  const existing = await loadActiveSyncRun(supabase, creatorId);
+  let existing = await loadActiveSyncRun(supabase, creatorId);
   budget.reserveDatabase();
 
+  // ── Active all-sync handling split by source ──────────────────────────
+  //   Start   (source === "sync_all")         → idempotent return.
+  //   Continue (source === "sync_all_continue") → resume the active run by
+  //     invoking continueCreatorSyncAll so a bounded batch is processed on
+  //     every call. Failing to differentiate these would make Continue a
+  //     no-op and trap the run in a "running" loop with no progress.
   if (existing?.status === "running" && existing.sync_type === "all") {
-    return continueCreatorSyncAll(supabase, env, creatorId, existing, budget, source);
+    if (isStaleSyncRun(existing)) {
+      // Stale-run recovery: persist the failed row, then mutate the in-memory
+      // `existing` to the post-fail state so the 409 guard below does not
+      // trip on the stale value. The existing-resume-failed branch picks up
+      // the run after that with retry_count incremented.
+      await failStaleSyncRun(supabase, existing);
+      budget.reserveDatabase();
+      existing = { ...existing, status: "failed", completed_at: now, updated_at: now };
+    } else if (source === "sync_all") {
+      // Start is idempotent: return the existing active run state without
+      // doing any work. The frontend owns the continuation loop.
+      const stage = existing.current_stage ?? "profile";
+      return {
+        syncRunId: existing.id,
+        status: "running" as SyncAllStatus,
+        stage: stage as SyncAllStage,
+        current_stage: stage,
+        processed: existing.records_processed ?? 0,
+        processed_count: existing.processed_count ?? 0,
+        nextCursor: existing.cursor,
+        hasMore: existing.has_more === true,
+        has_more: existing.has_more === true
+      };
+    } else {
+      // Continue: process exactly one bounded batch on the active run.
+      // `existing` already has every control field populated because
+      // loadActiveSyncRun returns the full row; continueCreatorSyncAll
+      // bumps updated_at itself when it persists.
+      return continueCreatorSyncAll(supabase, env, creatorId, existing, budget, source);
+    }
   }
 
   if (existing?.status === "running") {
     throw new ApiError(409, "A sync is already running for this creator", "sync_already_running");
   }
 
+  // ── Resume a previously failed all-sync ────────────────────────────────
   if (existing?.status === "failed" && existing.sync_type === "all") {
     const resumed = await updateSyncRunState(supabase, existing.id, {
       status: "running",
@@ -10990,27 +11044,65 @@ async function startOrContinueCreatorSyncAll(supabase: SupabaseClient, env: Env,
     return continueCreatorSyncAll(supabase, env, creatorId, resumed, budget, source);
   }
 
+  // ── Insert a new run ───────────────────────────────────────────────────
+  const insertPayload: Record<string, unknown> = {
+    creator_id: creatorId,
+    sync_type: "all",
+    status: "running",
+    started_at: now,
+    records_processed: 0,
+    provider: "betterfans",
+    current_stage: "profile",
+    cursor: 0,
+    processed_count: 0,
+    has_more: true,
+    retry_count: 0,
+    updated_at: now
+  };
+
   const inserted = await supabase
     .from("of_sync_runs")
-    .insert({
-      creator_id: creatorId,
-      sync_type: "all",
-      status: "running",
-      started_at: now,
-      records_processed: 0,
-      provider: "betterfans",
-      current_stage: "profile",
-      cursor: 0,
-      processed_count: 0,
-      has_more: true,
-      retry_count: 0
-    } satisfies Partial<SyncAllRunState>)
+    .insert(insertPayload)
     .select("*")
     .single();
   budget.reserveDatabase();
-  assertNoError(inserted.error);
 
-  return continueCreatorSyncAll(supabase, env, creatorId, inserted.data as SyncAllRunState, budget, source);
+  // ── Handle 23505 unique-constraint race: another request inserted first ─
+  if (inserted.error && isDuplicateKeyError(inserted.error)) {
+    const racedRun = await loadActiveSyncRun(supabase, creatorId);
+    if (racedRun) {
+      const stage = racedRun.current_stage ?? "profile";
+      return {
+        syncRunId: racedRun.id,
+        status: (racedRun.status === "running" ? "running" : "success") as SyncAllStatus,
+        stage: stage as SyncAllStage,
+        current_stage: stage,
+        processed: racedRun.records_processed ?? 0,
+        processed_count: racedRun.processed_count ?? 0,
+        nextCursor: racedRun.cursor,
+        hasMore: racedRun.has_more === true,
+        has_more: racedRun.has_more === true
+      };
+    }
+  }
+
+  assertNoError(inserted.error);
+  const run = inserted.data as SyncAllRunState;
+
+  return continueCreatorSyncAll(supabase, env, creatorId, run, budget, source);
+}
+
+/** True when a running sync run has not been updated within the stale threshold. */
+function isStaleSyncRun(run: SyncAllRunState): boolean {
+  const pivot = run.updated_at ?? run.started_at;
+  if (!pivot) return false;
+  const ageMs = Date.now() - new Date(pivot).getTime();
+  return ageMs > STALE_SYNC_THRESHOLD_MS;
+}
+
+/** Mark a stale-run as failed so a replacement can start. */
+async function failStaleSyncRun(supabase: SupabaseClient, run: SyncAllRunState): Promise<void> {
+  await updateSyncRunFailure(supabase, run.id, "Stale sync run abandoned — no update within threshold", "sync_request_budget_exceeded");
 }
 
 async function continueCreatorSyncAll(
@@ -11024,9 +11116,12 @@ async function continueCreatorSyncAll(
   syncRunId: string;
   status: SyncAllStatus;
   stage: SyncAllStage;
+  current_stage?: SyncAllStage;
   processed: number;
+  processed_count?: number;
   nextCursor: number | null;
   hasMore: boolean;
+  has_more?: boolean;
   error?: { code: SyncAllErrorCode; message: string; details?: Record<string, unknown> };
 }> {
   if (syncRun.status !== "running") {
@@ -11040,13 +11135,49 @@ async function continueCreatorSyncAll(
   const currentStage = (syncRun.current_stage ?? "profile") as SyncAllStage;
   const cursor = Number(syncRun.cursor ?? 0);
 
+  if (!syncRun.current_stage || syncRun.processed_count === null || syncRun.has_more === null) {
+    // Defensive guard — should never happen after the insert rewrite.
+    await updateSyncRunState(supabase, syncRun.id, {
+      current_stage: currentStage,
+      processed_count: syncRun.processed_count ?? 0,
+      has_more: true,
+      cursor: cursor,
+      updated_at: new Date().toISOString()
+    });
+    budget.reserveDatabase();
+  }
+
   try {
     const next = await executeBoundedSyncAllStage(supabase, client, creatorId, creator.betterfans_account_id, currentStage, cursor, budget, syncRun.cursor);
+    const cumulativeProcessed = (syncRun.processed_count ?? 0) + next.processed;
+
+    // No-progress guard: if the stage did zero work because the budget is
+    // exhausted, fail the run rather than looping forever.
+    if (next.processed === 0 && next.recordsRead === 0 && next.hasMore && budget.remaining() <= RESERVED_PERSIST_SLOTS) {
+      await updateSyncRunFailure(supabase, syncRun.id, "Sync request budget exhausted — no progress possible in remaining budget", "sync_request_budget_exceeded");
+      return {
+        syncRunId: syncRun.id,
+        status: "failed",
+        stage: currentStage,
+        current_stage: currentStage,
+        processed: syncRun.records_processed ?? 0,
+        processed_count: syncRun.processed_count ?? 0,
+        nextCursor: cursor,
+        hasMore: false,
+        has_more: false,
+        error: {
+          code: "sync_request_budget_exceeded",
+          message: "Sync request budget exhausted — no progress possible in remaining budget",
+          details: { stage: currentStage, cursor, budget: budget.estimate() }
+        }
+      };
+    }
+
     const updated = await updateSyncRunState(supabase, syncRun.id, {
       current_stage: next.stage,
       cursor: next.nextCursor,
-      processed_count: (syncRun.processed_count ?? 0) + next.processed,
-      records_processed: (syncRun.records_processed ?? 0) + next.processed,
+      processed_count: cumulativeProcessed,
+      records_processed: cumulativeProcessed,
       has_more: next.hasMore,
       last_error: null,
       last_error_at: null,
@@ -11056,8 +11187,6 @@ async function continueCreatorSyncAll(
 
     if (next.stage === "completed" || !next.hasMore) {
       await completeSyncRunState(supabase, syncRun.id, {
-        status: "success",
-        completed_at: new Date().toISOString(),
         current_stage: "completed",
         has_more: false,
         cursor: null
@@ -11068,19 +11197,25 @@ async function continueCreatorSyncAll(
         creatorId,
         stage: currentStage,
         cursor,
+        batchSize: next.recordsRead,
+        itemsProcessedThisInvocation: next.processed,
+        cumulativeProcessed,
         providerRequests: next.providerRequests,
         databaseRequests: budget.estimate().databaseRequests,
-        recordsRead: next.recordsRead,
-        recordsWritten: next.processed,
+        estimatedSubrequests: next.providerRequests + budget.estimate().databaseRequests,
+        hasMore: false,
         elapsedMs: Date.now() - batchStarted
       });
       return {
         syncRunId: syncRun.id,
-        status: "completed",
+        status: "success",
         stage: "completed",
-        processed: updated.records_processed ?? 0,
+        current_stage: "completed",
+        processed: cumulativeProcessed,
+        processed_count: cumulativeProcessed,
         nextCursor: null,
-        hasMore: false
+        hasMore: false,
+        has_more: false
       };
     }
 
@@ -11089,30 +11224,51 @@ async function continueCreatorSyncAll(
       creatorId,
       stage: currentStage,
       cursor,
+      batchSize: next.recordsRead,
+      itemsProcessedThisInvocation: next.processed,
+      cumulativeProcessed,
       providerRequests: next.providerRequests,
       databaseRequests: budget.estimate().databaseRequests,
-      recordsRead: next.recordsRead,
-      recordsWritten: next.processed,
+      estimatedSubrequests: next.providerRequests + budget.estimate().databaseRequests,
+      hasMore: next.hasMore,
       elapsedMs: Date.now() - batchStarted
     });
+    const stage = next.stage;
     return {
       syncRunId: syncRun.id,
-      status: "in_progress",
-      stage: next.stage,
-      processed: updated.records_processed ?? 0,
+      status: "running",
+      stage,
+      current_stage: stage,
+      processed: cumulativeProcessed,
+      processed_count: cumulativeProcessed,
       nextCursor: next.nextCursor,
-      hasMore: next.hasMore
+      hasMore: next.hasMore,
+      has_more: next.hasMore
     };
   } catch (error) {
+    // Persist the latest resumable state before returning the error.
     const normalized = normalizeSyncAllError(error, currentStage, cursor, budget.estimate(), source);
-    await updateSyncRunFailure(supabase, syncRun.id, normalized.message, normalized.code);
+    await updateSyncRunState(supabase, syncRun.id, {
+      last_error: `${normalized.code}:${normalized.message}`,
+      last_error_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    });
+    budget.reserveDatabase();
+
+    // For fatal errors (not budget exceeded), mark the run as failed.
+    if (normalized.code !== "sync_request_budget_exceeded") {
+      await updateSyncRunFailure(supabase, syncRun.id, normalized.message, normalized.code);
+    }
     return {
       syncRunId: syncRun.id,
       status: "failed",
       stage: currentStage,
+      current_stage: currentStage,
       processed: syncRun.records_processed ?? 0,
+      processed_count: syncRun.processed_count ?? 0,
       nextCursor: cursor,
-      hasMore: false,
+      hasMore: true,
+      has_more: true,
       error: normalized
     };
   }
@@ -11133,6 +11289,7 @@ async function executeBoundedSyncAllStage(
   }
   if (stage === "completed") return { stage: "completed", nextCursor: null, hasMore: false, processed: 0, recordsRead: 0, providerRequests: 0 };
   if (stage === "profile") {
+    if (!budget.canReserveProvider()) return { stage: "profile", nextCursor: cursor, hasMore: true, processed: 0, recordsRead: 0, providerRequests: 0 };
     budget.reserveProvider();
     const profile = await client.getCreatorProfile(accountId).catch((error) => {
       throw new ApiError(502, error instanceof Error ? error.message : "Provider fetch failed", "provider_fetch_failed");
@@ -11142,6 +11299,7 @@ async function executeBoundedSyncAllStage(
     return { stage: "stats", nextCursor: 0, hasMore: true, processed: 1, recordsRead: 1, providerRequests: 1 };
   }
   if (stage === "stats") {
+    if (!budget.canReserveProvider()) return { stage: "stats", nextCursor: cursor, hasMore: true, processed: 0, recordsRead: 0, providerRequests: 0 };
     budget.reserveProvider();
     const stats = await client.getStatsOverview(accountId).catch((error) => {
       throw new ApiError(502, error instanceof Error ? error.message : "Provider fetch failed", "provider_fetch_failed");
@@ -11151,8 +11309,10 @@ async function executeBoundedSyncAllStage(
     return { stage: "subscribers", nextCursor: 0, hasMore: true, processed: 1, recordsRead: 1, providerRequests: 1 };
   }
   if (stage === "subscribers") {
+    if (!budget.canReserveProvider()) return { stage: "subscribers", nextCursor: cursor, hasMore: true, processed: 0, recordsRead: 0, providerRequests: 0 };
     budget.reserveProvider();
-    const subscribers = await client.getSubscribers(accountId, { limit: 100, offset: cursor }).catch((error) => {
+    const requestLimit = Math.min(BATCH_RECORDS_LIMIT, 100);
+    const subscribers = await client.getSubscribers(accountId, { limit: requestLimit, offset: cursor }).catch((error) => {
       throw new ApiError(502, error instanceof Error ? error.message : "Provider fetch failed", "provider_fetch_failed");
     });
     const list = normalizeSubscribers(subscribers);
@@ -11163,11 +11323,13 @@ async function executeBoundedSyncAllStage(
     if (nextCursor <= cursor) {
       throw new ApiError(409, "Pagination cursor repeated", "pagination_cursor_repeated", { stage, cursor, nextCursor });
     }
-    const hasMore = list.length === 100;
-    return { stage: hasMore ? "subscribers" : "chats", nextCursor, hasMore, processed: list.length, recordsRead: list.length, providerRequests: 1 };
+    const hasMoreList = list.length >= requestLimit;
+    return { stage: hasMoreList ? "subscribers" : "chats", nextCursor, hasMore: hasMoreList, processed: list.length, recordsRead: list.length, providerRequests: 1 };
   }
+  if (!budget.canReserveProvider()) return { stage: "chats", nextCursor: cursor, hasMore: true, processed: 0, recordsRead: 0, providerRequests: 0 };
   budget.reserveProvider();
-  const chats = await client.getChats(accountId, { limit: 100, offset: cursor }).catch((error) => {
+  const requestLimit = Math.min(BATCH_RECORDS_LIMIT, 100);
+  const chats = await client.getChats(accountId, { limit: requestLimit, offset: cursor }).catch((error) => {
     throw new ApiError(502, error instanceof Error ? error.message : "Provider fetch failed", "provider_fetch_failed");
   });
   const list = normalizeChats(chats);
@@ -11180,8 +11342,8 @@ async function executeBoundedSyncAllStage(
   if (nextCursor <= cursor) {
     throw new ApiError(409, "Pagination cursor repeated", "pagination_cursor_repeated", { stage, cursor, nextCursor });
   }
-  const hasMore = list.length === 100;
-  return { stage: hasMore ? "chats" : "completed", nextCursor: hasMore ? nextCursor : null, hasMore, processed: list.length, recordsRead: list.length, providerRequests: 1 };
+  const hasMoreList = list.length >= requestLimit;
+  return { stage: hasMoreList ? "chats" : "completed", nextCursor: hasMoreList ? nextCursor : null, hasMore: hasMoreList, processed: list.length, recordsRead: list.length, providerRequests: 1 };
 }
 
 async function loadActiveSyncRun(supabase: SupabaseClient, creatorId: string) {
@@ -11215,7 +11377,8 @@ async function updateSyncRunFailure(supabase: SupabaseClient, runId: string, err
       completed_at: new Date().toISOString(),
       error_message: errorMessage,
       last_error: `${code}:${errorMessage}`,
-      last_error_at: new Date().toISOString()
+      last_error_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
     })
     .eq("id", runId);
 }
@@ -11239,13 +11402,30 @@ function logSyncBatch(input: {
   creatorId: string;
   stage: SyncAllStage;
   cursor: number;
+  batchSize: number;
+  itemsProcessedThisInvocation: number;
+  cumulativeProcessed: number;
   providerRequests: number;
   databaseRequests: number;
-  recordsRead: number;
-  recordsWritten: number;
+  estimatedSubrequests: number;
+  hasMore: boolean;
   elapsedMs: number;
 }) {
-  console.log(JSON.stringify({ event: "sync_all_batch", totalEstimatedSubrequests: input.providerRequests + input.databaseRequests, ...input }));
+  console.log(JSON.stringify({
+    event: "sync_all_batch",
+    syncRunId: input.syncRunId,
+    creatorId: input.creatorId,
+    stage: input.stage,
+    cursor: input.cursor,
+    batchSize: input.batchSize,
+    itemsProcessedThisInvocation: input.itemsProcessedThisInvocation,
+    cumulativeProcessed: input.cumulativeProcessed,
+    providerRequests: input.providerRequests,
+    databaseRequests: input.databaseRequests,
+    estimatedSubrequests: input.estimatedSubrequests,
+    hasMore: input.hasMore,
+    elapsedMs: input.elapsedMs
+  }));
 }
 
 async function executeSync(
@@ -13389,3 +13569,17 @@ function isDuplicateKeyError(error: unknown) {
   const message = typeof error.message === "string" ? error.message.toLowerCase() : "";
   return error.code === "23505" || message.includes("duplicate key value violates unique constraint");
 }
+
+// ── Sync-all internals re-exported for production-equivalent e2e drivers ──
+// Cloudflare Worker modules accept additional named exports alongside the
+// default `fetch` handler. The runtime ignores these, but a Node-based test
+// driver can `import { startOrContinueCreatorSyncAll, ... } from "../worker"`
+// and exercise the exact production pipeline against in-memory mocks. The set
+// is intentionally minimal: only what the sync-all driver needs.
+export {
+  startOrContinueCreatorSyncAll,
+  continueCreatorSyncAll,
+  SyncRequestBudget,
+  ApiError,
+  logSyncBatch
+};
